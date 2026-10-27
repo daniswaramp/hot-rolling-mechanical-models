@@ -29,7 +29,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BUILD = "2026-10-27 · table groups + padded logo"
+BUILD = "2026-10-27 · capability tab · header clearance"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -156,7 +156,7 @@ def inject_css():
 
 html, body, [class*="css"] { font-family: 'Inter', system-ui, sans-serif; }
 .stApp { background: #ffffff; }
-.block-container { max-width: 1320px; padding-top: 2.2rem; padding-bottom: 3rem; }
+.block-container { max-width: 1320px; padding-top: 4.4rem; padding-bottom: 3rem; }
 
 h1, h2, h3, h4 { font-family: 'Inter', sans-serif; color: #0b0d10; letter-spacing: -.02em; }
 
@@ -244,6 +244,10 @@ div[data-testid="stSidebar"] h2 { font-size: 13px; letter-spacing: .1em; text-tr
 
 div[data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; font-size: 22px; }
 #MainMenu, footer, [data-testid="stAppDeployButton"] { display: none; }
+/* Streamlit's app header is absolutely positioned and 60px tall; without this the first line of
+   content sits underneath it and looks clipped. */
+[data-testid="stHeader"] { background: transparent; }
+.kicker { line-height: 1.6; }
 [data-testid="stExpandSidebarButton"] { display: flex !important; visibility: visible !important; }
 </style>
 """, unsafe_allow_html=True)
