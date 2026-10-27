@@ -406,6 +406,102 @@ def linear_families(mill):
         return {}
 
 
+@st.cache_resource(show_spinner=False)
+def nlr_models(mill):
+    path = os.path.join(os.path.dirname(APP_DIR), "models", "nlr_models.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh).get(mill, {})
+    except (OSError, ValueError):
+        return {}
+
+
+def nlr_terms(mill, raw):
+    """The five terms the fitted NLR equations use, from the raw schedule."""
+    thick = max(float(raw.get("Plate_T_mm" if mill == "Plate" else "Coil_T_mm", 16.0)), 1.0)
+    slab = max(float(raw.get("Slab_T_mm" if mill == "Plate" else "TB_Thick_mm", 218.0)), 1.0)
+    headers = float(raw.get("ACC_Laminar_Header", 0.0)) if mill == "Plate" else 0.0
+    c, mn, si = (float(raw.get(k, d)) for k, d in (("Chem_C", .16), ("Chem_Mn", .9), ("Chem_Si", .2)))
+    cu, ni = float(raw.get("Chem_Cu", .02)), float(raw.get("Chem_Ni", .02))
+    cr, mo, v = float(raw.get("Chem_Cr", .02)), float(raw.get("Chem_Mo", .01)), float(raw.get("Chem_V", .005))
+    return {
+        "t": thick,
+        "sigma_ss": 32 * mn + 84 * si + 38 * cu + 32 * ni,
+        "CE": c + mn / 6 + (cr + mo + v) / 5 + (ni + cu) / 15,
+        "CoolingRate": (headers + 0.1) / thick ** 1.5,
+        "eps_total": float(np.log(slab / thick)),
+    }
+
+
+def predict_nlr(mill, raw):
+    table = nlr_models(mill)
+    values = nlr_terms(mill, raw)
+    out = {}
+    for key, model in table.items():
+        value = model["intercept"]
+        for term in model["terms"]:
+            value += term["coef"] * values.get(term["var"], 0.0) ** term["power"]
+        out[key] = {"pred": float(value), "r2": float(model.get("r2", 0.0))}
+    return out
+
+
+@st.cache_resource(show_spinner=False)
+def boosted_index(mill):
+    """Which boosted artifacts exist for this route, and their holdout scores."""
+    base = os.path.join(os.path.dirname(APP_DIR), "models", "boosted_out")
+    try:
+        with open(os.path.join(base, "boosted_metrics.json"), "r", encoding="utf-8") as fh:
+            metrics = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    index = {}
+    for key, meta in metrics.items():
+        m, target, family = key.split("|")
+        if m == mill:
+            index.setdefault(family, {})[target] = meta
+    return index
+
+
+@st.cache_resource(show_spinner=False)
+def boosted_model(mill, family, target):
+    base = os.path.join(os.path.dirname(APP_DIR), "models", "boosted_out")
+    stem = os.path.join(base, f"{mill}_{target}_{family}")
+    try:
+        if family == "xgb":
+            from xgboost import XGBRegressor
+            model = XGBRegressor()
+            model.load_model(stem + ".ubj")
+        elif family == "lgbm":
+            import lightgbm as lgb
+            model = lgb.Booster(model_file=stem + ".txt")
+        else:
+            from catboost import CatBoostRegressor
+            model = CatBoostRegressor()
+            model.load_model(stem + ".cbm")
+        return model
+    except Exception:
+        return None
+
+
+def predict_boosted(mill, raw, family):
+    index = boosted_index(mill)
+    if family not in index:
+        return {}
+    frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
+    X = feature_matrix(mill, frame)
+    out = {}
+    for target, meta in index[family].items():
+        model = boosted_model(mill, family, target)
+        if model is None:
+            continue
+        cols = meta.get("features") or list(X.columns)
+        aligned = pd.DataFrame({c: (X[c] if c in X.columns else 0.0) for c in cols},
+                               index=X.index).to_numpy(dtype=float)
+        out[target] = {"pred": float(np.asarray(model.predict(aligned)).ravel()[0]),
+                       "r2": float(meta.get("r2", 0.0))}
+    return out
+
+
 def predict_linear(mill, raw, family):
     """OLS or Ridge from the committed coefficients, on the same frame the ensemble sees."""
     table = linear_families(mill)
@@ -516,11 +612,23 @@ def schedule_inputs(mill):
 def view_simulator(mill, raw):
     section("predicted properties")
     preds = predict_one(mill, raw)
-    chosen = st.multiselect("Also fit", ["OLS", "Ridge"], default=[],
+    options = ["OLS", "Ridge", "NLR"]
+    for family in ("xgb", "lgbm", "cat"):
+        if family in boosted_index(mill):
+            options.append({"xgb": "XGBoost", "lgbm": "LightGBM", "cat": "CatBoost"}[family])
+    chosen = st.multiselect("Also fit", options, default=[],
                             help="Linear refits committed as coefficients. The ensemble stays the "
                                  "shipped artifact; these show what a readable equation says.",
                             key=f"fams_{mill}")
-    extras = {f: predict_linear(mill, raw, f) for f in chosen}
+    extras = {}
+    for family in chosen:
+        if family in ("OLS", "Ridge"):
+            extras[family] = predict_linear(mill, raw, family)
+        elif family == "NLR":
+            extras[family] = predict_nlr(mill, raw)
+        else:
+            key = {"XGBoost": "xgb", "LightGBM": "lgbm", "CatBoost": "cat"}[family]
+            extras[family] = predict_boosted(mill, raw, key)
     targets_table(mill, preds, extras)
     if extras:
         st.caption("Holdout R² of the added families, averaged over targets: "
