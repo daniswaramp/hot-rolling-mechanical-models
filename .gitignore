@@ -7,3 +7,4 @@ streamlit.log
 Plate/csv/
 HRC/csv/
 app/training_log.json
+.commandcode/
