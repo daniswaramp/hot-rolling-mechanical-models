@@ -155,16 +155,19 @@ def inject_css():
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-html, body, .stApp, .stMarkdown, p, span, label, div[data-baseweb="tab"], div[data-testid="stSidebar"], .stSelectbox label, .stNumberInput label {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+html, body, [class*="css"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+.stApp, .stMarkdown, p, label, div[data-baseweb="tab"], div[data-testid="stSidebar"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 code, pre, .mono, [data-testid="stMetricValue"] {
-    font-family: 'JetBrains Mono', monospace !important;
+    font-family: 'JetBrains Mono', monospace;
 }
 .stApp { background: #ffffff; }
 .block-container { max-width: 1320px; padding-top: 4.4rem; padding-bottom: 3rem; }
 
-h1, h2, h3, h4 { font-family: 'Inter', sans-serif !important; color: #0b0d10; letter-spacing: -.02em; }
+h1, h2, h3, h4 { font-family: 'Inter', sans-serif; color: #0b0d10; letter-spacing: -.02em; }
 
 .kicker { font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: #1746c8; font-weight: 600; line-height: 1.6; }
 .title { font-size: 30px; line-height: 1.15; font-weight: 600; margin: .35rem 0 .5rem; letter-spacing: -.03em; color: #0b0d10; }
