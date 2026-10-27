@@ -523,9 +523,21 @@ def view_retrain(mill):
         return
 
     y = pd.to_numeric(frame[target], errors="coerce")
-    ok = y.notna()
+    # production logs carry decimal shifts; a single 41,000 MPa entry would wreck the R2
+    lowered = target.lower()
+    if "pct" in lowered or lowered.startswith("el"):
+        lo, hi = 0.0, 70.0
+    elif "impact" in lowered or "charpy" in lowered:
+        lo, hi = 0.0, 500.0
+    else:
+        lo, hi = 100.0, 1500.0
+    plausible = y.between(lo, hi)
+    dropped = int((y.notna() & ~plausible).sum())
+    ok = y.notna() & plausible
+    if dropped:
+        st.caption(f"{dropped} measured values fell outside {lo:g}–{hi:g} and were dropped.")
     if ok.sum() < 120:
-        st.error(f"Only {int(ok.sum())} measured rows — too few to hold anything out.")
+        st.error(f"Only {int(ok.sum())} usable measured rows — too few to hold anything out.")
         return
     X = feature_matrix(mill, frame.loc[ok]).fillna(0.0)
     y = y[ok]
