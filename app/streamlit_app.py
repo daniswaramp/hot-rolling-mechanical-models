@@ -4,11 +4,11 @@ Heavy plate and Steckel mill coil, one model layer. Sections: simulator, respons
 retrain, diagnostics.
 """
 
-import hashlib
 import io
 import json
 import os
 import sys
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 INK = "#0b0d10"
 MUTED = "#6b7280"
 HAIR = "#e5e7eb"
@@ -501,6 +502,47 @@ def view_batch(mill):
                        type="primary")
 
 
+def retrain_template_bytes(mill):
+    """Headers the retrain tab expects: an id, the mill's raw inputs, and one measured column."""
+    cols = ["Heat_ID"] + [row[1] for row in SPECS[mill]] + ["Measured"]
+    row = {"Heat_ID": "HEAT-0001", "Measured": ""}
+    row.update({row_[1]: row_[6] for row_ in SPECS[mill]})
+    buf = io.BytesIO()
+    pd.DataFrame([row], columns=cols).to_excel(buf, index=False, engine="openpyxl")
+    return buf.getvalue()
+
+
+def read_log():
+    try:
+        with open(LOG_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return []
+
+
+def append_log(entry):
+    rows = read_log()
+    rows.append(entry)
+    try:
+        with open(LOG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh, indent=1)
+    except Exception:
+        pass          # a read-only container still keeps the session copy
+    st.session_state["train_log"] = rows
+    return rows
+
+
+def log_table(rows, key):
+    if not rows:
+        st.caption("No refits logged yet on this instance.")
+        return
+    frame = pd.DataFrame(rows[-12:])[["when", "mill", "target", "model", "rows", "melts",
+                                      "r2", "rmse", "split"]]
+    st.dataframe(frame.iloc[::-1], width="stretch", hide_index=True)
+    st.download_button("Download training log (CSV)", frame.to_csv(index=False).encode(),
+                       file_name="training_log.csv", key=f"logdl_{key}")
+
+
 def view_retrain(mill):
     section("refit from your own sheet")
     st.markdown('<div class="note">The shipped models are baked artefacts, not incrementally trainable — '
@@ -508,8 +550,15 @@ def view_retrain(mill):
                 'instead is honest: it refits a fresh model for one property from your sheet, using '
                 'the same feature module and a melt-grouped holdout.</div>', unsafe_allow_html=True)
 
-    up = st.file_uploader("Sheet with a measured property column", type=["xlsx", "csv"], key=f"rt_{mill}")
+    tl, tr = st.columns([1, 3], vertical_alignment="bottom")
+    tl.download_button("Retrain template .xlsx", retrain_template_bytes(mill),
+                       file_name=f"{mill.lower()}_retrain_template.xlsx", width="stretch",
+                       key=f"rttpl_{mill}")
+    up = tr.file_uploader("Sheet with a measured property column", type=["xlsx", "csv"],
+                          key=f"rt_{mill}", label_visibility="collapsed")
     if up is None:
+        section("refit log")
+        log_table(st.session_state.get("train_log") or read_log(), mill)
         return
     frame = pd.read_excel(up) if up.name.lower().endswith("xlsx") else pd.read_csv(up)
     candidates = [c for c in frame.columns if c not in spec_map(mill)]
@@ -582,8 +631,16 @@ def view_retrain(mill):
     buf = io.BytesIO()
     joblib.dump({"model": model, "feature_names": list(X.columns), "target": target,
                  "mill": mill, "holdout_r2": float(r2)}, buf)
+    append_log({"when": datetime.now().strftime("%Y-%m-%d %H:%M"), "mill": mill,
+                "target": target, "model": family, "rows": int(len(y)),
+                "melts": int(groups.nunique()), "r2": round(float(r2), 3),
+                "rmse": round(float(rmse), 2), "split": split_note})
+
     st.download_button("Download fitted model (.joblib)", buf.getvalue(),
-                       file_name=f"{mill.lower()}_{target}_refit.joblib")
+                       file_name=f"{mill.lower()}_{target}_refit.joblib", type="primary")
+
+    section("refit log")
+    log_table(read_log(), mill)
 
 
 def view_diagnostics(mill):
