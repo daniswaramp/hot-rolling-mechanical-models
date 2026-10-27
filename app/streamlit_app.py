@@ -29,6 +29,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+BUILD = "2026-10-27 · table groups + padded logo"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -121,6 +122,25 @@ TARGET_LABEL = {
 
 
 # ----------------------------------------------------------------------------- styling
+@st.cache_resource(show_spinner=False)
+def boot_check():
+    """Score both routes once at start-up; the sidebar reports the truth instead of a blank cell."""
+    report = {}
+    for mill in ("Plate", "HRC"):
+        try:
+            raw = defaults(mill)
+            if mill == "Plate":
+                raw["Rolling_Type"] = "AR"
+            out = predict_one(mill, raw)
+            scored = {k: v["pred"] for k, v in out.items()}
+            good = sum(1 for v in scored.values() if np.isfinite(v))
+            first_error = next((v["error"] for v in out.values() if v.get("error")), "")
+            report[mill] = (good, len(scored), first_error)
+        except Exception as exc:
+            report[mill] = (0, 0, f"{type(exc).__name__}: {exc}")
+    return report
+
+
 def logo_uri():
     try:
         with open(LOGO_PATH, "rb") as fh:
@@ -806,6 +826,15 @@ def main():
         raw = schedule_inputs(mill)
         st.markdown("---")
         st.caption("Data: Gunung Raja Paksi production logs. Models private; app public.")
+        with st.expander("build and self-test", expanded=False):
+            st.caption(f"build {BUILD}")
+            for name, (good, total, err) in boot_check().items():
+                if total and good == total:
+                    st.caption(f"{name}: {good}/{total} targets scoring")
+                else:
+                    st.caption(f"{name}: {good}/{total} targets scoring")
+                    if err:
+                        st.code(err[:300], language="text")
 
     header(mill, len(TARGET_LABEL[mill]))
 
