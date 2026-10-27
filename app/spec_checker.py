@@ -487,7 +487,8 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
     }
 
 
-def evaluate_all(spec, grade, thickness, raw_inputs, predictions, physical_indicators, mill):
+def evaluate_all(spec=None, grade=None, thickness=None, raw_inputs=None, predictions=None,
+                 physical_indicators=None, mill="Plate"):
     """Perform complete end-to-end specification validation."""
     matched_row, match_info = find_matching_spec_row(spec, grade, thickness)
     if matched_row is None:
@@ -517,3 +518,8 @@ def evaluate_all(spec, grade, thickness, raw_inputs, predictions, physical_indic
         "chemistry": chem_eval,
         "mechanical": mech_eval,
     }
+
+
+def spec_available():
+    """The GRP standard workbook is not published with this repository."""
+    return os.path.exists(SPEC_FILE_PATH)

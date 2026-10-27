@@ -191,6 +191,8 @@ table.ut tr.grp td { text-align: left; font-size: 9.6px; letter-spacing: .12em; 
 table.ut tbody tr:first-child.grp td { padding-top: .55rem; }
 table.ut td.name { text-align: left; font-size: 13.5px; font-weight: 500; color: #0b0d10; }
 table.ut td.val { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; color: #0b0d10; }
+table.ut td.alt.muted { color: #c3c7cd; }
+table.ut td.alt { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #4b5563; }
 table.ut td.val .unit { font-size: 10px; color: #9ca3af; margin-left: .25rem; font-weight: 400; }
 table.ut td.rng { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #4b5563; }
 table.ut td.sub { font-size: 12px; color: #6b7280; }
@@ -394,11 +396,47 @@ def physical(raw, mill):
     return ml.compute_physical_indicators(merged, mill)
 
 
-def targets_table(mill, predictions):
+@st.cache_resource(show_spinner=False)
+def linear_families(mill):
+    path = os.path.join(os.path.dirname(APP_DIR), "models", "linear_families.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh).get(mill, {})
+    except (OSError, ValueError):
+        return {}
+
+
+def predict_linear(mill, raw, family):
+    """OLS or Ridge from the committed coefficients, on the same frame the ensemble sees."""
+    table = linear_families(mill)
+    if not table:
+        return {}
+    frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
+    X = feature_matrix(mill, frame)
+    row = X.iloc[0]
+    out = {}
+    for key, spec in table.items():
+        values = np.array([float(row.get(c, 0.0) or 0.0) for c in spec["features"]])
+        if family == "OLS":
+            value = spec["ols"]["intercept"] + float(np.dot(spec["ols"]["coef"], values))
+            r2 = spec["ols"]["r2"]
+        else:
+            z = (values - np.array(spec["ridge"]["scaler_mean"])) / np.array(spec["ridge"]["scaler_scale"])
+            value = spec["ridge"]["intercept"] + float(np.dot(spec["ridge"]["coef"], z))
+            r2 = spec["ridge"]["r2"]
+        if r2 < 0.15:
+            continue          # a linear fit this bad is not an answer, it is noise in MPa
+        out[key] = {"pred": float(value), "r2": float(r2)}
+    return out
+
+
+def targets_table(mill, predictions, extras=None):
     """Grouped property card: clean readable name, tabular numbers, model holdout uncertainty."""
+    extras = extras or {}
     rows, total = [], 0
+    span = 4 + len(extras)
     for group, keys in TARGET_GROUPS[mill]:
-        rows.append(f'<tr class="grp"><td colspan="4">{group}</td></tr>')
+        rows.append(f'<tr class="grp"><td colspan="{span}">{group}</td></tr>')
         for key in keys:
             res = predictions.get(key)
             if not res:
@@ -406,16 +444,21 @@ def targets_table(mill, predictions):
             total += 1
             label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
             rmse_tol = ml.TARGET_CONFIG[mill][key]["tol"]
+            extra_cells = "".join(
+                (f'<td class="alt">{extras[name][key]["pred"]:.1f}</td>'
+                 if key in extras[name] else '<td class="alt muted">—</td>')
+                for name in extras)
             rows.append(f"""<tr>
               <td class="name">{label}</td>
               <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
               <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
               <td class="sub" style="font-family:'JetBrains Mono';">±{rmse_tol:g}&nbsp;{unit}</td>
+              {extra_cells}
             </tr>""")
     st.markdown(
         '<div class="card"><table class="ut">'
         '<thead><tr><th>property</th><th>predicted</th><th>95% bootstrap interval</th>'
-        '<th>holdout uncertainty</th></tr></thead><tbody>'
+        '<th>holdout uncertainty</th>' + "".join(f"<th>{n}</th>" for n in extras) + '</tr></thead><tbody>'
         + "".join(rows) +
         f'</tbody></table><div class="foot">{total} certified properties scored through {mill} model layer.</div></div>',
         unsafe_allow_html=True,
@@ -476,7 +519,17 @@ def schedule_inputs(mill):
 def view_simulator(mill, raw):
     section("predicted properties")
     preds = predict_one(mill, raw)
-    targets_table(mill, preds)
+    chosen = st.multiselect("Also fit", ["OLS", "Ridge"], default=[],
+                            help="Linear refits committed as coefficients. The ensemble stays the "
+                                 "shipped artifact; these show what a readable equation says.",
+                            key=f"fams_{mill}")
+    extras = {f: predict_linear(mill, raw, f) for f in chosen}
+    targets_table(mill, preds, extras)
+    if extras:
+        st.caption("Holdout R² of the added families, averaged over targets: "
+                   + ", ".join(f"{f} {np.nanmean([v['r2'] for v in extras[f].values()]):.2f}"
+                               for f in extras)
+                   + ". Where a linear fit is hopeless the number says so.")
 
     broken = {k: v["error"] for k, v in preds.items() if v.get("error")}
     if broken:
