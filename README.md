@@ -68,9 +68,19 @@ not, and that decides whether properties scatter.
 
 ## The app
 
-`app/streamlit_app.py` serves both routes: a live simulator, a 2D thermal operating-window explorer,
-batch CSV/Excel scoring, and a diagnostics page with leaderboards, intervals and the physical
-formulas.
+`app/streamlit_app.py` serves both routes in five sections:
+
+- **Simulator** — one schedule in, every certified property out, each with the interval its bootstrap
+  report implies, plus the physical indicators (Pickering σ_ss, CE, Pcm, Ar3, true strain) and where
+  the finishing temperature sits relative to Ar3.
+- **Response surface** — pick any two schedule variables and a property; 2D contour or rotated 3D
+  surface. Every node is a full pass through the mill's own feature module, and the current schedule
+  is marked on the field.
+- **Batch** — download a template, fill one row per plate or coil, upload, download the scored sheet.
+- **Retrain** — refit a fresh model for one measured property from your own sheet, on a melt-grouped
+  holdout. The shipped stacking ensembles are baked artefacts, not incrementally trainable, so this
+  trains new models rather than pretending to fine-tune the old ones.
+- **Diagnostics** — leaderboards, 95 % bootstrap intervals and the physical formulas as stored.
 
 ```cmd
 pip install -r requirements.txt
