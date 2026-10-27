@@ -429,7 +429,7 @@ def header(mill, n_targets):
              "Steckel coil · rougher, reversing Steckel mill, runout table, downcoiler")
     st.markdown(f"""
 <div class="kicker">Dual-mill property platform</div>
-<div class="title">Mechanical properties, before the heat is rolled</div>
+<div class="title">Specification Limit & Mechanical Models</div>
 <div class="lede">{route}. {n_targets} certified properties, fitted on melt-grouped holdouts so
 sister plates never straddle the split.</div>
 """, unsafe_allow_html=True)
