@@ -190,7 +190,32 @@ table.mt tbody tr:first-child.grp td { padding-top: .2rem; }
        vertical-align: 1px; }
 .dot.ok { background: #1f7a4d; }
 .dot.bad { background: #b45309; }
-.verdict { font-size: 12.5px; color: #4b5563; margin-top: .55rem; }
+.card { border: 1px solid #e5e7eb; border-radius: 3px; padding: .2rem 1.1rem 0; background: #fff; }
+table.pt { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+table.pt th { font-size: 9.6px; letter-spacing: .13em; text-transform: uppercase; color: #6b7280;
+              font-weight: 600; text-align: right; padding: .75rem 0 .55rem;
+              border-bottom: 1px solid #e5e7eb; }
+table.pt th:first-child { text-align: left; }
+table.pt td { padding: .68rem 0; border-bottom: 1px solid #f2f3f5; text-align: right;
+              vertical-align: middle; }
+table.pt tbody tr:last-child td { border-bottom: 0; }
+table.pt td.name { text-align: left; font-size: 14px; font-weight: 500; color: #0b0d10; }
+table.pt td.name .key { display: block; font-family: 'JetBrains Mono', monospace; font-size: 9.6px;
+                        letter-spacing: .06em; color: #9ca3af; font-weight: 400; margin-top: .1rem; }
+table.pt td.val { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 600;
+                  color: #0b0d10; }
+table.pt td.val .unit { font-size: 10px; color: #9ca3af; margin-left: .25rem; font-weight: 400; }
+table.pt td.rng { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: #6b7280; }
+table.pt td.tol { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: #9ca3af; }
+table.pt td.flag { width: 18px; padding-left: .4rem; }
+table.pt tr.grp td { text-align: left; font-size: 9.4px; letter-spacing: .15em; text-transform: uppercase;
+                     color: #1746c8; font-weight: 600; padding: 1rem 0 .3rem;
+                     border-bottom: 1px solid #e5e7eb; }
+table.pt tbody tr:first-child.grp td { padding-top: .55rem; }
+.card .foot { border-top: 1px solid #e5e7eb; padding: .6rem 0 .7rem; font-size: 12px; color: #4b5563; }
+.dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
+.dot.ok { background: #1f7a4d; }
+.dot.bad { background: #b45309; }
 .tag { display: inline-block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
        padding: .18rem .45rem; border: 1px solid #d1d5db; color: #374151; border-radius: 2px; }
 
@@ -379,7 +404,7 @@ def physical(raw, mill):
 
 
 def targets_table(mill, predictions):
-    """One row per property, grouped by condition, status carried by a dot instead of a badge."""
+    """Grouped property card: readable name over its key, tabular numbers, one verdict line."""
     rows, inside_count, total = [], 0, 0
     for group, keys in TARGET_GROUPS[mill]:
         rows.append(f'<tr class="grp"><td colspan="4">{group}</td></tr>')
@@ -389,29 +414,27 @@ def targets_table(mill, predictions):
                 continue
             total += 1
             label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
-            mid = (res["ci_low"] + res["ci_high"]) / 2
             tolerance = ml.TARGET_CONFIG[mill][key]["tol"]
-            inside = abs(res["pred"] - mid) <= tolerance and np.isfinite(res["pred"])
+            mid = (res["ci_low"] + res["ci_high"]) / 2
+            inside = np.isfinite(res["pred"]) and abs(res["pred"] - mid) <= tolerance
             inside_count += 1 if inside else 0
-            dot = "ok" if inside else "bad"
             rows.append(f"""<tr>
-              <td><span class="dot {dot}"></span>{label}
-                <span class="key">{key}</span></td>
-              <td class="mono">{res['pred']:.1f}<span class="unit">{unit}</span></td>
-              <td class="mono ci">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
-              <td class="mono ci">±{tolerance:g}&nbsp;{unit}</td>
+              <td class="name">{label}<span class="key">{key}</span></td>
+              <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
+              <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
+              <td class="tol">±{tolerance:g}&nbsp;{unit}</td>
+              <td class="flag"><span class="dot {'ok' if inside else 'bad'}"></span></td>
             </tr>""")
+    verdict = ("Everything sits inside its tolerance band." if total and inside_count == total
+               else f"{total - inside_count} of {total} outside tolerance.")
     st.markdown(
-        """<table class="mt"><thead><tr><th>property</th><th class="mono">predicted</th>
-        <th class="mono">95% interval</th><th class="mono">tolerance</th></tr></thead>
-        <tbody>""" + "".join(rows) + "</tbody></table>",
+        '<div class="card"><table class="pt">'
+        '<thead><tr><th>property</th><th>predicted</th><th>95% interval</th>'
+        '<th>tolerance</th><th></th></tr></thead><tbody>'
+        + "".join(rows) +
+        f'</tbody></table><div class="foot">{verdict}</div></div>',
         unsafe_allow_html=True,
     )
-    if total:
-        verdict = (f"All {total} properties sit inside the tolerance band." if inside_count == total
-                   else f"{inside_count} of {total} inside tolerance — "
-                        f"{total - inside_count} outside, flagged above.")
-        st.markdown(f'<div class="verdict">{verdict}</div>', unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------- header
@@ -419,10 +442,7 @@ def header(mill, n_targets):
     route = ("Heavy plate · rougher, finisher, laminar ACC, optional normalising"
              if mill == "Plate" else
              "Steckel coil · rougher, reversing Steckel mill, runout table, downcoiler")
-    uri = logo_uri()
-    mark = f'<img src="{uri}" alt="Gunung Raja Paksi">' if uri else ""
     st.markdown(f"""
-<div class="head">{mark}</div>
 <div class="kicker">Dual-mill property platform</div>
 <div class="title">Mechanical properties, before the heat is rolled</div>
 <div class="lede">{route}. {n_targets} certified properties, fitted on melt-grouped holdouts so
@@ -563,6 +583,120 @@ def template_bytes(mill):
     buf = io.BytesIO()
     blank.to_excel(buf, index=False, engine="openpyxl")
     return buf.getvalue()
+
+
+def view_capability(mill, raw):
+    """Cp/Cpk over a band the user defines, resampled through the mill's feature module."""
+    section("process capability")
+    st.markdown('<div class="note">Set the specification limits, then say how far two or three '
+                'inputs may drift. The app resamples that band, scores every point and reports '
+                'capability — Cp and Cpk on the predicted distribution, not on a single schedule.'
+                '</div>', unsafe_allow_html=True)
+
+    keys = list(TARGET_LABEL[mill])
+    c1, c2 = st.columns([1.4, 1.6], vertical_alignment="bottom")
+    target = c1.selectbox("Property", keys, format_func=lambda k: TARGET_LABEL[mill][k][0],
+                          key=f"cp_t_{mill}")
+    unit = TARGET_LABEL[mill][target][1]
+    tolerance = ml.TARGET_CONFIG[mill][target]["tol"]
+    base = predict_one(mill, raw)[target]["pred"]
+
+    c3, c4, c5 = st.columns([1, 1, 1], vertical_alignment="bottom")
+    lsl = c3.number_input(f"LSL [{unit}]", value=float(round(base - tolerance, 1)), step=1.0,
+                          key=f"cp_l_{mill}")
+    usl = c4.number_input(f"USL [{unit}]", value=float(round(base + tolerance, 1)), step=1.0,
+                          key=f"cp_u_{mill}")
+    samples = c5.slider("Samples", 200, 3000, 800, step=100, key=f"cp_n_{mill}")
+
+    section("inputs allowed to drift")
+    order = [k for k in SURFACE[mill] if k in spec_map(mill)]
+    c6, c7 = st.columns([2, 3], vertical_alignment="bottom")
+    chosen = c6.multiselect("Variables", order, default=order[:2], max_selections=3,
+                            format_func=lambda k: spec_map(mill)[k][2], key=f"cp_v_{mill}")
+    if not chosen:
+        st.caption("Pick at least one variable.")
+        return
+    bands = {}
+    cols = st.columns(len(chosen) or 1)
+    for col, key in zip(cols, chosen):
+        row = spec_map(mill)[key]
+        span = (row[5] - row[4]) / 12.0
+        band_unit = "°C" if row[3] == "C" else row[3]
+        bands[key] = col.number_input(f"± band, {row[2]} [{band_unit}]", min_value=0.0,
+                                      value=float(round(span, 3)), step=float(row[7]),
+                                      key=f"cp_b_{mill}_{key}")
+
+    if not st.button("Run capability study", type="primary", key=f"cp_go_{mill}"):
+        st.caption(f"Reference schedule predicts {base:.1f} {unit}; limits default to ±{tolerance:g}.")
+        return
+
+    rng = np.random.default_rng(42)
+    frame = pd.DataFrame([dict(raw) for _ in range(samples)])
+    for key, band in bands.items():
+        centre = float(raw[key])
+        frame[key] = rng.uniform(centre - band, centre + band, samples)
+    scored = score_frame(mill, frame)[target].values
+    scored = scored[np.isfinite(scored)]
+    if scored.size < 30:
+        st.error("Too few scoring points came back — widen the band or change property.")
+        return
+
+    mean, sd = float(np.mean(scored)), float(np.std(scored, ddof=1))
+    cp = (usl - lsl) / (6 * sd) if sd > 0 else float("inf")
+    cpk = min(usl - mean, mean - lsl) / (3 * sd) if sd > 0 else float("inf")
+    oos = float(np.mean((scored < lsl) | (scored > usl)) * 100)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Cp", f"{cp:.2f}")
+    m2.metric("Cpk", f"{cpk:.2f}")
+    m3.metric("mean", f"{mean:.1f} {unit}")
+    m4.metric("out of spec", f"{oos:.1f} %")
+    st.caption(f"σ {sd:.2f} {unit} · {scored.size} scored points · band "
+               + ", ".join(f"{spec_map(mill)[k][2]} ±{bands[k]:g}" for k in bands))
+
+    fig = go.Figure(go.Histogram(x=scored, nbinsx=45, marker_color="#c9d7f5",
+                                 marker_line_color="#1746c8", marker_line_width=.6))
+    for value, label in ((lsl, "LSL"), (usl, "USL")):
+        fig.add_vline(x=value, line_color="#b45309", line_width=1.4, line_dash="dash",
+                      annotation_text=label, annotation_position="top", annotation_font_size=10)
+    fig.add_vline(x=mean, line_color="#111418", line_width=1)
+    fig.update_layout(height=290, margin=dict(l=10, r=10, t=20, b=10), plot_bgcolor="white",
+                      paper_bgcolor="white", bargap=.04,
+                      xaxis=dict(title=f"{TARGET_LABEL[mill][target][0]} [{unit}]", showline=True,
+                                 linecolor=HAIR, gridcolor="#f4f5f7"),
+                      yaxis=dict(title="count", showline=False, gridcolor="#f4f5f7"))
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+
+    section("linear band per input")
+    st.caption("Property against each drifting input, with a fitted line and a ±3σ band on the "
+               "scatter. A steep slope here is the band width that costs you capability.")
+    for key in bands:
+        x = pd.to_numeric(frame[key], errors="coerce").values
+        ok = np.isfinite(x)
+        slope, intercept = np.polyfit(x[ok], scored[ok], 1)
+        resid_sd = float(np.std(scored[ok] - (slope * x[ok] + intercept)))
+        grid = np.linspace(x[ok].min(), x[ok].max(), 60)
+        band_fig = go.Figure()
+        band_fig.add_trace(go.Scatter(x=x[ok], y=scored[ok], mode="markers",
+                                      marker=dict(size=4, color="#9db4e8", opacity=.45),
+                                      name="sampled"))
+        band_fig.add_trace(go.Scatter(x=grid, y=slope * grid + intercept, mode="lines",
+                                      line=dict(color="#1746c8", width=1.6), name="fit"))
+        band_fig.add_trace(go.Scatter(x=np.concatenate([grid, grid[::-1]]),
+                                      y=np.concatenate([slope * grid + intercept + 3 * resid_sd,
+                                                        (slope * grid + intercept - 3 * resid_sd)[::-1]]),
+                                      fill="toself", fillcolor="rgba(23,70,200,.10)",
+                                      line=dict(width=0), name="±3σ"))
+        for value, label in ((lsl, "LSL"), (usl, "USL")):
+            band_fig.add_hline(y=value, line_color="#b45309", line_width=1, line_dash="dash")
+        band_fig.update_layout(height=250, margin=dict(l=10, r=10, t=26, b=10), plot_bgcolor="white",
+                               paper_bgcolor="white", showlegend=False,
+                               title=dict(text=f"{spec_map(mill)[key][2]} — {slope:+.2f} "
+                                               f"{unit} per {spec_map(mill)[key][3]}",
+                                          font=dict(size=11), x=0),
+                               xaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                               yaxis=dict(title=unit, showline=False, gridcolor="#f4f5f7"))
+        st.plotly_chart(band_fig, width="stretch", config={"displayModeBar": False})
 
 
 def view_batch(mill):
@@ -818,6 +952,11 @@ def view_diagnostics(mill):
 # ----------------------------------------------------------------------------- main
 def main():
     inject_css()
+    if os.path.exists(LOGO_PATH):
+        try:
+            st.logo(LOGO_PATH, size="large")
+        except Exception:
+            pass
     with st.sidebar:
         st.markdown("### Route")
         mill = st.radio("Route", ["Plate", "HRC"], horizontal=True, label_visibility="collapsed",
@@ -838,18 +977,21 @@ def main():
 
     header(mill, len(TARGET_LABEL[mill]))
 
-    tabs = st.tabs(["Simulator", "Response surface", "Batch", "Retrain", "Diagnostics", "About"])
+    tabs = st.tabs(["Simulator", "Response surface", "Capability", "Batch", "Retrain",
+                    "Diagnostics", "About"])
     with tabs[0]:
         view_simulator(mill, raw)
     with tabs[1]:
         view_surface(mill, raw)
     with tabs[2]:
-        view_batch(mill)
+        view_capability(mill, raw)
     with tabs[3]:
-        view_retrain(mill)
+        view_batch(mill)
     with tabs[4]:
-        view_diagnostics(mill)
+        view_retrain(mill)
     with tabs[5]:
+        view_diagnostics(mill)
+    with tabs[6]:
         view_about()
 
 
