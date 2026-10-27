@@ -21,6 +21,7 @@ app/spec_checker.py       standard lookup, tier matching, chemical & mechanical 
 specification-list/       SPECIFICATION LIST.xlsx (GRP.ST.QA.09 standard reference matrix)
 assets/grp.png            header mark, padded so nothing clips
 notebooks/                dual-route storytelling notebook
+.devcontainer/            dev container environment configuration
 ```
 
 `script/ml/` is a library, not a CLI: `config`, `data_prep`, `features`, `models`, `evaluate`. The
@@ -56,6 +57,17 @@ notebooks and the app both import it. Training runs live in the notebooks.
    Diagnostics share a single crisp HTML table style (`table.ut`), avoiding redundant columns
    (such as the old static tolerance/tautological dot), broken colspans, or unstyled mixed-unit
    dataframes.
+10. **Do not override `span` typography in CSS.** Streamlit expander toggles and icon buttons use
+   Material Symbols ligatures (`_arrow_right`, `_arrow_down`) rendered inside `<span>` tags. Overriding
+   `span { font-family: ... !important; }` prevents the ligature from rendering as a glyph, resulting
+   in raw text overlapping headers.
+11. **Sidebar schedule inputs must strictly match active model features.** Plate schedule inputs in
+   `PLATE_SPEC` feed `Plate/script/ml/features.py`. Non-model variables (`Slab_W_mm`, `FM_Number_of_Passes`,
+   `FM_Last_Pass_Thick`, `Chem_B`) were removed to avoid confusing operators. Finishing drafting is wired
+   directly via `FM_Last_Pass_Drafting`.
+12. **App title and legal status.** The deployed platform title is `"Specification Limit & Mechanical Models"`.
+   The About tab disclaimer states independent exploratory study status without commercial endorsement
+   from PT Gunung Raja Paksi Tbk.
 
 ## Environment
 
