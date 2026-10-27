@@ -452,17 +452,14 @@ def targets_table(mill, predictions, extras=None):
               <td class="name">{label}</td>
               <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
               <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
-              <td class="sub" style="font-family:'JetBrains Mono';">±{rmse_tol:g}&nbsp;{unit}</td>
-              {extra_cells}
-            </tr>""")
-    st.markdown(
-        '<div class="card"><table class="ut">'
-        '<thead><tr><th>property</th><th>predicted</th><th>95% bootstrap interval</th>'
-        '<th>holdout uncertainty</th>' + "".join(f"<th>{n}</th>" for n in extras) + '</tr></thead><tbody>'
-        + "".join(rows) +
-        f'</tbody></table><div class="foot">{total} certified properties scored through {mill} model layer.</div></div>',
-        unsafe_allow_html=True,
-    )
+              <td class="sub" style="font-family:'JetBrains Mono';">±{rmse_tol:g}&nbsp;{unit}</td>{extra_cells}</tr>""")
+    html = ("<div class=\"card\"><table class=\"ut\"><thead><tr><th>property</th><th>ensemble</th>"
+            "<th>95% bootstrap interval</th><th>holdout uncertainty</th>"
+            + "".join(f"<th>{n}</th>" for n in extras)
+            + "</tr></thead><tbody>" + "".join(rows)
+            + f"</tbody></table><div class=\"foot\">{total} certified properties scored through "
+              f"{mill} model layer.</div></div>")
+    st.markdown("".join(line.strip() for line in html.splitlines()), unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------- header
