@@ -102,6 +102,14 @@ SURFACE = {
             "Chem_C", "Chem_Mn", "Chem_Nb"],
 }
 
+TARGET_GROUPS = {
+    "Plate": [("as rolled", ["YS_BN", "TS_BN", "EL_BN"]),
+              ("after normalising", ["YS_AN", "TS_AN", "EL_AN"]),
+              ("toughness, Charpy V-notch", ["Impact_0C", "Impact_m20C", "Impact_m40C"]),
+              ("through thickness", ["Z_Test"])],
+    "HRC": [("as rolled", ["YS_BN", "TS_BN", "EL_BN"])],
+}
+
 TARGET_LABEL = {
     "Plate": {"YS_BN": ("yield, as rolled", "MPa"), "TS_BN": ("tensile, as rolled", "MPa"),
               "EL_BN": ("elongation, as rolled", "%"), "YS_AN": ("yield, normalised", "MPa"),
@@ -153,6 +161,16 @@ table.mt td:first-child { text-align: left; font-weight: 500; }
 table.mt td.mono, table.mt th.mono { font-family: 'JetBrains Mono', monospace; }
 table.mt td .unit { color: #9ca3af; font-size: 11px; margin-left: .25rem; }
 table.mt td .ci { color: #6b7280; font-size: 11.5px; }
+table.mt td .key { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #9ca3af;
+                   margin-left: .45rem; }
+table.mt tr.grp td { padding: 1.15rem 0 .35rem; font-size: 9.8px; letter-spacing: .14em;
+                     text-transform: uppercase; color: #6b7280; border-bottom: 1px solid #e5e7eb; }
+table.mt tbody tr:first-child.grp td { padding-top: .2rem; }
+.dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; margin-right: .5rem;
+       vertical-align: 1px; }
+.dot.ok { background: #1f7a4d; }
+.dot.bad { background: #b45309; }
+.verdict { font-size: 12.5px; color: #4b5563; margin-top: .55rem; }
 .tag { display: inline-block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
        padding: .18rem .45rem; border: 1px solid #d1d5db; color: #374151; border-radius: 2px; }
 
@@ -162,7 +180,7 @@ table.mt td .ci { color: #6b7280; font-size: 11.5px; }
 .facts span { display: block; font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
               color: #6b7280; margin-bottom: .28rem; font-family: 'Inter', 'Segoe UI', sans-serif; }
 
-.head img { height: 30px; display: block; margin-bottom: .9rem; }
+.head img { height: 40px; width: auto; display: block; margin-bottom: .8rem; object-fit: contain; }
 .facts b { font-family: 'JetBrains Mono', 'Segoe UI', 'DejaVu Sans', monospace; font-size: 16px;
             font-weight: 600; }
 .facts em { font-style: normal; font-size: 10.5px; color: #9ca3af; margin-left: .2rem; }
@@ -341,24 +359,39 @@ def physical(raw, mill):
 
 
 def targets_table(mill, predictions):
-    rows = []
-    for key, res in predictions.items():
-        label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
-        tol = ml.TARGET_CONFIG[mill][key]["tol"]
-        inside = abs(res["pred"] - (res["ci_low"] + res["ci_high"]) / 2) <= tol
-        rows.append(f"""<tr>
-          <td>{label}<span style="color:#9ca3af;font-size:11px;margin-left:.4rem">{key}</span></td>
-          <td class="mono">{res['pred']:.1f}<span class="unit">{unit}</span></td>
-          <td class="mono ci">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
-          <td class="mono ci">±{tol:g}{'&nbsp;' + unit if unit in ('MPa', 'J', '%') else ''}</td>
-          <td><span class="tag">{'in tolerance' if inside else 'review'}</span></td>
-        </tr>""")
+    """One row per property, grouped by condition, status carried by a dot instead of a badge."""
+    rows, inside_count, total = [], 0, 0
+    for group, keys in TARGET_GROUPS[mill]:
+        rows.append(f'<tr class="grp"><td colspan="4">{group}</td></tr>')
+        for key in keys:
+            res = predictions.get(key)
+            if not res:
+                continue
+            total += 1
+            label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
+            mid = (res["ci_low"] + res["ci_high"]) / 2
+            tolerance = ml.TARGET_CONFIG[mill][key]["tol"]
+            inside = abs(res["pred"] - mid) <= tolerance and np.isfinite(res["pred"])
+            inside_count += 1 if inside else 0
+            dot = "ok" if inside else "bad"
+            rows.append(f"""<tr>
+              <td><span class="dot {dot}"></span>{label}
+                <span class="key">{key}</span></td>
+              <td class="mono">{res['pred']:.1f}<span class="unit">{unit}</span></td>
+              <td class="mono ci">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
+              <td class="mono ci">±{tolerance:g}&nbsp;{unit}</td>
+            </tr>""")
     st.markdown(
         """<table class="mt"><thead><tr><th>property</th><th class="mono">predicted</th>
-        <th class="mono">95% interval</th><th class="mono">tolerance</th><th></th></tr></thead>
+        <th class="mono">95% interval</th><th class="mono">tolerance</th></tr></thead>
         <tbody>""" + "".join(rows) + "</tbody></table>",
         unsafe_allow_html=True,
     )
+    if total:
+        verdict = (f"All {total} properties sit inside the tolerance band." if inside_count == total
+                   else f"{inside_count} of {total} inside tolerance — "
+                        f"{total - inside_count} outside, flagged above.")
+        st.markdown(f'<div class="verdict">{verdict}</div>', unsafe_allow_html=True)
 
 
 # ----------------------------------------------------------------------------- header
