@@ -21,6 +21,7 @@ if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
 import model_loader as ml  # noqa: E402
+import spec_checker as sc  # noqa: E402
 
 st.set_page_config(
     page_title="Dual-mill property platform",
@@ -29,7 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BUILD = "2026-10-27 · capability tab · header clearance"
+BUILD = "2026-10-27 · specification check · UI & table overhaul"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -152,102 +153,86 @@ def logo_uri():
 def inject_css():
     st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-html, body, [class*="css"] { font-family: 'Inter', system-ui, sans-serif; }
+html, body, .stApp, .stMarkdown, p, span, label, div[data-baseweb="tab"], div[data-testid="stSidebar"], .stSelectbox label, .stNumberInput label {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+}
+code, pre, .mono, [data-testid="stMetricValue"] {
+    font-family: 'JetBrains Mono', monospace !important;
+}
 .stApp { background: #ffffff; }
 .block-container { max-width: 1320px; padding-top: 4.4rem; padding-bottom: 3rem; }
 
-h1, h2, h3, h4 { font-family: 'Inter', sans-serif; color: #0b0d10; letter-spacing: -.02em; }
+h1, h2, h3, h4 { font-family: 'Inter', sans-serif !important; color: #0b0d10; letter-spacing: -.02em; }
 
-.kicker { font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
-          color: #1746c8; font-weight: 600; }
-.title { font-size: 31px; line-height: 1.1; font-weight: 600; margin: .35rem 0 .5rem;
-         letter-spacing: -.035em; }
-.lede { font-size: 15px; color: #414750; max-width: 62ch; line-height: 1.55; }
+.kicker { font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: #1746c8; font-weight: 600; line-height: 1.6; }
+.title { font-size: 30px; line-height: 1.15; font-weight: 600; margin: .35rem 0 .5rem; letter-spacing: -.03em; color: #0b0d10; }
+.lede { font-size: 14.5px; color: #4b5563; max-width: 64ch; line-height: 1.55; }
 .hair { height: 1px; background: #e5e7eb; margin: 1.4rem 0 1.2rem; border: 0; }
 
-.section { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #4b5563;
+.section { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #4b5563;
            font-weight: 600; display: flex; align-items: center; gap: .7rem; margin-bottom: .7rem; }
 .section i { flex: 1; height: 1px; background: #e5e7eb; display: block; }
 
-table.mt { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-table.mt th { font-size: 10.2px; letter-spacing: .1em; text-transform: uppercase; color: #4b5563;
-              font-weight: 600; text-align: right; padding: 0 0 .55rem; border-bottom: 1px solid #e5e7eb; }
-table.mt th:first-child { text-align: left; }
-table.mt td { font-size: 14px; padding: .62rem 0; border-bottom: 1px solid #f1f2f4; text-align: right;
-              color: #0b0d10; }
-table.mt td:first-child { text-align: left; font-weight: 500; }
-table.mt td.mono, table.mt th.mono { font-family: 'JetBrains Mono', monospace; }
-table.mt td .unit { color: #9ca3af; font-size: 11px; margin-left: .25rem; }
-table.mt td .ci { color: #6b7280; font-size: 11.5px; }
-table.mt td .key { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #9ca3af;
-                   margin-left: .45rem; }
-table.mt tr.grp td { padding: 1.15rem 0 .35rem; font-size: 9.8px; letter-spacing: .14em;
-                     text-transform: uppercase; color: #6b7280; border-bottom: 1px solid #e5e7eb; }
-table.mt tbody tr:first-child.grp td { padding-top: .2rem; }
-.dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; margin-right: .5rem;
-       vertical-align: 1px; }
-.dot.ok { background: #1f7a4d; }
-.dot.bad { background: #b45309; }
-.card { border: 1px solid #e5e7eb; border-radius: 3px; padding: .2rem 1.1rem 0; background: #fff; }
-table.pt { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-table.pt th { font-size: 9.6px; letter-spacing: .13em; text-transform: uppercase; color: #6b7280;
-              font-weight: 600; text-align: right; padding: .75rem 0 .55rem;
-              border-bottom: 1px solid #e5e7eb; }
-table.pt th:first-child { text-align: left; }
-table.pt td { padding: .68rem 0; border-bottom: 1px solid #f2f3f5; text-align: right;
-              vertical-align: middle; }
-table.pt tbody tr:last-child td { border-bottom: 0; }
-table.pt td.name { text-align: left; font-size: 14px; font-weight: 500; color: #0b0d10; }
-table.pt td.name .key { display: block; font-family: 'JetBrains Mono', monospace; font-size: 9.6px;
-                        letter-spacing: .06em; color: #9ca3af; font-weight: 400; margin-top: .1rem; }
-table.pt td.val { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 600;
-                  color: #0b0d10; }
-table.pt td.val .unit { font-size: 10px; color: #9ca3af; margin-left: .25rem; font-weight: 400; }
-table.pt td.rng { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: #6b7280; }
-table.pt td.tol { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: #9ca3af; }
-table.pt td.flag { width: 18px; padding-left: .4rem; }
-table.pt tr.grp td { text-align: left; font-size: 9.4px; letter-spacing: .15em; text-transform: uppercase;
-                     color: #1746c8; font-weight: 600; padding: 1rem 0 .3rem;
-                     border-bottom: 1px solid #e5e7eb; }
-table.pt tbody tr:first-child.grp td { padding-top: .55rem; }
-.card .foot { border-top: 1px solid #e5e7eb; padding: .6rem 0 .7rem; font-size: 12px; color: #4b5563; }
-.dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
-.dot.ok { background: #1f7a4d; }
-.dot.bad { background: #b45309; }
-.tag { display: inline-block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
-       padding: .18rem .45rem; border: 1px solid #d1d5db; color: #374151; border-radius: 2px; }
+.card { border: 1px solid #e5e7eb; border-radius: 6px; padding: 0 1rem; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
+table.ut { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+table.ut th { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #6b7280;
+              font-weight: 600; text-align: right; padding: .75rem .5rem .55rem;
+              border-bottom: 1px solid #e5e7eb; background: #fafbfc; }
+table.ut th:first-child { text-align: left; padding-left: .25rem; }
+table.ut td { padding: .65rem .5rem; border-bottom: 1px solid #f1f2f4; text-align: right;
+              vertical-align: middle; font-size: 13.5px; color: #0b0d10; }
+table.ut td:first-child { text-align: left; padding-left: .25rem; font-weight: 500; }
+table.ut tbody tr:hover td { background: #f8fafc; }
+table.ut tbody tr:last-child td { border-bottom: 0; }
+table.ut tr.grp td { text-align: left; font-size: 9.6px; letter-spacing: .12em; text-transform: uppercase;
+                     color: #1746c8; font-weight: 600; padding: .9rem .25rem .35rem;
+                     border-bottom: 1px solid #e5e7eb; background: #ffffff; }
+table.ut tbody tr:first-child.grp td { padding-top: .55rem; }
+table.ut td.name { text-align: left; font-size: 13.5px; font-weight: 500; color: #0b0d10; }
+table.ut td.val { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; color: #0b0d10; }
+table.ut td.val .unit { font-size: 10px; color: #9ca3af; margin-left: .25rem; font-weight: 400; }
+table.ut td.rng { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #4b5563; }
+table.ut td.sub { font-size: 12px; color: #6b7280; }
+table.ut td.flag { width: 110px; text-align: center; }
+.card .foot { border-top: 1px solid #e5e7eb; padding: .6rem 0 .7rem; font-size: 11.5px; color: #6b7280; }
 
-.facts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; border: 1px solid #e5e7eb; }
-.facts div { padding: .8rem .9rem; border-right: 1px solid #e5e7eb; }
+.pill { display: inline-flex; align-items: center; justify-content: center; font-size: 10px;
+        letter-spacing: .05em; font-weight: 600; text-transform: uppercase; padding: .2rem .55rem;
+        border-radius: 4px; white-space: nowrap; line-height: 1.2; }
+.pill.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+.pill.warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+.pill.bad { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.pill.neutral { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
+
+.tag { display: inline-block; font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+       padding: .15rem .4rem; border: 1px solid #e5e7eb; color: #4b5563; border-radius: 3px; }
+
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0;
+         border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; background: #ffffff; }
+.facts div { padding: .75rem 1rem; border-right: 1px solid #e5e7eb; }
 .facts div:last-child { border-right: 0; }
-.facts span { display: block; font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
-              color: #6b7280; margin-bottom: .28rem; font-family: 'Inter', 'Segoe UI', sans-serif; }
+.facts span { display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+              color: #6b7280; margin-bottom: .25rem; font-weight: 500; }
+.facts b { font-family: 'JetBrains Mono', monospace; font-size: 15.5px; font-weight: 600; color: #0b0d10; }
+.facts em { font-style: normal; font-size: 11px; color: #6b7280; margin-left: .25rem; }
 
-.head img { height: 40px; width: auto; display: block; margin-bottom: .8rem; object-fit: contain; }
-.facts b { font-family: 'JetBrains Mono', 'Segoe UI', 'DejaVu Sans', monospace; font-size: 16px;
-            font-weight: 600; }
-.facts em { font-style: normal; font-size: 10.5px; color: #9ca3af; margin-left: .2rem; }
-
-.note { font-size: 12.8px; color: #5b6169; line-height: 1.5; border-left: 2px solid #e5e7eb;
+.note { font-size: 12.5px; color: #4b5563; line-height: 1.5; border-left: 2px solid #e5e7eb;
         padding-left: .7rem; margin-top: .6rem; }
 
 div[data-testid="stSidebar"] { background: #fbfbfc; border-right: 1px solid #e5e7eb; }
 div[data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
 div[data-testid="stSidebar"] h2 { font-size: 13px; letter-spacing: .1em; text-transform: uppercase; }
 
-.stTabs [data-baseweb="tab-list"] { gap: 1.4rem; border-bottom: 1px solid #e5e7eb; }
-.stTabs [data-baseweb="tab"] { font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
-                               color: #6b7280; padding: .5rem 0; }
+.stTabs [data-baseweb="tab-list"] { gap: 1.2rem; border-bottom: 1px solid #e5e7eb; }
+.stTabs [data-baseweb="tab"] { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase;
+                               color: #6b7280; padding: .5rem 0; font-weight: 500; }
 .stTabs [aria-selected="true"] { color: #0b0d10 !important; font-weight: 600; }
 
 div[data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; font-size: 22px; }
 #MainMenu, footer, [data-testid="stAppDeployButton"] { display: none; }
-/* Streamlit's app header is absolutely positioned and 60px tall; without this the first line of
-   content sits underneath it and looks clipped. */
 [data-testid="stHeader"] { background: transparent; }
-.kicker { line-height: 1.6; }
 [data-testid="stExpandSidebarButton"] { display: flex !important; visibility: visible !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -408,8 +393,8 @@ def physical(raw, mill):
 
 
 def targets_table(mill, predictions):
-    """Grouped property card: readable name over its key, tabular numbers, one verdict line."""
-    rows, inside_count, total = [], 0, 0
+    """Grouped property card: clean readable name, tabular numbers, model holdout uncertainty."""
+    rows, total = [], 0
     for group, keys in TARGET_GROUPS[mill]:
         rows.append(f'<tr class="grp"><td colspan="4">{group}</td></tr>')
         for key in keys:
@@ -418,25 +403,19 @@ def targets_table(mill, predictions):
                 continue
             total += 1
             label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
-            tolerance = ml.TARGET_CONFIG[mill][key]["tol"]
-            mid = (res["ci_low"] + res["ci_high"]) / 2
-            inside = np.isfinite(res["pred"]) and abs(res["pred"] - mid) <= tolerance
-            inside_count += 1 if inside else 0
+            rmse_tol = ml.TARGET_CONFIG[mill][key]["tol"]
             rows.append(f"""<tr>
-              <td class="name">{label}<span class="key">{key}</span></td>
+              <td class="name">{label}</td>
               <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
               <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
-              <td class="tol">±{tolerance:g}&nbsp;{unit}</td>
-              <td class="flag"><span class="dot {'ok' if inside else 'bad'}"></span></td>
+              <td class="sub" style="font-family:'JetBrains Mono';">±{rmse_tol:g}&nbsp;{unit}</td>
             </tr>""")
-    verdict = ("Everything sits inside its tolerance band." if total and inside_count == total
-               else f"{total - inside_count} of {total} outside tolerance.")
     st.markdown(
-        '<div class="card"><table class="pt">'
-        '<thead><tr><th>property</th><th>predicted</th><th>95% interval</th>'
-        '<th>tolerance</th><th></th></tr></thead><tbody>'
+        '<div class="card"><table class="ut">'
+        '<thead><tr><th>property</th><th>predicted</th><th>95% bootstrap interval</th>'
+        '<th>holdout uncertainty</th></tr></thead><tbody>'
         + "".join(rows) +
-        f'</tbody></table><div class="foot">{verdict}</div></div>',
+        f'</tbody></table><div class="foot">{total} certified properties scored through {mill} model layer.</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -521,6 +500,175 @@ def view_simulator(mill, raw):
     st.markdown(f'<div class="note">Finishing at {finish:.0f} °C sits {margin:+.0f} K above Ar3 '
                 f'({ind["ar3"]:.0f} °C). Below zero the last passes are intercritical, which is where '
                 f'properties start to scatter.</div>', unsafe_allow_html=True)
+
+
+def view_spec_check(mill, raw):
+    specs = sc.get_available_specs()
+    if not specs:
+        st.error("No specifications found in specification-list/SPECIFICATION LIST.xlsx")
+        return
+
+    # Choose smart defaults
+    default_spec = "ASTM A 572 (21e1)" if mill == "Plate" else "JIS G 3101 (2022)"
+    if default_spec not in specs:
+        default_spec = "ASTM A 36 (2019)" if "ASTM A 36 (2019)" in specs else specs[0]
+    spec_idx = specs.index(default_spec) if default_spec in specs else 0
+
+    c1, c2, c3 = st.columns([2.5, 1.8, 1.7], vertical_alignment="bottom")
+    chosen_spec = c1.selectbox("Specification Standard", specs, index=spec_idx, key=f"sc_spec_{mill}")
+
+    grades = sc.get_available_grades(chosen_spec)
+    default_grade = "50" if "50" in grades else (grades[0] if grades else "-")
+    grade_idx = grades.index(default_grade) if default_grade in grades else 0
+    chosen_grade = c2.selectbox("Grade", grades, index=grade_idx, key=f"sc_gr_{mill}")
+
+    t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+    thickness = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
+    c3.markdown(f'<div style="padding-bottom:.4rem; font-size:13px; color:#4b5563;">Active Gauge: '
+                f'<b style="font-family:monospace; color:#0b0d10;">{thickness:.1f} mm</b> '
+                f'<span style="font-size:11px; color:#9ca3af;">(from sidebar)</span></div>',
+                unsafe_allow_html=True)
+
+    preds = predict_one(mill, raw)
+    ind = physical(raw, mill)
+    eval_res = sc.evaluate_all(chosen_spec, chosen_grade, thickness, raw, preds, ind, mill)
+
+    if not eval_res["matched"]:
+        st.warning(eval_res.get("message", "No matching tier found."))
+        return
+
+    # Executive Summary Strip
+    gauge_info = eval_res["gauge"]
+    chem_info = eval_res["chemistry"]
+    mech_info = eval_res["mechanical"]
+
+    # Gauge verdict pill
+    g_verdict = gauge_info["verdict"]
+    g_pill_cls = "ok" if g_verdict == "COMPLIANT" else ("warn" if "WARN" in g_verdict else "bad")
+    g_pill_text = "IN SPEC" if g_verdict == "COMPLIANT" else g_verdict.replace("_", " ")
+
+    # Chem verdict pill
+    c_status = chem_info["status"]
+    c_pill_cls = "ok" if c_status == "ALL_PASS" else "bad"
+    c_pill_text = "ALL PASS" if c_status == "ALL_PASS" else f"{chem_info['fail_count']} OUT OF SPEC"
+
+    # Mech verdict pill
+    m_status = mech_info["status"]
+    if m_status == "COMPLIANT":
+        m_pill_cls, m_pill_text = "ok", "COMPLIANT"
+    elif m_status == "MARGINAL_RISK":
+        m_pill_cls, m_pill_text = "warn", "MARGINAL RISK"
+    elif m_status == "NON_COMPLIANT":
+        m_pill_cls, m_pill_text = "bad", "NON-COMPLIANT"
+    else:
+        m_pill_cls, m_pill_text = "neutral", "NO REQ SPECIFIED"
+
+    st.markdown('<div style="height:0.8rem"></div>', unsafe_allow_html=True)
+    st.markdown(f"""
+<div class="facts">
+  <div>
+    <span>Specification &amp; Type</span>
+    <b>{chosen_spec}</b><em>Gr {chosen_grade} · {eval_res['spec_type']}</em>
+  </div>
+  <div>
+    <span>Standard Gauge &amp; GRP Limit</span>
+    <b>{thickness:.1f} mm</b><em><span class="pill {g_pill_cls}">{g_pill_text}</span></em>
+  </div>
+  <div>
+    <span>Chemical Composition</span>
+    <b>{chem_info['pass_count']} / {len(chem_info['active_checks'])}</b><em><span class="pill {c_pill_cls}">{c_pill_text}</span></em>
+  </div>
+  <div>
+    <span>Mechanical Decency</span>
+    <b>{mech_info['pass_count']} passed</b><em><span class="pill {m_pill_cls}">{m_pill_text}</span></em>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+    if gauge_info.get("message"):
+        st.markdown(f'<div class="note">{gauge_info["message"]}</div>', unsafe_allow_html=True)
+
+    # 1. Mechanical Decency Table
+    st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
+    section("mechanical properties decency & certification compliance")
+    st.caption(f"Correlates {mill} ML predictions and 95% bootstrap confidence intervals against "
+               f"{chosen_spec} Grade {chosen_grade} requirements. "
+               f"A marginal risk indicates the point prediction passes but the 95% bootstrap bound crosses the limit under process variance.")
+
+    mech_checks = mech_info.get("checks", [])
+    if mech_checks:
+        m_rows = []
+        for chk in mech_checks:
+            verdict = chk["verdict"]
+            v_pill = "ok" if verdict == "COMPLIANT" else ("warn" if verdict == "MARGINAL_RISK" else "bad")
+            v_label = "COMPLIANT" if verdict == "COMPLIANT" else ("MARGINAL RISK" if verdict == "MARGINAL_RISK" else "NON-COMPLIANT")
+            sign = "+" if chk["margin"] >= 0 else ""
+            m_rows.append(f"""<tr>
+              <td class="name">{chk['property']} <span class="sub" style="margin-left:.4rem;">{chk['note']}</span></td>
+              <td class="sub" style="font-weight:600; color:#374151;">{chk['req_label']}</td>
+              <td class="val">{chk['pred']:.1f}<span class="unit">{chk['unit']}</span></td>
+              <td class="rng">{chk['ci_low']:.1f} – {chk['ci_high']:.1f}</td>
+              <td class="val" style="color:{'#065f46' if chk['margin']>=0 else '#991b1b'};">{sign}{chk['margin']:.1f}<span class="unit">{chk['unit']}</span></td>
+              <td class="flag"><span class="pill {v_pill}">{v_label}</span></td>
+            </tr>""")
+        st.markdown(
+            '<div class="card"><table class="ut">'
+            '<thead><tr><th>property</th><th>standard requirement</th><th>predicted</th>'
+            '<th>95% bootstrap interval</th><th>safety margin</th><th>verdict</th></tr></thead><tbody>'
+            + "".join(m_rows) +
+            '</tbody></table></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info(f"No specific mechanical property limits specified for {chosen_spec} Grade {chosen_grade} in standard table.")
+
+    # 2. Chemistry Verification Table
+    st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
+    section("chemical composition verification")
+    st.caption("Active element limits specified for this standard. Trace unconstrained elements are summarized below.")
+
+    active_chem = chem_info.get("active_checks", [])
+    if active_chem:
+        c_rows = []
+        for ac in active_chem:
+            c_status = ac["status"]
+            c_pill = "ok" if c_status == "PASS" else "bad"
+            min_str = f"{ac['min']:.3g} %" if ac['min'] is not None else "—"
+            max_str = f"{ac['max']:.3g} %" if ac['max'] is not None else "—"
+            margin_str = f"{ac['margin']:+.3g} %" if ac['margin'] is not None else "—"
+            c_rows.append(f"""<tr>
+              <td class="name">{ac['label']} <span class="sub" style="margin-left:.3rem;">{ac['notes']}</span></td>
+              <td class="val">{ac['actual']:.3f}<span class="unit">%</span></td>
+              <td class="rng">{min_str}</td>
+              <td class="rng">{max_str}</td>
+              <td class="sub" style="font-family:'JetBrains Mono'; color:{'#065f46' if c_status=='PASS' else '#991b1b'};">{margin_str}</td>
+              <td class="flag"><span class="pill {c_pill}">{c_status}</span></td>
+            </tr>""")
+        st.markdown(
+            '<div class="card"><table class="ut">'
+            '<thead><tr><th>element</th><th>schedule input</th><th>spec min</th><th>spec max</th>'
+            '<th>headroom / margin</th><th>status</th></tr></thead><tbody>'
+            + "".join(c_rows) +
+            '</tbody></table></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("No chemical composition constraints listed for this standard tier.")
+
+    # Unconstrained elements compact summary
+    unconstrained = chem_info.get("unconstrained", [])
+    if unconstrained:
+        uncon_pills = " ".join([f'<span class="tag" style="margin:.15rem .2rem; background:#f9fafb;">{u["label"].split()[0]}: {u["actual"]:.3g}%</span>'
+                                for u in unconstrained])
+        st.markdown(f'<div style="margin-top:.6rem; font-size:12px; color:#6b7280;">Unconstrained trace inputs (no standard limit):<br>{uncon_pills}</div>',
+                    unsafe_allow_html=True)
+
+    # 3. Standard Notes & Footnotes Callout
+    if eval_res.get("notes"):
+        st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
+        section("standard footnotes & technical notes")
+        st.markdown(f'<div class="note" style="border-left-color:#1746c8; background:#fbfcfe; padding:.75rem .9rem; border-radius:0 4px 4px 0;">'
+                    f'<b>Standard Notes (GRP.ST.QA.09):</b><br>{eval_res["notes"]}</div>',
+                    unsafe_allow_html=True)
 
 
 def view_surface(mill, raw):
@@ -919,33 +1067,40 @@ routes actually rolled — outside them the model is extrapolating and should be
 
 
 def view_diagnostics(mill):
-    section("leaderboard")
+    section("model leaderboard & validation performance")
     lb = ml.get_leaderboard_data(mill)
+    ci = ml.get_ci_data(mill)
     if not lb.empty:
-        cols = [c for c in ("Target", "Model", "Val_R2", "Val_RMSE", "Final_Val_R2", "Final_Val_RMSE")
-                if c in lb.columns]
-        st.dataframe(lb[cols].sort_values(cols[2], ascending=False), width="stretch", height=280,
-                     hide_index=True)
+        merged = pd.merge(lb, ci[["Target", "R2_95_CI_Low", "R2_95_CI_High"]], on="Target", how="left")
+        hit_col = "Val_HitRate_20MPa" if "Val_HitRate_20MPa" in merged.columns else "Val_HitRate_Tol"
+        rows = []
+        for _, r in merged.iterrows():
+            tname = r.get("Target_Name", r["Target"])
+            model = str(r.get("Final_Selected_Model", "Ensemble")).replace("_", " ")
+            r2 = r["Final_Val_R2"]
+            r2_ci = f"{r['R2_95_CI_Low']:.3f} – {r['R2_95_CI_High']:.3f}" if pd.notna(r.get("R2_95_CI_Low")) else "—"
+            rmse = f"{r['Final_Val_RMSE']:.2f} {r['Unit']}"
+            hit = f"{r[hit_col]:.1f} %" if hit_col in r and pd.notna(r[hit_col]) else "—"
+            samples = f"{int(r['Samples']):,}" if "Samples" in r and pd.notna(r["Samples"]) else "—"
+            rows.append(f"""<tr>
+              <td class="name">{tname}</td>
+              <td class="sub" style="font-weight:500;">{model}</td>
+              <td class="val">{r2:.3f}</td>
+              <td class="rng">{r2_ci}</td>
+              <td class="sub" style="font-family:'JetBrains Mono';">{rmse}</td>
+              <td class="val" style="color:#1746c8;">{hit}</td>
+              <td class="rng">{samples}</td>
+            </tr>""")
+        st.markdown(
+            '<div class="card"><table class="ut">'
+            '<thead><tr><th>target property</th><th>selected architecture</th><th>holdout r²</th>'
+            '<th>95% bootstrap ci</th><th>holdout rmse</th><th>within tolerance</th><th>test samples</th></tr></thead><tbody>'
+            + "".join(rows) +
+            '</tbody></table><div class="foot">Validation scores evaluated strictly on melt-grouped holdouts (GroupShuffleSplit on Heat_ID).</div></div>',
+            unsafe_allow_html=True,
+        )
     else:
         st.caption("No leaderboard report found.")
-
-    section("95% bootstrap intervals")
-    ci = ml.get_ci_data(mill)
-    if not ci.empty:
-        fig = go.Figure()
-        for row in ci.itertuples():
-            fig.add_trace(go.Scatter(
-                x=[row.R2_95_CI_Low, row.R2_95_CI_High], y=[row.Target, row.Target], mode="lines",
-                line=dict(color=HAIR, width=6), showlegend=False, hoverinfo="skip"))
-            fig.add_trace(go.Scatter(x=[row.Val_R2], y=[row.Target], mode="markers",
-                                     marker=dict(size=9, color=ACCENT), showlegend=False,
-                                     hovertemplate=f"{row.Target}<br>R² {row.Val_R2:.3f}<extra></extra>"))
-        fig.update_layout(height=90 + 32 * len(ci), margin=dict(l=0, r=10, t=10, b=10),
-                          plot_bgcolor="white",
-                          xaxis=dict(title="held-out R²", showline=True, linecolor=HAIR,
-                                     gridcolor="#f1f2f4", range=[0, 1]),
-                          yaxis=dict(showline=False, tickfont=dict(size=10)))
-        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
     section("physical basis, as written")
     formulas = ml.get_nlr_formulas(mill)
@@ -981,21 +1136,23 @@ def main():
 
     header(mill, len(TARGET_LABEL[mill]))
 
-    tabs = st.tabs(["Simulator", "Response surface", "Capability", "Batch", "Retrain",
-                    "Diagnostics", "About"])
+    tabs = st.tabs(["Simulator", "Specification check", "Response surface", "Capability",
+                    "Batch", "Retrain", "Diagnostics", "About"])
     with tabs[0]:
         view_simulator(mill, raw)
     with tabs[1]:
-        view_surface(mill, raw)
+        view_spec_check(mill, raw)
     with tabs[2]:
-        view_capability(mill, raw)
+        view_surface(mill, raw)
     with tabs[3]:
-        view_batch(mill)
+        view_capability(mill, raw)
     with tabs[4]:
-        view_retrain(mill)
+        view_batch(mill)
     with tabs[5]:
-        view_diagnostics(mill)
+        view_retrain(mill)
     with tabs[6]:
+        view_diagnostics(mill)
+    with tabs[7]:
         view_about()
 
 

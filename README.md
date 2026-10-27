@@ -68,11 +68,12 @@ not, and that decides whether properties scatter.
 
 ## The app
 
-`app/streamlit_app.py` serves both routes in five sections:
+`app/streamlit_app.py` serves both routes across eight tabs:
 
 - **Simulator** — one schedule in, every certified property out, each with the interval its bootstrap
   report implies, plus the physical indicators (Pickering σ_ss, CE, Pcm, Ar3, true strain) and where
   the finishing temperature sits relative to Ar3.
+- **Specification Check** — standard compliance engine matching GRP standard sheets (GRP.ST.QA.09). Validates thickness against standard gauge tiers and GRP capability, checks active chemistry elements, and evaluates mechanical property decency against 95% bootstrap intervals.
 - **Response surface** — pick any two schedule variables and a property; 2D contour or rotated 3D
   surface. Every node is a full pass through the mill's own feature module, and the current schedule
   is marked on the field.

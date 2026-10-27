@@ -15,8 +15,10 @@ Two routes, one model layer:
 
 ```text
 Plate/{csv,models,reports,notebooks,script/ml}   HRC/{same}
-app/streamlit_app.py      the deployed app, single file, seven tabs
+app/streamlit_app.py      the deployed app, single file, eight tabs
 app/model_loader.py       artifact loading, feature wiring, physical indicators
+app/spec_checker.py       standard lookup, tier matching, chemical & mechanical decency
+specification-list/       SPECIFICATION LIST.xlsx (GRP.ST.QA.09 standard reference matrix)
 assets/grp.png            header mark, padded so nothing clips
 notebooks/                dual-route storytelling notebook
 ```
@@ -45,6 +47,15 @@ notebooks and the app both import it. Training runs live in the notebooks.
 7. **Streamlit's app header is absolutely positioned, 60 px tall.** Content needs about 4.4 rem of
    container padding or the first line looks clipped. Three separate "logo cropped" reports came from
    this one fact.
+8. **Specification reference matrix (`specification-list/SPECIFICATION LIST.xlsx`) is public reference**,
+   distinct from the git-ignored campaign sheets. `app/spec_checker.py` loads and caches it via
+   `@st.cache_data`. It evaluates thickness against both standard gauge tier and GRP capability
+   (`PROD THICK`), validates active chemistry, and evaluates mechanical property decency against 95%
+   bootstrap confidence intervals.
+9. **Unified white-theme table architecture (`table.ut`).** Simulator, Specification check, and
+   Diagnostics share a single crisp HTML table style (`table.ut`), avoiding redundant columns
+   (such as the old static tolerance/tautological dot), broken colspans, or unstyled mixed-unit
+   dataframes.
 
 ## Environment
 
