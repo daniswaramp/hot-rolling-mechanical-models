@@ -1,0 +1,8 @@
+index,coil_no,column,original_value,cleaned_value,rule
+4354,4.0,YS_BN_MPa,38028.0,380.28,Decimal shift typo correction
+4616,4.0,YS_BN_MPa,27450.0,274.5,Decimal shift typo correction
+5068,78.0,YS_BN_MPa,34067.0,340.67,Decimal shift typo correction
+6348,26.0,YS_BN_MPa,4267.0,426.7,Decimal shift typo correction
+4272,8.0,Coil_T_mm,71.0,7.1,Decimal shift typo correction
+11110,38.0,Coil_T_mm,200.0,20.0,Decimal shift typo correction
+11111,39.0,Coil_T_mm,200.0,20.0,Decimal shift typo correction

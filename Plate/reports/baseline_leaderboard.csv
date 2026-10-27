@@ -1,0 +1,13 @@
+Target,Target_Name,Unit,Model,Train_R2,Val_R2,Train_RMSE,Val_RMSE,Train_MAE,Val_MAE,Val_MAPE_pct,Val_HitRate_20MPa,Train_Samples,Val_Samples
+YS_BN,Yield Strength (Before Normalizing),MPa,OLS,0.895,0.9051,18.94,18.53,13.94,13.94,4.16,77.2,6302,1632
+YS_BN,Yield Strength (Before Normalizing),MPa,NLR,0.8237,0.8171,24.55,25.72,18.1,18.8,5.55,65.1,6302,1632
+YS_BN,Yield Strength (Before Normalizing),MPa,Ridge,0.895,0.9051,18.94,18.53,13.94,13.94,4.17,77.5,6302,1632
+YS_BN,Yield Strength (Before Normalizing),MPa,XGBoost,0.9621,0.9179,11.38,17.24,8.69,12.86,3.82,80.5,6302,1632
+YS_BN,Yield Strength (Before Normalizing),MPa,LightGBM,0.9659,0.917,10.8,17.33,8.08,12.91,3.83,80.6,6302,1632
+YS_BN,Yield Strength (Before Normalizing),MPa,CatBoost,0.9436,0.9202,13.89,16.99,10.56,12.72,3.78,81.4,6302,1632
+TS_BN,Tensile Strength (Before Normalizing),MPa,OLS,0.9139,0.9237,16.75,15.69,11.22,10.51,2.15,86.9,6302,1631
+TS_BN,Tensile Strength (Before Normalizing),MPa,NLR,0.893,0.8985,18.67,18.09,12.65,12.22,2.49,83.2,6302,1631
+TS_BN,Tensile Strength (Before Normalizing),MPa,Ridge,0.9138,0.9237,16.75,15.69,11.22,10.51,2.15,86.7,6302,1631
+TS_BN,Tensile Strength (Before Normalizing),MPa,XGBoost,0.9767,0.9412,8.7,13.77,6.12,9.41,1.92,89.3,6302,1631
+TS_BN,Tensile Strength (Before Normalizing),MPa,LightGBM,0.9786,0.9407,8.34,13.83,5.7,9.49,1.93,89.3,6302,1631
+TS_BN,Tensile Strength (Before Normalizing),MPa,CatBoost,0.9633,0.9421,10.94,13.66,7.57,9.49,1.93,89.5,6302,1631

@@ -1,0 +1,293 @@
+col_idx,category,header,sample_val
+0,PROCESS PLANNING,Year,2024.0
+1,PROCESS PLANNING,Month,1.0
+2,PROCESS PLANNING,Day,1.0
+3,PROCESS PLANNING,Coil No,1.0
+4,PROCESS PLANNING,Rolling Date,2024-01-09
+5,PROCESS PLANNING,Shift,1.0
+6,PROCESS PLANNING,CMP,1.0
+7,PROCESS PLANNING,SM CMP,1.0
+8,COIL IDENTIFICATION,Heat,272774D
+9,COIL IDENTIFICATION,Batch ID,W272774D0
+10,COIL IDENTIFICATION,Duplicate Check,1.0
+11,COIL IDENTIFICATION,SAP Heats,W272774
+12,COIL IDENTIFICATION,Slab No,W272774D
+13,COIL IDENTIFICATION,Slab Grade,
+14,SPECIFICATION,Specification,ASTM A 36
+15,DIMENSION,T,7.7
+16,DIMENSION,W,1200.0
+17,WEIGHT AND YIELD,WT Actual,19360.0
+18,WEIGHT AND YIELD,WT Theoritical,19547.55
+19,WEIGHT AND YIELD,Slab Weight,19745.0
+20,WEIGHT AND YIELD,Yield,99.0
+21,WEIGHT AND YIELD,Yield (Act),98.05013927576601
+22,TB,TB thick,24.8
+23,CROP CUT & SCRAP,Crop Length,200.0
+24,CROP CUT & SCRAP,Crop Loss,0.0
+25,CROP CUT & SCRAP,Crop?,N
+26,CROP CUT & SCRAP,Scrap,0.0
+27,ORDER DETAIL,SO No.,L 2100021776/10
+28,QC REMARKS,QC Remarks,OK
+29,QC REMARKS,Process Remarks,SM.PARTIAL DISCALE.WIDTH GRAFIK TIDAK BACA .CEK LEBAR
+30,QC REMARKS,Balik Plate Reason,
+31,HEAD AND TAIL CUT,Coil Len,
+32,HEAD AND TAIL CUT,HeadCut (m),
+33,HEAD AND TAIL CUT,Tail Cut (m),
+34,HEAD AND TAIL CUT,H / Cut (Wraps),
+35,HEAD AND TAIL CUT,T / Cut (Wraps),
+36,HEAD AND TAIL CUT,Problem Remarks,
+37,Problem Detail,-,
+38,Problem Detail,-,
+39,Problem Detail,-,
+40,CUSTOMER,Customer Name,PT. SUMBER SETAMURNI
+41,ROLLING PASS,Pass Schedule,5.0
+42,ROLLING PASS,Rolling Time,10:14:00
+43,WIDTH (mm) FORMING,Width Aim,
+44,WIDTH (mm) FORMING,Width Head,
+45,WIDTH (mm) FORMING,Width Body,
+46,WIDTH (mm) FORMING,Width Tail,
+47,WIDTH (mm) FORMING,Average,
+48,THICKNESS TOLERANCES,Nominal Thick,7.65
+49,THICKNESS TOLERANCES,Pos Tol,0.15
+50,THICKNESS TOLERANCES,Neg Tol,0.15
+51,THICKNESS TOLERANCES,Carbon Eq.,0.28
+52,OPERATOR CODE,Data Entry,HERU
+53,OPERATOR CODE,Head,SAHTA
+54,OPERATOR CODE,SM Operator,EDI
+55,OPERATOR CODE,Steeering,TRIONO
+56,OPERATOR CODE,UCL Op,YANA
+57,ROLL COOLING & DESCALING,Header,1.0
+58,ROLL COOLING & DESCALING,Entry Press,5.9
+59,ROLL COOLING & DESCALING,Entry Press Bot,7.0
+60,ROLL COOLING & DESCALING,Exit Press,6.4
+61,ROLL COOLING & DESCALING,Exit Press Bot,0.0
+62,ROLL COOLING & DESCALING,No. Pump,3.0
+63,ROLL COOLING & DESCALING,Descaling Flow (m^3/hr),193.0
+64,WORK ROLL,Grinding M/C,H
+65,WORK ROLL,Chock/Set,2.0
+66,WORK ROLL,Top WR,K2210086
+67,WORK ROLL,Top Dia,890.7
+68,WORK ROLL,Bot WR,K22040171
+69,WORK ROLL,Bot Dia,890.8
+70,WORK ROLL,Dia Diff,-0.09999999999990905
+71,WORK ROLL,Crown,0.0
+72,BACK UP ROLL,ChockSet,3
+73,BACK UP ROLL,Top BUR No.,GP90691
+74,BACK UP ROLL,Top BUR Dia.,1486.7
+75,BACK UP ROLL,Bot BUR No.,GP88254
+76,BACK UP ROLL,Bot BUR Dia.,1440.0
+77,TRANSFER TEMP,SM  / T.Bar temp,884.0
+78,CRM,Posisi coil di schedule,
+79,STM Pass Schedule Draft,SM Pass 1 Thick,
+80,STM Pass Schedule Draft,SM Pass 2 Thick,
+81,STM Pass Schedule Draft,SM Pass 3 Thick,
+82,STM Pass Schedule Draft,SM Pass 4 Thick,
+83,STM Pass Schedule Draft,SM Pass 5 Thick,
+84,STM Pass Schedule Draft,SM Pass 7 Thick,
+85,STM Pass Schedule Draft,SM Pass 7 Thick,
+86,STM Pass Speed,SM Pass 1 Speed,
+87,STM Pass Speed,SM Pass 2 Speed,
+88,STM Pass Speed,SM Pass 3 Speed,
+89,STM Pass Speed,SM Pass 4 Speed,
+90,STM Pass Speed,SM Pass 5 Speed,
+91,STM Pass Speed,SM Pass 7 Speed,
+92,STM Pass Speed,SM Pass 7 Speed ( Lass Pass ),
+93,STM Pass Force Body,SM Pass 1 Force Body,
+94,STM Pass Force Body,SM Pass 2 Force Body,
+95,STM Pass Force Body,SM Pass 3 Force Body,
+96,STM Pass Force Body,SM Pass 4 Force Body,
+97,STM Pass Force Body,SM Pass 5 Force Body,
+98,STM Pass Force Body,SM Pass 7 Force Body,
+99,STM Pass Force Body,SM Pass 7 Force Body,
+100,STM Finishing  / Last pass temp,FT head 10m,
+101,STM Finishing  / Last pass temp,FT head 20m,
+102,STM Finishing  / Last pass temp,FT head 30m,
+103,STM Finishing  / Last pass temp,FT head 40m,
+104,STM Finishing  / Last pass temp,FT head 50m,
+105,STM Finishing  / Last pass temp,FT head 70m,
+106,STM Finishing  / Last pass temp,FT head 70m,
+107,STM Finishing  / Last pass temp,FT head 80m,
+108,STM Finishing  / Last pass temp,FT head 90m,
+109,STM Finishing  / Last pass temp,FT head 100m,
+110,STM Finishing  / Last pass temp,FT Body 1,
+111,STM Finishing  / Last pass temp,FT Body 2,
+112,STM Finishing  / Last pass temp,FT Body 3,774.0
+113,STM Finishing  / Last pass temp,FT Body 4,
+114,STM Finishing  / Last pass temp,FT Body 5,
+115,STM Finishing  / Last pass temp,FT Tail 100m,
+116,STM Finishing  / Last pass temp,FT Tail 90m,
+117,STM Finishing  / Last pass temp,FT Tail 80m,
+118,STM Finishing  / Last pass temp,FT Tail 70m,
+119,STM Finishing  / Last pass temp,FT Tail 70m,
+120,STM Finishing  / Last pass temp,FT Tail 50m,
+121,STM Finishing  / Last pass temp,FT Tail 40m,
+122,STM Finishing  / Last pass temp,FT Tail 30m,
+123,STM Finishing  / Last pass temp,FT Tail 20m,
+124,STM Finishing  / Last pass temp,FT Tail 10m,
+125,Top Coiling  temp,Top CT head 10m,
+126,Top Coiling  temp,Top CT head 20m,
+127,Top Coiling  temp,Top CT head 30m,
+128,Top Coiling  temp,Top CT head 40m,
+129,Top Coiling  temp,Top CT head 50m,
+130,Top Coiling  temp,Top CT head 70m,
+131,Top Coiling  temp,Top CT head 70m,
+132,Top Coiling  temp,Top CT head 80m,
+133,Top Coiling  temp,Top CT head 90m,
+134,Top Coiling  temp,Top CT head 100m,
+135,Top Coiling  temp,Top CT Body 1,
+136,Top Coiling  temp,Top CT Body 2,
+137,Top Coiling  temp,Top CT Body 3,600.0
+138,Top Coiling  temp,Top CT Body 4,
+139,Top Coiling  temp,Top CT Body 5,
+140,Top Coiling  temp,Top CT Tail 100m,
+141,Top Coiling  temp,Top CT Tail 90m,
+142,Top Coiling  temp,Top CT Tail 80m,
+143,Top Coiling  temp,Top CT Tail 70m,
+144,Top Coiling  temp,Top CT Tail 70m,
+145,Top Coiling  temp,Top CT Tail 50m,
+146,Top Coiling  temp,Top CT Tail 40m,
+147,Top Coiling  temp,Top CT Tail 30m,
+148,Top Coiling  temp,Top CT Tail 20m,
+149,Top Coiling  temp,Top CT Tail 10m,
+150,Bottom Coiling  temp,Bot CT head 10m,
+151,Bottom Coiling  temp,Bot CT head 20m,
+152,Bottom Coiling  temp,Bot CT head 30m,
+153,Bottom Coiling  temp,Bot CT head 40m,
+154,Bottom Coiling  temp,Bot CT head 50m,
+155,Bottom Coiling  temp,Bot CT head 70m,
+156,Bottom Coiling  temp,Bot CT head 70m,
+157,Bottom Coiling  temp,Bot CT head 80m,
+158,Bottom Coiling  temp,Bot CT head 90m,
+159,Bottom Coiling  temp,Bot CT head 100m,
+160,Bottom Coiling  temp,Bot CT Body 1,
+161,Bottom Coiling  temp,Bot CT Body 2,
+162,Bottom Coiling  temp,Bot CT Body 3,594.0
+163,Bottom Coiling  temp,Bot CT Body 4,
+164,Bottom Coiling  temp,Bot CT Body 5,
+165,Bottom Coiling  temp,Bot CT Tail 100m,
+166,Bottom Coiling  temp,Bot CT Tail 90m,
+167,Bottom Coiling  temp,Bot CT Tail 80m,
+168,Bottom Coiling  temp,Bot CT Tail 70m,
+169,Bottom Coiling  temp,Bot CT Tail 70m,
+170,Bottom Coiling  temp,Bot CT Tail 50m,
+171,Bottom Coiling  temp,Bot CT Tail 40m,
+172,Bottom Coiling  temp,Bot CT Tail 30m,
+173,Bottom Coiling  temp,Bot CT Tail 20m,
+174,Bottom Coiling  temp,Bot CT Tail 10m,
+175,Laminar water temp,Laminar Water,
+176,UCL Data,Pinch roll Gap,
+177,UCL Data,Back WR Gap,
+178,UCL Data,Front WR Gap,
+179,Laminar Top Banks Used,Top Bank 1,
+180,Laminar Top Banks Used,Top Bank 2,
+181,Laminar Top Banks Used,Top Bank 3,
+182,Laminar Top Banks Used,Top Bank 4,
+183,Laminar Top Banks Used,Top Bank 5,
+184,Laminar Top Banks Used,Top Bank 7,
+185,Laminar Top Banks Used,Top Bank 7,
+186,Laminar Top Banks Used,Top Bank 8,
+187,Laminar Bottom Banks Used,Bot Bank 1,
+188,Laminar Bottom Banks Used,Bot Bank 2,
+189,Laminar Bottom Banks Used,Bot Bank 3,
+190,Laminar Bottom Banks Used,Bot Bank 4,
+191,Laminar Bottom Banks Used,Bot Bank 5,
+192,Laminar Bottom Banks Used,Bot Bank 7,
+193,Laminar Bottom Banks Used,Bot Bank 7,
+194,Laminar Bottom Banks Used,Bot Bank 8,
+195,PLM Parameter,PM No. pass,
+196,PLM Parameter,PM Descaling,
+197,PLM Parameter,Flow Last Descale,
+198,PLM Parameter,Run Speed Last Descale,
+199,PLM Parameter,PM Hold Temp,
+200,PLM Parameter,Temp Last Pass Body,
+201,PLM Parameter,SM PASS ( PAKAI ROLL COOLING ENTRY SG ),
+202,PM Draft,Slab Thick (mm),
+203,PM Draft,Pass 1 Thick,
+204,PM Draft,Pass 2 Thick,
+205,PM Draft,Pass 3 Thick,
+206,PM Draft,Pass 4 Thick,
+207,PM Draft,Pass 5 Thick,
+208,PM Draft,Pass 7 Thick,
+209,PM Draft,Pass 7 Thick,
+210,PM Draft,Pass 8 Thick,
+211,PM Draft,Pass 9 Thick,
+212,PM Draft,Pass 10 Thick,
+213,PM Draft,Pass 11 Thick,
+214,PM Draft,Pass 12 Thick,
+215,PM Draft,Charging  Time,
+216,PM Draft,Disharging  Time,
+217,PM Draft,Retaintion Time ( min),
+218,PM Draft,PHZ Set point,
+219,PM Draft,HZ Set point,
+220,PM Draft,SZ set point,
+221,RHF Parameter,Charging Time,
+222,RHF Parameter,Discharging Time,
+223,RHF Parameter,Retaintion Time,
+224,RHF Parameter,TPH Set point,
+225,RHF Parameter,BPH Set point,
+226,RHF Parameter,TH Set point,
+227,RHF Parameter,BH Set point,
+228,RHF Parameter,TSE Set point,
+229,RHF Parameter,BZE Set point,
+230,RHF Parameter,TSW Set point,
+231,RHF Parameter,BSW Set point,
+232,Retention time Slab,Charging Time,
+233,Retention time Slab,DischargingTime,
+234,Retention time Slab,Ret Time,
+235,ROLLING TEMPERATURE,FT Average,774.0
+236,ROLLING TEMPERATURE,CT Top,600.0
+237,ROLLING TEMPERATURE,CT Bot,594.0
+238,Mechanical Prop (Tensile BN),YS,328.02
+239,Mechanical Prop (Tensile BN),TS,459.34
+240,Mechanical Prop (Tensile BN),EL,24.0
+241,Tensile After N,YS,
+242,Tensile After N,TS,
+243,Tensile After N,EL,
+244,Impact at 0 °C,E1,
+245,Impact at 0 °C,E2,
+246,Impact at 0 °C,E3,
+247,Impact at 0 °C,E Avg,
+248,Impact at 0 °C,E Min,
+249,Impact at 0 °C,E Std,
+250,Impact at 0 °C,TEMP,
+251,Impact at -20 °C,E1,
+252,Impact at -20 °C,E2,
+253,Impact at -20 °C,E3,
+254,Impact at -20 °C,E Avg,
+255,Impact at -20 °C,E Min,
+256,Impact at -20 °C,E Std,
+257,Impact at -20 °C,TEMP,
+258,Impact at -40 °C,E1,
+259,Impact at -40 °C,E2,
+260,Impact at -40 °C,E3,
+261,Impact at -40 °C,E Avg,
+262,Impact at -40 °C,E Min,
+263,Impact at -40 °C,E Std,
+264,Impact at -40 °C,TEMP,
+265,Impact After Normalizing,E1,
+266,Impact After Normalizing,E2,
+267,Impact After Normalizing,E3,
+268,Impact After Normalizing,E Avg,
+269,Impact After Normalizing,E Min,
+270,Impact After Normalizing,E Std,
+271,Impact After Normalizing,TEMP,
+272,Z Test,Z1,
+273,Z Test,Z2,
+274,Z Test,Z3,
+275,Z Test,Z Avg,
+276,Z Test,C,0.18
+277,Z Test,Si,0.131
+278,Z Test,Mn,0.574
+279,Z Test,P,0.009
+280,Z Test,S,0.006
+281,Z Test,Nb,0.001
+282,Z Test,Cu,0.007
+283,Z Test,Cr,0.009
+284,Z Test,Ni,0.018
+285,Z Test,Mo,0.001
+286,Z Test,V,0.003
+287,Z Test,Al,0.035
+288,Z Test,Ti,0.001
+289,Z Test,N,0.003
+290,Z Test,B,0.0
+291,Z Test,Ce,0.28

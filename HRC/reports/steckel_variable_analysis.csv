@@ -1,0 +1,293 @@
+col_idx,unified_col_name,category,header,var_type,non_null_count,non_null_pct,sample_values
+0,PROCESS_PLANNING__Year,PROCESS PLANNING,Year,Chemistry (Input Feature),20298,100.0,2024.0; 2025.0; 2026.0
+1,PROCESS_PLANNING__Month,PROCESS PLANNING,Month,Chemistry (Input Feature),20298,100.0,1.0; 2.0; 3.0
+2,PROCESS_PLANNING__Day,PROCESS PLANNING,Day,Chemistry (Input Feature),20298,100.0,1.0; 2.0; 3.0
+3,PROCESS_PLANNING__Coil_No,PROCESS PLANNING,Coil No,Identifier / Metadata,20298,100.0,1.0; 2.0; 3.0
+4,PROCESS_PLANNING__Rolling_Date,PROCESS PLANNING,Rolling Date,Identifier / Metadata,20298,100.0,2024-01-09; 2024-01-10; 2024-01-11
+5,PROCESS_PLANNING__Shift,PROCESS PLANNING,Shift,Identifier / Metadata,20297,100.0,1.0; 2.0; 3.0
+6,PROCESS_PLANNING__CMP,PROCESS PLANNING,CMP,Chemistry (Input Feature),20298,100.0,1.0; 2.0; 3.0
+7,PROCESS_PLANNING__SM_CMP,PROCESS PLANNING,SM CMP,Chemistry (Input Feature),20298,100.0,1.0; 2.0; 3.0
+8,COIL_IDENTIFICATION__Heat,COIL IDENTIFICATION,Heat,Identifier / Metadata,20298,100.0,272774D; 262636H; 252754F
+9,COIL_IDENTIFICATION__Batch_ID,COIL IDENTIFICATION,Batch ID,Identifier / Metadata,20298,100.0,W272774D0; W262636H0; W252754F0
+10,COIL_IDENTIFICATION__Duplicate_Check,COIL IDENTIFICATION,Duplicate Check,Identifier / Metadata,20298,100.0,1.0; 2.0; 3.0
+11,COIL_IDENTIFICATION__SAP_Heats,COIL IDENTIFICATION,SAP Heats,Chemistry (Input Feature),20298,100.0,W272774; W262636; W252754
+12,COIL_IDENTIFICATION__Slab_No,COIL IDENTIFICATION,Slab No,Feature (Independent),20298,100.0,W272774D; W262636H; W252754F
+13,COIL_IDENTIFICATION__Slab_Grade,COIL IDENTIFICATION,Slab Grade,Feature (Independent),19082,94.01,; RP250C-T2(MOB); RP250C-T1
+14,SPECIFICATION__Specification,SPECIFICATION,Specification,Feature (Independent),20295,99.99,ASTM A 36; JIS G 3101 SS 400; ASTM 830 TO SAE 1006
+15,DIMENSION__T,DIMENSION,T,Dimensional / Mass Feature,20275,99.89,7.7; 7.8; 8.7
+16,DIMENSION__W,DIMENSION,W,Dimensional / Mass Feature,20281,99.92,1200.0; 1030.0; 1524.0
+17,WEIGHT_AND_YIELD__WT_Actual,WEIGHT AND YIELD,WT Actual,Chemistry (Input Feature),19946,98.27,19360.0; 19330.0; 19280.0
+18,WEIGHT_AND_YIELD__WT_Theoritical,WEIGHT AND YIELD,WT Theoritical,Chemistry (Input Feature),20289,99.96,19547.55; 19714.86; 19563.39
+19,WEIGHT_AND_YIELD__Slab_Weight,WEIGHT AND YIELD,Slab Weight,Chemistry (Input Feature),20261,99.82,19745.0; 19914.0; 19761.0
+20,WEIGHT_AND_YIELD__Yield,WEIGHT AND YIELD,Yield,Target Candidate (Dependent Variable),20252,99.77,99.0; 99.00000000000001; 98.99999999999999
+21,WEIGHT_AND_YIELD__Yield_Act,WEIGHT AND YIELD,Yield (Act),Chemistry (Input Feature),20258,99.8,98.05013927576601; 97.06738977603696; 97.56591265624209
+22,TB__TB_thick,TB,TB thick,Rolling Mill Feature (Input Feature),20298,100.0,24.8; 28.0; 24.0
+23,CROP_CUT___SCRAP__Crop_Length,CROP CUT & SCRAP,Crop Length,Dimensional / Mass Feature,20298,100.0,200.0; 4000.0; 5000.0
+24,CROP_CUT___SCRAP__Crop_Loss,CROP CUT & SCRAP,Crop Loss,Feature (Independent),20298,100.0,0.0; 46.7232; 40.10408
+25,CROP_CUT___SCRAP__Crop?,CROP CUT & SCRAP,Crop?,Feature (Independent),20297,100.0,N; T; H
+26,CROP_CUT___SCRAP__Scrap,CROP CUT & SCRAP,Scrap,Feature (Independent),20288,99.95,0.0; 380.0185; 4027.05
+27,ORDER_DETAIL__SO_No.,ORDER DETAIL,SO No.,Identifier / Metadata,20231,99.67,L 2100021776/10; L 2100021776/20; L 2100021574/50
+28,QC_REMARKS__QC_Remarks,QC REMARKS,QC Remarks,QC / Anomaly Flag,20298,100.0,OK; PLATE - MPLS; PLATE - NS VORBAND
+29,QC_REMARKS__Process_Remarks,QC REMARKS,Process Remarks,QC / Anomaly Flag,12493,61.55,SM.PARTIAL DISCALE.WIDTH GRAFI; ; BALIK PLATE THICK 30 MM.PM.PAS
+30,QC_REMARKS__Balik_Plate_Reason,QC REMARKS,Balik Plate Reason,QC / Anomaly Flag,172,0.85,; Machine; Man
+31,HEAD_AND_TAIL_CUT__Coil_Len,HEAD AND TAIL CUT,Coil Len,Dimensional / Mass Feature,9186,45.26,; 431.4; 358.8
+32,HEAD_AND_TAIL_CUT__HeadCut_m,HEAD AND TAIL CUT,HeadCut (m),Feature (Independent),537,2.65,; 50.0; 5.0
+33,HEAD_AND_TAIL_CUT__Tail_Cut_m,HEAD AND TAIL CUT,Tail Cut (m),Feature (Independent),1912,9.42,; 10.0; 8.0
+34,HEAD_AND_TAIL_CUT__H___Cut_Wraps,HEAD AND TAIL CUT,H / Cut (Wraps),Feature (Independent),7,0.03,; 3.0; 30.0
+35,HEAD_AND_TAIL_CUT__T___Cut_Wraps,HEAD AND TAIL CUT,T / Cut (Wraps),Feature (Independent),1,0.0,; 6.0
+36,HEAD_AND_TAIL_CUT__Problem_Remarks,HEAD AND TAIL CUT,Problem Remarks,QC / Anomaly Flag,2660,13.1,; LP TE CUT 10 MTR; PASS 1 TE SELANG PENDINGIN ROL
+37,Problem_Detail__col_37,Problem Detail,-,QC / Anomaly Flag,0,0.0,
+38,Problem_Detail__col_38,Problem Detail,-,QC / Anomaly Flag,0,0.0,
+39,Problem_Detail__col_39,Problem Detail,-,QC / Anomaly Flag,0,0.0,
+40,CUSTOMER__Customer_Name,CUSTOMER,Customer Name,Identifier / Metadata,20265,99.84,PT. SUMBER SETAMURNI; PT. KRAKATAU STEEL (PERSERO) T; PT. MULTI BANGUN SEJAHTERA
+41,ROLLING_PASS__Pass_Schedule,ROLLING PASS,Pass Schedule,Rolling Mill Feature (Input Feature),20257,99.8,5.0; 3.0; 1.0
+42,ROLLING_PASS__Rolling_Time,ROLLING PASS,Rolling Time,Rolling Mill Feature (Input Feature),20018,98.62,10:14:00; 11:04:00; 11:12:00
+43,WIDTH_mm_FORMING__Width_Aim,WIDTH (mm) FORMING,Width Aim,Dimensional / Mass Feature,5115,25.2,; 1043.0; 1119.0
+44,WIDTH_mm_FORMING__Width_Head,WIDTH (mm) FORMING,Width Head,Dimensional / Mass Feature,7962,39.23,; 1059.0; 1055.0
+45,WIDTH_mm_FORMING__Width_Body,WIDTH (mm) FORMING,Width Body,Dimensional / Mass Feature,7964,39.24,; 1050.0; 1051.0
+46,WIDTH_mm_FORMING__Width_Tail,WIDTH (mm) FORMING,Width Tail,Dimensional / Mass Feature,8118,39.99,; 1063.0; 1059.0
+47,WIDTH_mm_FORMING__Average,WIDTH (mm) FORMING,Average,Dimensional / Mass Feature,8121,40.01,; 1057.3333333333333; 1055.0
+48,THICKNESS_TOLERANCES__Nominal_Thick,THICKNESS TOLERANCES,Nominal Thick,Chemistry (Input Feature),19497,96.05,7.65; 7.75; 8.65
+49,THICKNESS_TOLERANCES__Pos_Tol,THICKNESS TOLERANCES,Pos Tol,Chemistry (Input Feature),19497,96.05,0.15; 0.2; 0.28
+50,THICKNESS_TOLERANCES__Neg_Tol,THICKNESS TOLERANCES,Neg Tol,Chemistry (Input Feature),19500,96.07,0.15; 0.2; 0.28
+51,THICKNESS_TOLERANCES__Carbon_Eq.,THICKNESS TOLERANCES,Carbon Eq.,Chemistry (Input Feature),20263,99.83,0.28; 0.3; 0.29
+52,OPERATOR_CODE__Data_Entry,OPERATOR CODE,Data Entry,Identifier / Metadata,20246,99.74,HERU; YANTO; AMAN
+53,OPERATOR_CODE__Head,OPERATOR CODE,Head,Identifier / Metadata,20246,99.74,SAHTA; PAKPAHAN; NARSIN
+54,OPERATOR_CODE__SM_Operator,OPERATOR CODE,SM Operator,Identifier / Metadata,20246,99.74,EDI; BAMBANG; BAIT
+55,OPERATOR_CODE__Steeering,OPERATOR CODE,Steeering,Identifier / Metadata,20246,99.74,TRIONO; AHMAD; KAJA
+56,OPERATOR_CODE__UCL_Op,OPERATOR CODE,UCL Op,Identifier / Metadata,20245,99.74,YANA; TAHURI; JUMANGKIR
+57,ROLL_COOLING___DESCALING__Header,ROLL COOLING & DESCALING,Header,Feature (Independent),20256,99.79,1.0; 2.0; EDI
+58,ROLL_COOLING___DESCALING__Entry_Press,ROLL COOLING & DESCALING,Entry Press,Feature (Independent),20165,99.34,5.9; 5.82; 6.01
+59,ROLL_COOLING___DESCALING__Entry_Press_Bot,ROLL COOLING & DESCALING,Entry Press Bot,Feature (Independent),19832,97.7,7.0; 6.8; 6.95
+60,ROLL_COOLING___DESCALING__Exit_Press,ROLL COOLING & DESCALING,Exit Press,Feature (Independent),20165,99.34,6.4; 6.56; 6.52
+61,ROLL_COOLING___DESCALING__Exit_Press_Bot,ROLL COOLING & DESCALING,Exit Press Bot,Feature (Independent),18891,93.07,0.0; 6.8; 6.7
+62,ROLL_COOLING___DESCALING__No._Pump,ROLL COOLING & DESCALING,No. Pump,Feature (Independent),20089,98.97,3.0; 1.0; 
+63,ROLL_COOLING___DESCALING__Descaling_Flow_m^3_hr,ROLL COOLING & DESCALING,Descaling Flow (m^3/hr),Feature (Independent),13130,64.69,193.0; 196.0; 199.0
+64,WORK_ROLL__Grinding_M_C,WORK ROLL,Grinding M/C,Feature (Independent),19049,93.85,H; C; W
+65,WORK_ROLL__Chock_Set,WORK ROLL,Chock/Set,Feature (Independent),20236,99.69,2.0; 1.0;  4/3
+66,WORK_ROLL__Top_WR,WORK ROLL,Top WR,Feature (Independent),20236,99.69,K2210086; K22090065; K22030159
+67,WORK_ROLL__Top_Dia,WORK ROLL,Top Dia,Feature (Independent),20236,99.69,890.7; 890.8; 892.7
+68,WORK_ROLL__Bot_WR,WORK ROLL,Bot WR,Feature (Independent),20236,99.69,K22040171; K22090067; K22090068
+69,WORK_ROLL__Bot_Dia,WORK ROLL,Bot Dia,Feature (Independent),20236,99.69,890.8; 891.9; 892.7
+70,WORK_ROLL__Dia_Diff,WORK ROLL,Dia Diff,Feature (Independent),20298,100.0,-0.09999999999990905; -1.1000000000000227; 0.0
+71,WORK_ROLL__Crown,WORK ROLL,Crown,Feature (Independent),20258,99.8,0.0; K22080166; K22090067
+72,BACK_UP_ROLL__ChockSet,BACK UP ROLL,ChockSet,Feature (Independent),20250,99.76,3; 2;  3/2
+73,BACK_UP_ROLL__Top_BUR_No.,BACK UP ROLL,Top BUR No.,Feature (Independent),20250,99.76,GP90691; GP90759; -1.6000000000000227
+74,BACK_UP_ROLL__Top_BUR_Dia.,BACK UP ROLL,Top BUR Dia.,Feature (Independent),20250,99.76,1486.7; 1509.3; 1484.7
+75,BACK_UP_ROLL__Bot_BUR_No.,BACK UP ROLL,Bot BUR No.,Feature (Independent),20250,99.76,GP88254; UE783401; GP90759
+76,BACK_UP_ROLL__Bot_BUR_Dia.,BACK UP ROLL,Bot BUR Dia.,Feature (Independent),20250,99.76,1440.0; 1428.0; 1509.3
+77,TRANSFER_TEMP__SM____T.Bar_temp,TRANSFER TEMP,SM  / T.Bar temp,Thermal Feature (Input Feature),19225,94.71,884.0; 907.0; 920.0
+78,CRM__Posisi_coil_di_schedule,CRM,Posisi coil di schedule,Feature (Independent),1035,5.1,; 10.0; 12.0
+79,STM_Pass_Schedule_Draft__SM_Pass_1_Thick,STM Pass Schedule Draft,SM Pass 1 Thick,Thermal Feature (Input Feature),911,4.49,; 1438.1; 1491.8
+80,STM_Pass_Schedule_Draft__SM_Pass_2_Thick,STM Pass Schedule Draft,SM Pass 2 Thick,Thermal Feature (Input Feature),886,4.36,; 871.0; -
+81,STM_Pass_Schedule_Draft__SM_Pass_3_Thick,STM Pass Schedule Draft,SM Pass 3 Thick,Thermal Feature (Input Feature),0,0.0,; -
+82,STM_Pass_Schedule_Draft__SM_Pass_4_Thick,STM Pass Schedule Draft,SM Pass 4 Thick,Thermal Feature (Input Feature),0,0.0,; -
+83,STM_Pass_Schedule_Draft__SM_Pass_5_Thick,STM Pass Schedule Draft,SM Pass 5 Thick,Thermal Feature (Input Feature),0,0.0,; -
+84,STM_Pass_Schedule_Draft__SM_Pass_7_Thick,STM Pass Schedule Draft,SM Pass 7 Thick,Thermal Feature (Input Feature),0,0.0,; -
+85,STM_Pass_Schedule_Draft__SM_Pass_7_Thick_2,STM Pass Schedule Draft,SM Pass 7 Thick,Thermal Feature (Input Feature),0,0.0,; -
+86,STM_Pass_Speed__SM_Pass_1_Speed,STM Pass Speed,SM Pass 1 Speed,Rolling Mill Feature (Input Feature),0,0.0,; -
+87,STM_Pass_Speed__SM_Pass_2_Speed,STM Pass Speed,SM Pass 2 Speed,Rolling Mill Feature (Input Feature),0,0.0,; -
+88,STM_Pass_Speed__SM_Pass_3_Speed,STM Pass Speed,SM Pass 3 Speed,Rolling Mill Feature (Input Feature),0,0.0,; -
+89,STM_Pass_Speed__SM_Pass_4_Speed,STM Pass Speed,SM Pass 4 Speed,Rolling Mill Feature (Input Feature),0,0.0,; -
+90,STM_Pass_Speed__SM_Pass_5_Speed,STM Pass Speed,SM Pass 5 Speed,Rolling Mill Feature (Input Feature),0,0.0,; -
+91,STM_Pass_Speed__SM_Pass_7_Speed,STM Pass Speed,SM Pass 7 Speed,Rolling Mill Feature (Input Feature),0,0.0,; -
+92,STM_Pass_Speed__SM_Pass_7_Speed__Lass_Pass_,STM Pass Speed,SM Pass 7 Speed ( Lass Pass ),Rolling Mill Feature (Input Feature),0,0.0,; -
+93,STM_Pass_Force_Body__SM_Pass_1_Force_Body,STM Pass Force Body,SM Pass 1 Force Body,Chemistry (Input Feature),0,0.0,; -
+94,STM_Pass_Force_Body__SM_Pass_2_Force_Body,STM Pass Force Body,SM Pass 2 Force Body,Chemistry (Input Feature),0,0.0,; -
+95,STM_Pass_Force_Body__SM_Pass_3_Force_Body,STM Pass Force Body,SM Pass 3 Force Body,Chemistry (Input Feature),0,0.0,; -
+96,STM_Pass_Force_Body__SM_Pass_4_Force_Body,STM Pass Force Body,SM Pass 4 Force Body,Chemistry (Input Feature),0,0.0,; -
+97,STM_Pass_Force_Body__SM_Pass_5_Force_Body,STM Pass Force Body,SM Pass 5 Force Body,Chemistry (Input Feature),0,0.0,; -
+98,STM_Pass_Force_Body__SM_Pass_7_Force_Body,STM Pass Force Body,SM Pass 7 Force Body,Chemistry (Input Feature),0,0.0,; -
+99,STM_Pass_Force_Body__SM_Pass_7_Force_Body_2,STM Pass Force Body,SM Pass 7 Force Body,Chemistry (Input Feature),0,0.0,; -
+100,STM_Finishing____Last_pass_temp__FT_head_10m,STM Finishing  / Last pass temp,FT head 10m,Thermal Feature (Input Feature),157,0.77,; 755.0; 727.0
+101,STM_Finishing____Last_pass_temp__FT_head_20m,STM Finishing  / Last pass temp,FT head 20m,Thermal Feature (Input Feature),157,0.77,; 790.0; 744.0
+102,STM_Finishing____Last_pass_temp__FT_head_30m,STM Finishing  / Last pass temp,FT head 30m,Thermal Feature (Input Feature),157,0.77,; 809.0; 753.0
+103,STM_Finishing____Last_pass_temp__FT_head_40m,STM Finishing  / Last pass temp,FT head 40m,Thermal Feature (Input Feature),157,0.77,; 817.0; 761.0
+104,STM_Finishing____Last_pass_temp__FT_head_50m,STM Finishing  / Last pass temp,FT head 50m,Thermal Feature (Input Feature),157,0.77,; 822.0; 767.0
+105,STM_Finishing____Last_pass_temp__FT_head_70m,STM Finishing  / Last pass temp,FT head 70m,Thermal Feature (Input Feature),157,0.77,; 823.0; 772.0
+106,STM_Finishing____Last_pass_temp__FT_head_70m_2,STM Finishing  / Last pass temp,FT head 70m,Thermal Feature (Input Feature),157,0.77,; 827.0; 780.0
+107,STM_Finishing____Last_pass_temp__FT_head_80m,STM Finishing  / Last pass temp,FT head 80m,Thermal Feature (Input Feature),157,0.77,; 830.0; 784.0
+108,STM_Finishing____Last_pass_temp__FT_head_90m,STM Finishing  / Last pass temp,FT head 90m,Thermal Feature (Input Feature),157,0.77,; 831.0; 786.0
+109,STM_Finishing____Last_pass_temp__FT_head_100m,STM Finishing  / Last pass temp,FT head 100m,Thermal Feature (Input Feature),157,0.77,; 830.0; 786.0
+110,STM_Finishing____Last_pass_temp__FT_Body_1,STM Finishing  / Last pass temp,FT Body 1,Thermal Feature (Input Feature),157,0.77,; 836.0; 795.0
+111,STM_Finishing____Last_pass_temp__FT_Body_2,STM Finishing  / Last pass temp,FT Body 2,Thermal Feature (Input Feature),1735,8.55,; 780.0; 779.0
+112,STM_Finishing____Last_pass_temp__FT_Body_3,STM Finishing  / Last pass temp,FT Body 3,Thermal Feature (Input Feature),17539,86.41,774.0; 827.0; 810.0
+113,STM_Finishing____Last_pass_temp__FT_Body_4,STM Finishing  / Last pass temp,FT Body 4,Thermal Feature (Input Feature),296,1.46,; 787.0; 769.0
+114,STM_Finishing____Last_pass_temp__FT_Body_5,STM Finishing  / Last pass temp,FT Body 5,Thermal Feature (Input Feature),157,0.77,; -; 835.0
+115,STM_Finishing____Last_pass_temp__FT_Tail_100m,STM Finishing  / Last pass temp,FT Tail 100m,Thermal Feature (Input Feature),1043,5.14,; 798.0; -
+116,STM_Finishing____Last_pass_temp__FT_Tail_90m,STM Finishing  / Last pass temp,FT Tail 90m,Thermal Feature (Input Feature),157,0.77,; -; 828.0
+117,STM_Finishing____Last_pass_temp__FT_Tail_80m,STM Finishing  / Last pass temp,FT Tail 80m,Thermal Feature (Input Feature),157,0.77,; -; 825.0
+118,STM_Finishing____Last_pass_temp__FT_Tail_70m,STM Finishing  / Last pass temp,FT Tail 70m,Thermal Feature (Input Feature),157,0.77,; -; 820.0
+119,STM_Finishing____Last_pass_temp__FT_Tail_70m_2,STM Finishing  / Last pass temp,FT Tail 70m,Thermal Feature (Input Feature),157,0.77,; -; 816.0
+120,STM_Finishing____Last_pass_temp__FT_Tail_50m,STM Finishing  / Last pass temp,FT Tail 50m,Thermal Feature (Input Feature),157,0.77,; -; 816.0
+121,STM_Finishing____Last_pass_temp__FT_Tail_40m,STM Finishing  / Last pass temp,FT Tail 40m,Thermal Feature (Input Feature),157,0.77,; -; 807.0
+122,STM_Finishing____Last_pass_temp__FT_Tail_30m,STM Finishing  / Last pass temp,FT Tail 30m,Thermal Feature (Input Feature),157,0.77,; -; 807.0
+123,STM_Finishing____Last_pass_temp__FT_Tail_20m,STM Finishing  / Last pass temp,FT Tail 20m,Thermal Feature (Input Feature),157,0.77,; -; 811.0
+124,STM_Finishing____Last_pass_temp__FT_Tail_10m,STM Finishing  / Last pass temp,FT Tail 10m,Thermal Feature (Input Feature),157,0.77,; -; 803.0
+125,Top_Coiling__temp__Top_CT_head_10m,Top Coiling  temp,Top CT head 10m,Thermal Feature (Input Feature),239,1.18,; -; 569.0
+126,Top_Coiling__temp__Top_CT_head_20m,Top Coiling  temp,Top CT head 20m,Thermal Feature (Input Feature),239,1.18,; -; 553.0
+127,Top_Coiling__temp__Top_CT_head_30m,Top Coiling  temp,Top CT head 30m,Thermal Feature (Input Feature),239,1.18,; -; 541.0
+128,Top_Coiling__temp__Top_CT_head_40m,Top Coiling  temp,Top CT head 40m,Thermal Feature (Input Feature),239,1.18,; -; 538.0
+129,Top_Coiling__temp__Top_CT_head_50m,Top Coiling  temp,Top CT head 50m,Thermal Feature (Input Feature),239,1.18,; -; 567.0
+130,Top_Coiling__temp__Top_CT_head_70m,Top Coiling  temp,Top CT head 70m,Thermal Feature (Input Feature),239,1.18,; -; 579.0
+131,Top_Coiling__temp__Top_CT_head_70m_2,Top Coiling  temp,Top CT head 70m,Thermal Feature (Input Feature),239,1.18,; -; 614.0
+132,Top_Coiling__temp__Top_CT_head_80m,Top Coiling  temp,Top CT head 80m,Thermal Feature (Input Feature),239,1.18,; -; 559.0
+133,Top_Coiling__temp__Top_CT_head_90m,Top Coiling  temp,Top CT head 90m,Thermal Feature (Input Feature),239,1.18,; -; 522.0
+134,Top_Coiling__temp__Top_CT_head_100m,Top Coiling  temp,Top CT head 100m,Thermal Feature (Input Feature),239,1.18,; -; 533.0
+135,Top_Coiling__temp__Top_CT_Body_1,Top Coiling  temp,Top CT Body 1,Thermal Feature (Input Feature),239,1.18,; -; 536.0
+136,Top_Coiling__temp__Top_CT_Body_2,Top Coiling  temp,Top CT Body 2,Thermal Feature (Input Feature),239,1.18,; -; 553.0
+137,Top_Coiling__temp__Top_CT_Body_3,Top Coiling  temp,Top CT Body 3,Thermal Feature (Input Feature),18719,92.22,600.0; 602.0; 569.0
+138,Top_Coiling__temp__Top_CT_Body_4,Top Coiling  temp,Top CT Body 4,Thermal Feature (Input Feature),0,0.0,; -
+139,Top_Coiling__temp__Top_CT_Body_5,Top Coiling  temp,Top CT Body 5,Thermal Feature (Input Feature),0,0.0,; -
+140,Top_Coiling__temp__Top_CT_Tail_100m,Top Coiling  temp,Top CT Tail 100m,Thermal Feature (Input Feature),886,4.36,; -; 622.0
+141,Top_Coiling__temp__Top_CT_Tail_90m,Top Coiling  temp,Top CT Tail 90m,Thermal Feature (Input Feature),0,0.0,; -
+142,Top_Coiling__temp__Top_CT_Tail_80m,Top Coiling  temp,Top CT Tail 80m,Thermal Feature (Input Feature),0,0.0,; -
+143,Top_Coiling__temp__Top_CT_Tail_70m,Top Coiling  temp,Top CT Tail 70m,Thermal Feature (Input Feature),0,0.0,; -
+144,Top_Coiling__temp__Top_CT_Tail_70m_2,Top Coiling  temp,Top CT Tail 70m,Thermal Feature (Input Feature),0,0.0,; -
+145,Top_Coiling__temp__Top_CT_Tail_50m,Top Coiling  temp,Top CT Tail 50m,Thermal Feature (Input Feature),2,0.01,; -; 623.0
+146,Top_Coiling__temp__Top_CT_Tail_40m,Top Coiling  temp,Top CT Tail 40m,Thermal Feature (Input Feature),0,0.0,; -
+147,Top_Coiling__temp__Top_CT_Tail_30m,Top Coiling  temp,Top CT Tail 30m,Thermal Feature (Input Feature),0,0.0,; -
+148,Top_Coiling__temp__Top_CT_Tail_20m,Top Coiling  temp,Top CT Tail 20m,Thermal Feature (Input Feature),0,0.0,; -
+149,Top_Coiling__temp__Top_CT_Tail_10m,Top Coiling  temp,Top CT Tail 10m,Thermal Feature (Input Feature),0,0.0,; -
+150,Bottom_Coiling__temp__Bot_CT_head_10m,Bottom Coiling  temp,Bot CT head 10m,Thermal Feature (Input Feature),0,0.0,; -
+151,Bottom_Coiling__temp__Bot_CT_head_20m,Bottom Coiling  temp,Bot CT head 20m,Thermal Feature (Input Feature),0,0.0,; -
+152,Bottom_Coiling__temp__Bot_CT_head_30m,Bottom Coiling  temp,Bot CT head 30m,Thermal Feature (Input Feature),0,0.0,; -
+153,Bottom_Coiling__temp__Bot_CT_head_40m,Bottom Coiling  temp,Bot CT head 40m,Thermal Feature (Input Feature),0,0.0,; -
+154,Bottom_Coiling__temp__Bot_CT_head_50m,Bottom Coiling  temp,Bot CT head 50m,Thermal Feature (Input Feature),0,0.0,; -
+155,Bottom_Coiling__temp__Bot_CT_head_70m,Bottom Coiling  temp,Bot CT head 70m,Thermal Feature (Input Feature),0,0.0,; -
+156,Bottom_Coiling__temp__Bot_CT_head_70m_2,Bottom Coiling  temp,Bot CT head 70m,Thermal Feature (Input Feature),0,0.0,; -
+157,Bottom_Coiling__temp__Bot_CT_head_80m,Bottom Coiling  temp,Bot CT head 80m,Thermal Feature (Input Feature),0,0.0,; -
+158,Bottom_Coiling__temp__Bot_CT_head_90m,Bottom Coiling  temp,Bot CT head 90m,Thermal Feature (Input Feature),0,0.0,; -
+159,Bottom_Coiling__temp__Bot_CT_head_100m,Bottom Coiling  temp,Bot CT head 100m,Thermal Feature (Input Feature),0,0.0,; -
+160,Bottom_Coiling__temp__Bot_CT_Body_1,Bottom Coiling  temp,Bot CT Body 1,Thermal Feature (Input Feature),0,0.0,; -
+161,Bottom_Coiling__temp__Bot_CT_Body_2,Bottom Coiling  temp,Bot CT Body 2,Thermal Feature (Input Feature),0,0.0,; -
+162,Bottom_Coiling__temp__Bot_CT_Body_3,Bottom Coiling  temp,Bot CT Body 3,Thermal Feature (Input Feature),14680,72.32,594.0; 558.0; 556.0
+163,Bottom_Coiling__temp__Bot_CT_Body_4,Bottom Coiling  temp,Bot CT Body 4,Thermal Feature (Input Feature),0,0.0,
+164,Bottom_Coiling__temp__Bot_CT_Body_5,Bottom Coiling  temp,Bot CT Body 5,Thermal Feature (Input Feature),0,0.0,
+165,Bottom_Coiling__temp__Bot_CT_Tail_100m,Bottom Coiling  temp,Bot CT Tail 100m,Thermal Feature (Input Feature),886,4.36,; 579.0; -
+166,Bottom_Coiling__temp__Bot_CT_Tail_90m,Bottom Coiling  temp,Bot CT Tail 90m,Thermal Feature (Input Feature),0,0.0,
+167,Bottom_Coiling__temp__Bot_CT_Tail_80m,Bottom Coiling  temp,Bot CT Tail 80m,Thermal Feature (Input Feature),0,0.0,
+168,Bottom_Coiling__temp__Bot_CT_Tail_70m,Bottom Coiling  temp,Bot CT Tail 70m,Thermal Feature (Input Feature),0,0.0,
+169,Bottom_Coiling__temp__Bot_CT_Tail_70m_2,Bottom Coiling  temp,Bot CT Tail 70m,Thermal Feature (Input Feature),0,0.0,
+170,Bottom_Coiling__temp__Bot_CT_Tail_50m,Bottom Coiling  temp,Bot CT Tail 50m,Thermal Feature (Input Feature),0,0.0,
+171,Bottom_Coiling__temp__Bot_CT_Tail_40m,Bottom Coiling  temp,Bot CT Tail 40m,Thermal Feature (Input Feature),0,0.0,
+172,Bottom_Coiling__temp__Bot_CT_Tail_30m,Bottom Coiling  temp,Bot CT Tail 30m,Thermal Feature (Input Feature),0,0.0,
+173,Bottom_Coiling__temp__Bot_CT_Tail_20m,Bottom Coiling  temp,Bot CT Tail 20m,Thermal Feature (Input Feature),0,0.0,
+174,Bottom_Coiling__temp__Bot_CT_Tail_10m,Bottom Coiling  temp,Bot CT Tail 10m,Thermal Feature (Input Feature),0,0.0,
+175,Laminar_water_temp__Laminar_Water,Laminar water temp,Laminar Water,Thermal Feature (Input Feature),0,0.0,
+176,UCL_Data__Pinch_roll_Gap,UCL Data,Pinch roll Gap,Feature (Independent),0,0.0,
+177,UCL_Data__Back_WR_Gap,UCL Data,Back WR Gap,Feature (Independent),0,0.0,
+178,UCL_Data__Front_WR_Gap,UCL Data,Front WR Gap,Feature (Independent),0,0.0,
+179,Laminar_Top_Banks_Used__Top_Bank_1,Laminar Top Banks Used,Top Bank 1,Feature (Independent),0,0.0,
+180,Laminar_Top_Banks_Used__Top_Bank_2,Laminar Top Banks Used,Top Bank 2,Feature (Independent),0,0.0,
+181,Laminar_Top_Banks_Used__Top_Bank_3,Laminar Top Banks Used,Top Bank 3,Feature (Independent),0,0.0,
+182,Laminar_Top_Banks_Used__Top_Bank_4,Laminar Top Banks Used,Top Bank 4,Feature (Independent),0,0.0,
+183,Laminar_Top_Banks_Used__Top_Bank_5,Laminar Top Banks Used,Top Bank 5,Feature (Independent),0,0.0,
+184,Laminar_Top_Banks_Used__Top_Bank_7,Laminar Top Banks Used,Top Bank 7,Feature (Independent),0,0.0,
+185,Laminar_Top_Banks_Used__Top_Bank_7_2,Laminar Top Banks Used,Top Bank 7,Feature (Independent),0,0.0,
+186,Laminar_Top_Banks_Used__Top_Bank_8,Laminar Top Banks Used,Top Bank 8,Feature (Independent),0,0.0,
+187,Laminar_Bottom_Banks_Used__Bot_Bank_1,Laminar Bottom Banks Used,Bot Bank 1,Feature (Independent),0,0.0,
+188,Laminar_Bottom_Banks_Used__Bot_Bank_2,Laminar Bottom Banks Used,Bot Bank 2,Feature (Independent),0,0.0,
+189,Laminar_Bottom_Banks_Used__Bot_Bank_3,Laminar Bottom Banks Used,Bot Bank 3,Feature (Independent),0,0.0,
+190,Laminar_Bottom_Banks_Used__Bot_Bank_4,Laminar Bottom Banks Used,Bot Bank 4,Feature (Independent),0,0.0,
+191,Laminar_Bottom_Banks_Used__Bot_Bank_5,Laminar Bottom Banks Used,Bot Bank 5,Feature (Independent),0,0.0,
+192,Laminar_Bottom_Banks_Used__Bot_Bank_7,Laminar Bottom Banks Used,Bot Bank 7,Feature (Independent),0,0.0,
+193,Laminar_Bottom_Banks_Used__Bot_Bank_7_2,Laminar Bottom Banks Used,Bot Bank 7,Feature (Independent),0,0.0,
+194,Laminar_Bottom_Banks_Used__Bot_Bank_8,Laminar Bottom Banks Used,Bot Bank 8,Feature (Independent),0,0.0,
+195,PLM_Parameter__PM_No._pass,PLM Parameter,PM No. pass,Rolling Mill Feature (Input Feature),0,0.0,
+196,PLM_Parameter__PM_Descaling,PLM Parameter,PM Descaling,Feature (Independent),0,0.0,
+197,PLM_Parameter__Flow_Last_Descale,PLM Parameter,Flow Last Descale,Feature (Independent),0,0.0,
+198,PLM_Parameter__Run_Speed_Last_Descale,PLM Parameter,Run Speed Last Descale,Rolling Mill Feature (Input Feature),0,0.0,
+199,PLM_Parameter__PM_Hold_Temp,PLM Parameter,PM Hold Temp,Thermal Feature (Input Feature),0,0.0,
+200,PLM_Parameter__Temp_Last_Pass_Body,PLM Parameter,Temp Last Pass Body,Thermal Feature (Input Feature),0,0.0,
+201,PLM_Parameter__SM_PASS__PAKAI_ROLL_COOLING_ENTRY_SG_,PLM Parameter,SM PASS ( PAKAI ROLL COOLING ENTRY SG ),Rolling Mill Feature (Input Feature),0,0.0,
+202,PM_Draft__Slab_Thick_mm,PM Draft,Slab Thick (mm),Thermal Feature (Input Feature),0,0.0,
+203,PM_Draft__Pass_1_Thick,PM Draft,Pass 1 Thick,Thermal Feature (Input Feature),0,0.0,
+204,PM_Draft__Pass_2_Thick,PM Draft,Pass 2 Thick,Thermal Feature (Input Feature),0,0.0,
+205,PM_Draft__Pass_3_Thick,PM Draft,Pass 3 Thick,Thermal Feature (Input Feature),0,0.0,
+206,PM_Draft__Pass_4_Thick,PM Draft,Pass 4 Thick,Thermal Feature (Input Feature),0,0.0,
+207,PM_Draft__Pass_5_Thick,PM Draft,Pass 5 Thick,Thermal Feature (Input Feature),0,0.0,
+208,PM_Draft__Pass_7_Thick,PM Draft,Pass 7 Thick,Thermal Feature (Input Feature),0,0.0,
+209,PM_Draft__Pass_7_Thick_2,PM Draft,Pass 7 Thick,Thermal Feature (Input Feature),0,0.0,
+210,PM_Draft__Pass_8_Thick,PM Draft,Pass 8 Thick,Thermal Feature (Input Feature),0,0.0,
+211,PM_Draft__Pass_9_Thick,PM Draft,Pass 9 Thick,Thermal Feature (Input Feature),0,0.0,
+212,PM_Draft__Pass_10_Thick,PM Draft,Pass 10 Thick,Thermal Feature (Input Feature),0,0.0,
+213,PM_Draft__Pass_11_Thick,PM Draft,Pass 11 Thick,Thermal Feature (Input Feature),0,0.0,
+214,PM_Draft__Pass_12_Thick,PM Draft,Pass 12 Thick,Thermal Feature (Input Feature),0,0.0,
+215,PM_Draft__Charging__Time,PM Draft,Charging  Time,Thermal Feature (Input Feature),0,0.0,
+216,PM_Draft__Disharging__Time,PM Draft,Disharging  Time,Thermal Feature (Input Feature),0,0.0,
+217,PM_Draft__Retaintion_Time__min,PM Draft,Retaintion Time ( min),Thermal Feature (Input Feature),0,0.0,
+218,PM_Draft__PHZ_Set_point,PM Draft,PHZ Set point,Thermal Feature (Input Feature),0,0.0,
+219,PM_Draft__HZ_Set_point,PM Draft,HZ Set point,Thermal Feature (Input Feature),0,0.0,
+220,PM_Draft__SZ_set_point,PM Draft,SZ set point,Thermal Feature (Input Feature),0,0.0,
+221,RHF_Parameter__Charging_Time,RHF Parameter,Charging Time,Feature (Independent),0,0.0,
+222,RHF_Parameter__Discharging_Time,RHF Parameter,Discharging Time,Feature (Independent),0,0.0,
+223,RHF_Parameter__Retaintion_Time,RHF Parameter,Retaintion Time,Feature (Independent),0,0.0,
+224,RHF_Parameter__TPH_Set_point,RHF Parameter,TPH Set point,Feature (Independent),0,0.0,
+225,RHF_Parameter__BPH_Set_point,RHF Parameter,BPH Set point,Feature (Independent),0,0.0,
+226,RHF_Parameter__TH_Set_point,RHF Parameter,TH Set point,Feature (Independent),0,0.0,
+227,RHF_Parameter__BH_Set_point,RHF Parameter,BH Set point,Feature (Independent),0,0.0,
+228,RHF_Parameter__TSE_Set_point,RHF Parameter,TSE Set point,Chemistry (Input Feature),0,0.0,
+229,RHF_Parameter__BZE_Set_point,RHF Parameter,BZE Set point,Feature (Independent),0,0.0,
+230,RHF_Parameter__TSW_Set_point,RHF Parameter,TSW Set point,Chemistry (Input Feature),0,0.0,
+231,RHF_Parameter__BSW_Set_point,RHF Parameter,BSW Set point,Feature (Independent),0,0.0,
+232,Retention_time_Slab__Charging_Time,Retention time Slab,Charging Time,Feature (Independent),6138,30.24,; 08:28:00; 08:33:00
+233,Retention_time_Slab__DischargingTime,Retention time Slab,DischargingTime,Feature (Independent),6137,30.23,; 15:21:00; 15:50:00
+234,Retention_time_Slab__Ret_Time,Retention time Slab,Ret Time,Feature (Independent),6176,30.43,; 1900-01-01 06:53:00; 1900-01-01 07:17:00
+235,ROLLING_TEMPERATURE__FT_Average,ROLLING TEMPERATURE,FT Average,Thermal Feature (Input Feature),19858,97.83,774.0; 827.0; 810.0
+236,ROLLING_TEMPERATURE__CT_Top,ROLLING TEMPERATURE,CT Top,Thermal Feature (Input Feature),19860,97.84,600.0; 602.0; 569.0
+237,ROLLING_TEMPERATURE__CT_Bot,ROLLING TEMPERATURE,CT Bot,Thermal Feature (Input Feature),19849,97.79,594.0; 558.0; 556.0
+238,Mechanical_Prop_Tensile_BN__YS,Mechanical Prop (Tensile BN),YS,Chemistry (Input Feature),11021,54.3,328.02; 313.62; 331.51
+239,Mechanical_Prop_Tensile_BN__TS,Mechanical Prop (Tensile BN),TS,Chemistry (Input Feature),11021,54.3,459.34; 433.51; 445.24
+240,Mechanical_Prop_Tensile_BN__EL,Mechanical Prop (Tensile BN),EL,Target Candidate (Dependent Variable),11021,54.3,24.0; 26.5; 25.0
+241,Tensile_After_N__YS,Tensile After N,YS,Chemistry (Input Feature),16,0.08,; 413.3; 411.77
+242,Tensile_After_N__TS,Tensile After N,TS,Chemistry (Input Feature),16,0.08,; 564.77; 560.95
+243,Tensile_After_N__EL,Tensile After N,EL,Target Candidate (Dependent Variable),16,0.08,; 21.0; 23.0
+244,Impact_at_0_°C__E1,Impact at 0 °C,E1,Target Candidate (Dependent Variable),97,0.48,; 72.0; 99.0
+245,Impact_at_0_°C__E2,Impact at 0 °C,E2,Target Candidate (Dependent Variable),97,0.48,; 69.0; 88.0
+246,Impact_at_0_°C__E3,Impact at 0 °C,E3,Target Candidate (Dependent Variable),97,0.48,; 58.0; 79.0
+247,Impact_at_0_°C__E_Avg,Impact at 0 °C,E Avg,Chemistry (Input Feature),97,0.48,; 66.33; 88.67
+248,Impact_at_0_°C__E_Min,Impact at 0 °C,E Min,Chemistry (Input Feature),97,0.48,; 58.0; 79.0
+249,Impact_at_0_°C__E_Std,Impact at 0 °C,E Std,Chemistry (Input Feature),97,0.48,; 7.37; 10.02
+250,Impact_at_0_°C__TEMP,Impact at 0 °C,TEMP,Chemistry (Input Feature),97,0.48,; 0.0
+251,Impact_at_-20_°C__E1,Impact at -20 °C,E1,Target Candidate (Dependent Variable),0,0.0,
+252,Impact_at_-20_°C__E2,Impact at -20 °C,E2,Target Candidate (Dependent Variable),0,0.0,
+253,Impact_at_-20_°C__E3,Impact at -20 °C,E3,Target Candidate (Dependent Variable),0,0.0,
+254,Impact_at_-20_°C__E_Avg,Impact at -20 °C,E Avg,Chemistry (Input Feature),0,0.0,
+255,Impact_at_-20_°C__E_Min,Impact at -20 °C,E Min,Chemistry (Input Feature),0,0.0,
+256,Impact_at_-20_°C__E_Std,Impact at -20 °C,E Std,Chemistry (Input Feature),0,0.0,
+257,Impact_at_-20_°C__TEMP,Impact at -20 °C,TEMP,Chemistry (Input Feature),0,0.0,
+258,Impact_at_-40_°C__E1,Impact at -40 °C,E1,Target Candidate (Dependent Variable),0,0.0,
+259,Impact_at_-40_°C__E2,Impact at -40 °C,E2,Target Candidate (Dependent Variable),0,0.0,
+260,Impact_at_-40_°C__E3,Impact at -40 °C,E3,Target Candidate (Dependent Variable),0,0.0,
+261,Impact_at_-40_°C__E_Avg,Impact at -40 °C,E Avg,Chemistry (Input Feature),0,0.0,
+262,Impact_at_-40_°C__E_Min,Impact at -40 °C,E Min,Chemistry (Input Feature),0,0.0,
+263,Impact_at_-40_°C__E_Std,Impact at -40 °C,E Std,Chemistry (Input Feature),0,0.0,
+264,Impact_at_-40_°C__TEMP,Impact at -40 °C,TEMP,Chemistry (Input Feature),0,0.0,
+265,Impact_After_Normalizing__E1,Impact After Normalizing,E1,Target Candidate (Dependent Variable),0,0.0,
+266,Impact_After_Normalizing__E2,Impact After Normalizing,E2,Target Candidate (Dependent Variable),0,0.0,
+267,Impact_After_Normalizing__E3,Impact After Normalizing,E3,Target Candidate (Dependent Variable),0,0.0,
+268,Impact_After_Normalizing__E_Avg,Impact After Normalizing,E Avg,Chemistry (Input Feature),0,0.0,
+269,Impact_After_Normalizing__E_Min,Impact After Normalizing,E Min,Chemistry (Input Feature),0,0.0,
+270,Impact_After_Normalizing__E_Std,Impact After Normalizing,E Std,Chemistry (Input Feature),0,0.0,
+271,Impact_After_Normalizing__TEMP,Impact After Normalizing,TEMP,Chemistry (Input Feature),0,0.0,
+272,Z_Test__Z1,Z Test,Z1,Target Candidate (Dependent Variable),0,0.0,
+273,Z_Test__Z2,Z Test,Z2,Target Candidate (Dependent Variable),0,0.0,
+274,Z_Test__Z3,Z Test,Z3,Target Candidate (Dependent Variable),0,0.0,
+275,Z_Test__Z_Avg,Z Test,Z Avg,Chemistry (Input Feature),0,0.0,
+276,Z_Test__C,Z Test,C,Chemistry (Input Feature),13618,67.09,0.18; 0.185; 0.188
+277,Z_Test__Si,Z Test,Si,Chemistry (Input Feature),13618,67.09,0.131; 0.118; 0.129
+278,Z_Test__Mn,Z Test,Mn,Chemistry (Input Feature),13618,67.09,0.574; 0.618; 0.587
+279,Z_Test__P,Z Test,P,Chemistry (Input Feature),13618,67.09,0.009; 0.015; 0.008
+280,Z_Test__S,Z Test,S,Chemistry (Input Feature),13618,67.09,0.006; 0.004; 0.005
+281,Z_Test__Nb,Z Test,Nb,Chemistry (Input Feature),13618,67.09,0.001; 0.0; 
+282,Z_Test__Cu,Z Test,Cu,Chemistry (Input Feature),13618,67.09,0.007; 0.006; 0.005
+283,Z_Test__Cr,Z Test,Cr,Chemistry (Input Feature),13618,67.09,0.009; 0.017; 0.01
+284,Z_Test__Ni,Z Test,Ni,Chemistry (Input Feature),13618,67.09,0.018; 0.023; 0.019
+285,Z_Test__Mo,Z Test,Mo,Chemistry (Input Feature),13618,67.09,0.001; 0.0; 0.004
+286,Z_Test__V,Z Test,V,Chemistry (Input Feature),13618,67.09,0.003; 0.009; 0.002
+287,Z_Test__Al,Z Test,Al,Chemistry (Input Feature),13618,67.09,0.035; 0.039; 0.038
+288,Z_Test__Ti,Z Test,Ti,Chemistry (Input Feature),13618,67.09,0.001; 0.002; 0.004
+289,Z_Test__N,Z Test,N,Chemistry (Input Feature),13618,67.09,0.003; 0.004; 0.005
+290,Z_Test__B,Z Test,B,Chemistry (Input Feature),13618,67.09,0.0; ; 0.001
+291,Z_Test__Ce,Z Test,Ce,Chemistry (Input Feature),13618,67.09,0.28; 0.296; 0.29

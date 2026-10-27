@@ -1,0 +1,4 @@
+Target,Target_Name,Unit,Stacking_R2,Stacking_RMSE,Bagged_R2,Bagged_RMSE,Final_Selected_Model,Final_Val_R2,Final_Val_RMSE,Val_HitRate_Tol,Samples
+YS_BN,Yield Strength (Before Normalizing),MPa,0.567,28.47,0.6146,26.86,Bagged_Ensemble,0.6146,26.86,60.2,2221
+TS_BN,Tensile Strength (Before Normalizing),MPa,0.7498,20.72,0.7954,18.73,Bagged_Ensemble,0.7954,18.73,77.4,2221
+EL_BN,Elongation (Before Normalizing),%,0.5671,2.98,0.6356,2.73,Bagged_Ensemble,0.6356,2.73,66.0,2221

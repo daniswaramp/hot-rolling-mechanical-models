@@ -1,0 +1,5 @@
+Target [YS_BN] (Yield Strength (Before Normalizing)):
+  Stress = 96.51 + 300.00*(t^-0.5) + 2.732*(sigma_ss) + 0.00*(CE^2.00) + 0.72*(CoolingRate^1.00) + 5.33*(eps_total)
+
+Target [TS_BN] (Tensile Strength (Before Normalizing)):
+  Stress = 310.62 + 300.00*(t^-0.5) + 1.451*(sigma_ss) + 560.87*(CE^2.00) + 0.35*(CoolingRate^1.00) + -18.77*(eps_total)

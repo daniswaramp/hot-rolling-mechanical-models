@@ -1,0 +1,4 @@
+Target,Model,Val_R2,R2_95_CI_Low,R2_95_CI_High,Val_RMSE,RMSE_95_CI_Low,RMSE_95_CI_High
+YS_BN,Bagged_Bootstrap,0.6146,0.5825,0.6367,26.86,25.96,27.76
+TS_BN,Bagged_Bootstrap,0.7954,0.7673,0.8161,18.73,17.82,19.43
+EL_BN,Bagged_Bootstrap,0.6356,0.6087,0.6582,2.73,2.66,2.83
