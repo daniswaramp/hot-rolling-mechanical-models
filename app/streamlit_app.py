@@ -43,14 +43,11 @@ PANEL = "#f7f8fa"
 # ----------------------------------------------------------------------------- input specs
 PLATE_SPEC = [
     ("Geometry", "Slab_T_mm", "Slab thickness", "mm", 120.0, 320.0, 218.0, 1.0),
-    ("Geometry", "Slab_W_mm", "Slab width", "mm", 900.0, 2300.0, 1515.0, 5.0),
     ("Geometry", "Plate_T_mm", "Plate thickness", "mm", 6.0, 120.0, 16.0, 0.5),
     ("Geometry", "Plate_W_mm", "Plate width", "mm", 1000.0, 4000.0, 1889.0, 10.0),
     ("Geometry", "TB_Thickness_mm", "Transfer bar thickness", "mm", 15.0, 80.0, 41.0, 0.5),
     ("Finishing mill", "FM_Temp_Before_Rolling", "Entry temperature", "C", 850.0, 1150.0, 985.0, 1.0),
     ("Finishing mill", "FM_Finish_Temp", "Finishing temperature", "C", 700.0, 1050.0, 832.0, 1.0),
-    ("Finishing mill", "FM_Number_of_Passes", "Number of passes", "count", 3.0, 15.0, 7.0, 1.0),
-    ("Finishing mill", "FM_Last_Pass_Thick", "Last pass entry gauge", "mm", 8.0, 60.0, 18.0, 0.5),
     ("Finishing mill", "FM_Last_Pass_Drafting", "Last pass drafting", "mm", 0.5, 25.0, 4.0, 0.5),
     ("Cooling", "ACC_Laminar_Header", "Laminar headers", "count", 0.0, 20.0, 8.0, 1.0),
     ("Cooling", "ACC_Temp_Post_Laminar", "Post-laminar temperature", "C", 200.0, 850.0, 744.0, 1.0),
@@ -68,7 +65,6 @@ PLATE_SPEC = [
     ("Chemistry", "Chem_Cr", "Cr", "wt%", 0.0, 1.2, 0.043, 0.005),
     ("Chemistry", "Chem_Mo", "Mo", "wt%", 0.0, 0.5, 0.01, 0.001),
     ("Chemistry", "Chem_N", "N", "wt%", 0.001, 0.02, 0.0042, 0.0005),
-    ("Chemistry", "Chem_B", "B", "wt%", 0.0, 0.005, 0.0, 0.0002),
 ]
 
 HRC_SPEC = [
@@ -270,7 +266,10 @@ def prepared(raw, mill):
         plate_t = max(float(out.get("Plate_T_mm", 16.0)), 1.0)
         tb = float(out.get("TB_Thickness_mm", plate_t * 2))
         out["TB_Ratio"] = tb / plate_t
-        out["FM_Last_Pass_Drafting"] = float(out.get("FM_Last_Pass_Thick", plate_t * 1.15)) - plate_t
+        if "FM_Last_Pass_Drafting" in out:
+            out["FM_Last_Pass_Drafting"] = float(out["FM_Last_Pass_Drafting"])
+        else:
+            out["FM_Last_Pass_Drafting"] = float(out.get("FM_Last_Pass_Thick", plate_t + 4.0)) - plate_t
         headers = float(out.get("ACC_Laminar_Header", 0.0))
         out["ACC_Headers_n"] = headers
         out["ACC_Active"] = 1.0 if headers > 0 else 0.0
