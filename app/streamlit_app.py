@@ -227,6 +227,18 @@ def prepare_frame(mill, frame):
             frame["ACC_Active"] = (frame["ACC_Headers_n"] > 0).astype(float)
         if "Rolling_Type" not in frame:
             frame["Rolling_Type"] = "AR"
+    else:
+        # the Steckel feature module reads Chem_<el> for all sixteen elements including CE;
+        # a missing one raises rather than defaulting, so fill the blanks before it runs
+        for el in ("C", "Si", "Mn", "P", "S", "Nb", "Cu", "Cr", "Ni", "Mo", "V", "Al", "Ti",
+                   "N", "B", "CE"):
+            col = f"Chem_{el}"
+            if col not in frame:
+                frame[col] = 0.0
+        if float(pd.to_numeric(frame["Chem_CE"], errors="coerce").fillna(0).abs().sum()) == 0.0:
+            frame["Chem_CE"] = (frame["Chem_C"] + frame["Chem_Mn"] / 6.0
+                                + (frame["Chem_Cr"] + frame["Chem_Mo"] + frame["Chem_V"]) / 5.0
+                                + (frame["Chem_Ni"] + frame["Chem_Cu"]) / 15.0)
     return frame
 
 

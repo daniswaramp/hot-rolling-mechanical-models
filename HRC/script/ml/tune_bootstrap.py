@@ -26,5 +26,18 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         self.meta_model.fit(np.column_stack(meta_features), y)
         return self
 
+    def _base_models(self):
+        stored = getattr(self, "fitted_base_models", None)
+        if isinstance(stored, dict):
+            return list(stored.values())
+        return list(stored or [])
+
+    def _meta(self):
+        return getattr(self, "meta_learner", None) or getattr(self, "meta_model", None)
+
     def predict(self, X):
-        return self.meta_model.predict(np.column_stack([m.predict(X) for m in self.fitted_base_models]))
+        """Both routes pickled a class of this name with different internals: plate stored a dict
+        of base models with a `meta_learner`, Steckel stored a list with a `meta_model`."""
+        base = self._base_models()
+        preds = np.column_stack([m.predict(X) for m in base])
+        return self._meta().predict(preds)
