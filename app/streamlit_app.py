@@ -1054,11 +1054,11 @@ are lower than a naive fit would show.
 
     section("status")
     st.markdown("""
-**Personal project.** Built in my own time as a modelling study, with no funding, no client and no
-commercial licence. It is not an official Gunung Raja Paksi product: the company has not reviewed,
-approved or endorsed it, and nothing here should be used to release a plate or a coil. The data
-behind it comes from production logs of the routes above, and the ranges shown are the ranges those
-routes actually rolled — outside them the model is extrapolating and should be ignored.
+**Personal project.** Developed independently as an exploratory modelling study, this project received no
+external funding, client backing, or commercial licensing. It is not an official PT Gunung Raja Paksi Tbk
+product and has not been reviewed, approved, or endorsed by the company. The underlying dataset is derived
+from production logs across the specified process routes; the ranges shown reflect actual historical
+rolling parameters, and any values beyond these boundaries represent extrapolation and should be disregarded.
 """)
 
     c1, c2 = st.columns(2)
