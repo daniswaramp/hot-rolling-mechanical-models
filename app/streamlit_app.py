@@ -4,6 +4,7 @@ Heavy plate and Steckel mill coil, one model layer. Sections: simulator, respons
 retrain, diagnostics.
 """
 
+import base64
 import io
 import json
 import os
@@ -29,6 +30,7 @@ st.set_page_config(
 )
 
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
+LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
 MUTED = "#6b7280"
 HAIR = "#e5e7eb"
@@ -111,6 +113,14 @@ TARGET_LABEL = {
 
 
 # ----------------------------------------------------------------------------- styling
+def logo_uri():
+    try:
+        with open(LOGO_PATH, "rb") as fh:
+            return "data:image/png;base64," + base64.b64encode(fh.read()).decode()
+    except OSError:
+        return ""
+
+
 def inject_css():
     st.markdown("""
 <style>
@@ -124,20 +134,20 @@ h1, h2, h3, h4 { font-family: 'Inter', sans-serif; color: #0b0d10; letter-spacin
 
 .kicker { font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
           color: #1746c8; font-weight: 600; }
-.title { font-size: 40px; line-height: 1.05; font-weight: 600; margin: .35rem 0 .5rem;
+.title { font-size: 31px; line-height: 1.1; font-weight: 600; margin: .35rem 0 .5rem;
          letter-spacing: -.035em; }
-.lede { font-size: 14.5px; color: #4b5563; max-width: 62ch; line-height: 1.55; }
+.lede { font-size: 15px; color: #414750; max-width: 62ch; line-height: 1.55; }
 .hair { height: 1px; background: #e5e7eb; margin: 1.4rem 0 1.2rem; border: 0; }
 
-.section { font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: #6b7280;
+.section { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #4b5563;
            font-weight: 600; display: flex; align-items: center; gap: .7rem; margin-bottom: .7rem; }
 .section i { flex: 1; height: 1px; background: #e5e7eb; display: block; }
 
 table.mt { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-table.mt th { font-size: 9.8px; letter-spacing: .12em; text-transform: uppercase; color: #6b7280;
+table.mt th { font-size: 10.2px; letter-spacing: .1em; text-transform: uppercase; color: #4b5563;
               font-weight: 600; text-align: right; padding: 0 0 .55rem; border-bottom: 1px solid #e5e7eb; }
 table.mt th:first-child { text-align: left; }
-table.mt td { font-size: 13.5px; padding: .52rem 0; border-bottom: 1px solid #f1f2f4; text-align: right;
+table.mt td { font-size: 14px; padding: .62rem 0; border-bottom: 1px solid #f1f2f4; text-align: right;
               color: #0b0d10; }
 table.mt td:first-child { text-align: left; font-weight: 500; }
 table.mt td.mono, table.mt th.mono { font-family: 'JetBrains Mono', monospace; }
@@ -149,12 +159,15 @@ table.mt td .ci { color: #6b7280; font-size: 11.5px; }
 .facts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; border: 1px solid #e5e7eb; }
 .facts div { padding: .8rem .9rem; border-right: 1px solid #e5e7eb; }
 .facts div:last-child { border-right: 0; }
-.facts span { display: block; font-size: 9.6px; letter-spacing: .12em; text-transform: uppercase;
-              color: #6b7280; margin-bottom: .28rem; }
-.facts b { font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 600; }
+.facts span { display: block; font-size: 10px; letter-spacing: .1em; text-transform: uppercase;
+              color: #6b7280; margin-bottom: .28rem; font-family: 'Inter', 'Segoe UI', sans-serif; }
+
+.head img { height: 30px; display: block; margin-bottom: .9rem; }
+.facts b { font-family: 'JetBrains Mono', 'Segoe UI', 'DejaVu Sans', monospace; font-size: 16px;
+            font-weight: 600; }
 .facts em { font-style: normal; font-size: 10.5px; color: #9ca3af; margin-left: .2rem; }
 
-.note { font-size: 12px; color: #6b7280; line-height: 1.5; border-left: 2px solid #e5e7eb;
+.note { font-size: 12.8px; color: #5b6169; line-height: 1.5; border-left: 2px solid #e5e7eb;
         padding-left: .7rem; margin-top: .6rem; }
 
 div[data-testid="stSidebar"] { background: #fbfbfc; border-right: 1px solid #e5e7eb; }
@@ -295,7 +308,7 @@ def predict_one(mill, raw):
     frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
     X = feature_matrix(mill, frame)
     ci = ml.get_ci_data(mill)
-    out = {}
+    out, last_error = {}, {}
     for key, bundle in bundles(mill).items():
         if bundle is None:
             continue
@@ -303,9 +316,10 @@ def predict_one(mill, raw):
         for cols in candidate_columns(bundle, X):
             try:
                 value = float(bundle["model"].predict(align(X, cols))[0])
+                last_error.pop(key, None)
                 break
-            except Exception:
-                continue
+            except Exception as exc:
+                last_error[key] = f"{type(exc).__name__}: {exc}"
         half = ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
         if not ci.empty and "Target" in ci.columns:
             row = ci[ci["Target"] == key]
@@ -314,7 +328,8 @@ def predict_one(mill, raw):
         label, unit = TARGET_LABEL[mill].get(key, (key, ""))
         out[key] = {"name": label, "pred": round(value, 2) if np.isfinite(value) else float("nan"),
                     "unit": unit, "ci_low": round(value - half, 2) if np.isfinite(value) else float("nan"),
-                    "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan")}
+                    "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan"),
+                    "error": last_error.get(key, "")}
     return out
 
 
@@ -335,7 +350,7 @@ def targets_table(mill, predictions):
           <td>{label}<span style="color:#9ca3af;font-size:11px;margin-left:.4rem">{key}</span></td>
           <td class="mono">{res['pred']:.1f}<span class="unit">{unit}</span></td>
           <td class="mono ci">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
-          <td class="mono ci">±{tol:g}</td>
+          <td class="mono ci">±{tol:g}{'&nbsp;' + unit if unit in ('MPa', 'J', '%') else ''}</td>
           <td><span class="tag">{'in tolerance' if inside else 'review'}</span></td>
         </tr>""")
     st.markdown(
@@ -351,7 +366,10 @@ def header(mill, n_targets):
     route = ("Heavy plate · rougher, finisher, laminar ACC, optional normalising"
              if mill == "Plate" else
              "Steckel coil · rougher, reversing Steckel mill, runout table, downcoiler")
+    uri = logo_uri()
+    mark = f'<img src="{uri}" alt="Gunung Raja Paksi">' if uri else ""
     st.markdown(f"""
+<div class="head">{mark}</div>
 <div class="kicker">Dual-mill property platform</div>
 <div class="title">Mechanical properties, before the heat is rolled</div>
 <div class="lede">{route}. {n_targets} certified properties, fitted on melt-grouped holdouts so
@@ -377,7 +395,8 @@ def schedule_inputs(mill):
                         continue
                     fmt = "%.4f" if step < 0.001 else ("%.3f" if step < 0.01 else
                                                        ("%.2f" if step < 1 else "%.0f"))
-                    values[key] = st.number_input(f"{label} [{unit}]", min_value=float(lo),
+                    shown_unit = "°C" if unit == "C" else unit
+                    values[key] = st.number_input(f"{label} [{shown_unit}]", min_value=float(lo),
                                                   max_value=float(hi), value=float(default),
                                                   step=float(step), format=fmt, key=f"{mill}_{key}")
         if mill == "Plate":
@@ -401,10 +420,19 @@ def view_simulator(mill, raw):
     preds = predict_one(mill, raw)
     targets_table(mill, preds)
 
+    broken = {k: v["error"] for k, v in preds.items() if v.get("error")}
+    if broken:
+        with st.expander(f"{len(broken)} target(s) could not be scored", expanded=True):
+            st.caption("The shipped artifact refused the feature frame. Paste this when reporting it.")
+            for key, why in broken.items():
+                st.code(f"{key}: {why[:400]}", language="text")
+
     ind = physical(raw, mill)
+    st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
+    section("derived process metrics")
     st.markdown(f"""
 <div class="facts">
-  <div><span>Pickering σ_ss</span><b>{ind['sigma_ss']:.0f}</b><em>MPa</em></div>
+  <div><span>Pickering σ<sub>ss</sub></span><b>{ind['sigma_ss']:.0f}</b><em>MPa</em></div>
   <div><span>CE IIW</span><b>{ind['ce_iiw']:.3f}</b></div>
   <div><span>Pcm</span><b>{ind['pcm']:.3f}</b></div>
   <div><span>Ar3</span><b>{ind['ar3']:.0f}</b><em>C</em></div>
@@ -655,6 +683,50 @@ def view_retrain(mill):
     log_table(read_log(), mill)
 
 
+def view_about():
+    section("what this is")
+    st.markdown("""
+A property model for both rolling routes: heavy plate off the roughing and finishing mills with
+laminar accelerated cooling, and Steckel mill coil off the reversing mill and runout table. It
+answers one operational question — what will this heat certify — from chemistry, drafting and
+cooling alone.
+
+Predictions come with the interval their bootstrap report implies, not a bare number, and the
+scores behind them use `GroupShuffleSplit` on the melt so sister plates from one heat never
+straddle the train/test boundary. That is stricter than a row split and it is why the numbers here
+are lower than a naive fit would show.
+""")
+
+    section("how it is built")
+    st.markdown("""
+- **Features** — Pickering solid-solution strengthening, Hall–Petch `1/sqrt(t)`, true strain
+  `ln(t_slab / t_plate)`, carbon equivalents, `Ar3`, and the finishing-temperature margin above it.
+  No raw log dump: every input has a metallurgical definition.
+- **Models** — nine families fitted per target (OLS, metallurgical NLR, Ridge, XGBoost, LightGBM,
+  CatBoost, stacking and bagged ensembles), selected by melt-held-out leaderboard rather than
+  assumption.
+- **Uncertainty** — 95 % intervals from melt-grouped bootstrap resampling, stored beside every
+  score.
+- **Stack** — Python, pandas, scikit-learn, XGBoost, LightGBM, CatBoost, Plotly, Streamlit.
+""")
+
+    section("status")
+    st.markdown("""
+**Personal project.** Built in my own time as a modelling study, with no funding, no client and no
+commercial licence. It is not an official Gunung Raja Paksi product: the company has not reviewed,
+approved or endorsed it, and nothing here should be used to release a plate or a coil. The data
+behind it comes from production logs of the routes above, and the ranges shown are the ranges those
+routes actually rolled — outside them the model is extrapolating and should be ignored.
+""")
+
+    c1, c2 = st.columns(2)
+    c1.markdown("**Code and notebooks**  \n[github.com/daniswaramp/hot-rolling-mechanical-models]"
+                "(https://github.com/daniswaramp/hot-rolling-mechanical-models) — models, reports and "
+                "both executed notebooks. The campaign sheets themselves are not published.")
+    c2.markdown("**Author**  \nSulaeman Daniswara Mulya Putera — process and metallurgical engineer, "
+                "steel hot rolling. [LinkedIn](https://www.linkedin.com/in/daniswaramp)")
+
+
 def view_diagnostics(mill):
     section("leaderboard")
     lb = ml.get_leaderboard_data(mill)
@@ -704,7 +776,7 @@ def main():
 
     header(mill, len(TARGET_LABEL[mill]))
 
-    tabs = st.tabs(["Simulator", "Response surface", "Batch", "Retrain", "Diagnostics"])
+    tabs = st.tabs(["Simulator", "Response surface", "Batch", "Retrain", "Diagnostics", "About"])
     with tabs[0]:
         view_simulator(mill, raw)
     with tabs[1]:
@@ -715,6 +787,8 @@ def main():
         view_retrain(mill)
     with tabs[4]:
         view_diagnostics(mill)
+    with tabs[5]:
+        view_about()
 
 
 if __name__ == "__main__":
