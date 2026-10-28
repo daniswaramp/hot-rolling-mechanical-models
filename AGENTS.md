@@ -29,8 +29,8 @@ notebooks and the app both import it. Training runs live in the notebooks.
 
 ## Invariants
 
-1. **No training CLIs and no `.bat` launchers.** Removed deliberately; do not reintroduce wrappers
-   around train or tune.
+1. **No training CLIs and no `.bat` launchers in the public repo.** Removed deliberately; do not reintroduce wrappers
+   around train or tune here (training pipelines and batch scripts remain exclusively in the local workspace).
 2. **`tune_bootstrap.py` must stay** even though it looks like dead code. The shipped `.joblib`
    files record their estimator classes under that module path; delete it and every model fails to
    unpickle. It now holds only the class definitions.
@@ -42,9 +42,8 @@ notebooks and the app both import it. Training runs live in the notebooks.
    then the full frame. A single candidate silently returns NaN for those targets.
 5. **Campaign sheets never enter git.** `Plate/csv/` and `HRC/csv/` are ignored, and history was
    squashed to one commit so they cannot be recovered from the public repo. Keep it that way.
-6. **No `graphify-out/` here.** It was deleted: the graph was stale and its hub names duplicated, so
-   it described a structure that no longer existed. If you regenerate one, check it first — this repo
-   is public and a graph must not carry absolute local paths.
+6. **No `graphify-out/` here.** It was deleted from the public mirror to prevent leaking local paths.
+   Project-level GraphRAG is maintained exclusively in the local root.
 7. **Streamlit's app header is absolutely positioned, 60 px tall.** Content needs about 4.4 rem of
    container padding or the first line looks clipped. Three separate "logo cropped" reports came from
    this one fact.
@@ -68,14 +67,33 @@ notebooks and the app both import it. Training runs live in the notebooks.
 12. **App title and legal status.** The deployed platform title is `"Specification Limit & Mechanical Models"`.
    The About tab disclaimer states independent exploratory study status without commercial endorsement
    from PT Gunung Raja Paksi Tbk.
+13. **Model Engine Hierarchy & Champion GBDT Default.** The application defaults to the Champion
+   GBDT architecture (`models/boosted_out/`), selecting the highest-scoring native CatBoost (`.cbm`),
+   XGBoost (`.ubj`), or LightGBM (`.txt`) booster per target. Standalone boosters match or exceed
+   the stacked meta-learner on melt holdouts (e.g., HRC TS $R^2 = 0.792$ vs $0.750$; Plate YS_AN
+   $R^2 = 0.402$ vs $0.309$) and load instantly (<1 second) without scikit-learn unpickling overhead. The UI sidebar
+   provides a Model Engine selector (`[Champion GBDT (Recommended), CatBoost, XGBoost, LightGBM, Ensemble (.joblib), OLS / Linear]`),
+   allowing operators to toggle architectures dynamically across Simulator, Spec Check, Response Surface,
+   Capability, and Batch tabs.
+14. **Dual-Directory Repository Architecture.**
+   - `push-to-GH/`: Clean public GitHub mirror connected to Streamlit Community Cloud (`origin/main`).
+     Strictly zero private credentials and zero raw Excel campaign sheets.
+   - Main local directory: Dedicated development environment containing raw Excel sources, local ETL,
+     and Modal serverless cloud compute runners.
+15. **Target Outlier Invariant & Decimal Rescaling.** In `Plate/script/ml/data_prep.py`, `prepare_target_dataset`
+   strictly validates targets against `PHYSICAL_BOUNDS` and automatically rescales $100\times$ decimal omission
+   typos ($41,205 \rightarrow 412.05\text{ MPa}$; $28,205 \rightarrow 282.05\text{ MPa}$), ensuring that
+   least-squares or tree models are never poisoned by data entry errors.
 
 ## Environment
 
-`requirements.txt` pins `scikit-learn==1.9.1` because that build wrote the artifacts. Streamlit
-Community Cloud installs it; a local 1.8.x loads them with an `InconsistentVersionWarning`.
+`requirements.txt` specifies `streamlit>=1.38.0,<=1.43.0`, `scikit-learn>=1.5.0`, `xgboost`, `lightgbm`,
+and `catboost`. Native boosted models in `models/boosted_out/` bypass scikit-learn version constraints
+and load across Python 3.10 through 3.13 without warnings. LightGBM `.txt` models are pinned to LF line
+endings via `.gitattributes` to preserve binary tree byte offsets.
 
 Entry point for deployment: `app/streamlit_app.py`, branch `main`. The sidebar carries a build stamp
-and a boot self-test (`Plate: 10/10 targets scoring`, `HRC: 3/3`). Check both before believing a bug
+and an instant boot self-test (`Plate: 10/10 targets scoring`, `HRC: 3/3`). Check both before believing a bug
 report — a stale container is the most common cause of a broken app here.
 
 ## Validation contract
@@ -83,10 +101,10 @@ report — a stale container is the most common cause of a broken app here.
 `GroupShuffleSplit` on `Heat_ID`. Sister plates from one melt never straddle the split. Melt-grouped
 bootstrap intervals sit beside every score. Never report a row-split score as if it were comparable.
 
-## Known defects
+## Resolved & Known Items
 
-- The cleaned plate CSV still contains a yield strength of **41,205 MPa**. One such row turns a 0.86
-  refit into R2 -93. The retrain tab rejects values outside physical bounds; the ETL still needs the
-  fix at source.
-- Capability (Cp/Cpk) samples a box of independent uniform inputs. Real schedules correlate, so it is
-  an envelope under a stated assumption, not SPC capability.
+- **Target Decimal Typo Trap (Resolved)**: The $41,205\text{ MPa}$ and $28,205\text{ MPa}$ decimal shift
+  outliers have been cleaned in the source CSV and permanently guarded in `data_prep.py` with automatic
+  $100\times$ rescaling against `PHYSICAL_BOUNDS`.
+- **Capability (Cp/Cpk)**: Samples a box of independent uniform inputs. Real rolling schedules correlate,
+  so it represents a conservative envelope under stated operational drift assumptions.

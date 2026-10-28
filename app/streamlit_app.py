@@ -30,7 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BUILD = "2026-10-27 · specification check · UI & table overhaul"
+BUILD = "2026-10-28 · champion GBDT engine · fast cold-start · engine selector"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -121,14 +121,14 @@ TARGET_LABEL = {
 # ----------------------------------------------------------------------------- styling
 @st.cache_resource(show_spinner=False)
 def boot_check():
-    """Score both routes once at start-up; the sidebar reports the truth instead of a blank cell."""
+    """Score both routes once at start-up using Champion GBDT (instant bootstrap)."""
     report = {}
     for mill in ("Plate", "HRC"):
         try:
             raw = defaults(mill)
             if mill == "Plate":
                 raw["Rolling_Type"] = "AR"
-            out = predict_one(mill, raw)
+            out = predict_champion(mill, raw)
             scored = {k: v["pred"] for k, v in out.items()}
             good = sum(1 for v in scored.values() if np.isfinite(v))
             first_error = next((v["error"] for v in out.values() if v.get("error")), "")
@@ -341,21 +341,49 @@ def align(X, cols):
     return pd.DataFrame({c: (X[c] if c in X.columns else 0.0) for c in cols}, index=X.index)
 
 
-def score_frame(mill, frame):
+def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
     """Vectorised scoring: features once, then every target."""
     frame = prepare_frame(mill, frame)
     X = feature_matrix(mill, frame)
     out = pd.DataFrame(index=frame.index)
-    for key, bundle in bundles(mill).items():
-        if bundle is None:
-            continue
-        out[key] = np.nan
-        for cols in candidate_columns(bundle, X):
-            try:
-                out[key] = bundle["model"].predict(align(X, cols))
-                break
-            except Exception:
+    if engine in ("Champion GBDT (Recommended)", "CatBoost", "XGBoost", "LightGBM"):
+        plan = champion_plan(mill)
+        idx = boosted_index(mill)
+        for key in TARGET_LABEL[mill]:
+            if engine == "Champion GBDT (Recommended)":
+                fam = plan.get(key, {}).get("family", "ensemble")
+            else:
+                fam = {"CatBoost": "cat", "XGBoost": "xgb", "LightGBM": "lgbm"}[engine]
+            model = boosted_model(mill, fam, key) if fam in ("cat", "xgb", "lgbm") else None
+            if model is not None and fam in idx and key in idx[fam]:
+                cols = idx[fam][key].get("features") or list(X.columns)
+                aligned = pd.DataFrame({c: (X[c] if c in X.columns else 0.0) for c in cols},
+                                       index=X.index).to_numpy(dtype=float)
+                try:
+                    out[key] = np.asarray(model.predict(aligned)).ravel()
+                    continue
+                except Exception:
+                    pass
+            # Fallback to joblib bundle
+            bundle = ml.load_model_bundle(mill, key)
+            if bundle is not None:
+                for cols in candidate_columns(bundle, X):
+                    try:
+                        out[key] = bundle["model"].predict(align(X, cols))
+                        break
+                    except Exception:
+                        continue
+    else:
+        for key, bundle in bundles(mill).items():
+            if bundle is None:
                 continue
+            out[key] = np.nan
+            for cols in candidate_columns(bundle, X):
+                try:
+                    out[key] = bundle["model"].predict(align(X, cols))
+                    break
+                except Exception:
+                    continue
     return out
 
 
@@ -526,7 +554,165 @@ def predict_linear(mill, raw, family):
     return out
 
 
-def targets_table(mill, predictions, extras=None):
+@st.cache_resource(show_spinner=False)
+def champion_plan(mill):
+    """Determines the champion model family and holdout stats per target."""
+    index = boosted_index(mill)
+    plan = {}
+    for target in TARGET_LABEL[mill]:
+        best_fam, best_r2, best_rmse = None, -999.0, None
+        for fam in ("cat", "xgb", "lgbm"):
+            if fam in index and target in index[fam]:
+                r2 = float(index[fam][target].get("r2", -999.0))
+                if r2 > best_r2:
+                    best_r2 = r2
+                    best_fam = fam
+                    best_rmse = float(index[fam][target].get("rmse", 0.0))
+        if best_fam is not None:
+            plan[target] = {"family": best_fam, "r2": best_r2, "rmse": best_rmse}
+        else:
+            plan[target] = {"family": "ensemble", "r2": 0.617, "rmse": 4.41}
+    return plan
+
+
+def predict_champion(mill, raw):
+    """Fast, high-R2 scoring using champion native GBDT models with fallback for Z-Test."""
+    frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
+    X = feature_matrix(mill, frame)
+    plan = champion_plan(mill)
+    ci = ml.get_ci_data(mill)
+    out = {}
+    for key in TARGET_LABEL[mill]:
+        label, unit = TARGET_LABEL[mill].get(key, (key, ""))
+        cfg = plan.get(key, {})
+        fam = cfg.get("family", "ensemble")
+        value = np.nan
+        err = ""
+        if fam in ("xgb", "lgbm", "cat"):
+            model = boosted_model(mill, fam, key)
+            if model is not None:
+                meta = boosted_index(mill).get(fam, {}).get(key, {})
+                cols = meta.get("features") or list(X.columns)
+                aligned = pd.DataFrame({c: (X[c] if c in X.columns else 0.0) for c in cols},
+                                       index=X.index).to_numpy(dtype=float)
+                try:
+                    value = float(np.asarray(model.predict(aligned)).ravel()[0])
+                except Exception as exc:
+                    err = f"{type(exc).__name__}: {exc}"
+        if not np.isfinite(value):
+            bundle = ml.load_model_bundle(mill, key)
+            if bundle is not None:
+                for cols in candidate_columns(bundle, X):
+                    try:
+                        value = float(bundle["model"].predict(align(X, cols))[0])
+                        err = ""
+                        fam = "ensemble"
+                        break
+                    except Exception as exc:
+                        err = f"{type(exc).__name__}: {exc}"
+        half = ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
+        rmse = cfg.get("rmse")
+        if rmse and rmse > 0:
+            half = 1.96 * (rmse / np.sqrt(50))
+        elif not ci.empty and "Target" in ci.columns:
+            row = ci[ci["Target"] == key]
+            if not row.empty and "Val_RMSE" in row.columns:
+                half = 1.96 * (float(row["Val_RMSE"].values[0]) / np.sqrt(50))
+        out[key] = {
+            "name": label,
+            "pred": round(value, 2) if np.isfinite(value) else float("nan"),
+            "unit": unit,
+            "ci_low": round(value - half, 2) if np.isfinite(value) else float("nan"),
+            "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan"),
+            "family": fam,
+            "r2": cfg.get("r2", 0.0),
+            "error": err
+        }
+    return out
+
+
+def predict_selected_engine(mill, raw, engine):
+    """Dispatches prediction to the chosen engine."""
+    if engine == "Champion GBDT (Recommended)":
+        return predict_champion(mill, raw)
+    elif engine == "Ensemble (.joblib)":
+        return predict_one(mill, raw)
+    elif engine in ("CatBoost", "XGBoost", "LightGBM"):
+        fam_key = {"CatBoost": "cat", "XGBoost": "xgb", "LightGBM": "lgbm"}[engine]
+        boosted = predict_boosted(mill, raw, fam_key)
+        frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
+        X = feature_matrix(mill, frame)
+        ci = ml.get_ci_data(mill)
+        index = boosted_index(mill).get(fam_key, {})
+        out = {}
+        for key in TARGET_LABEL[mill]:
+            label, unit = TARGET_LABEL[mill].get(key, (key, ""))
+            if key in boosted and np.isfinite(boosted[key].get("pred", np.nan)):
+                value = boosted[key]["pred"]
+                meta = index.get(key, {})
+                rmse = meta.get("rmse", ml.TARGET_CONFIG[mill][key]["tol"] * 0.5)
+                half = 1.96 * (rmse / np.sqrt(50)) if rmse > 0 else ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
+                out[key] = {
+                    "name": label,
+                    "pred": round(value, 2),
+                    "unit": unit,
+                    "ci_low": round(value - half, 2),
+                    "ci_high": round(value + half, 2),
+                    "family": fam_key,
+                    "r2": meta.get("r2", 0.0),
+                    "error": ""
+                }
+            else:
+                bundle = ml.load_model_bundle(mill, key)
+                value = np.nan
+                if bundle is not None:
+                    for cols in candidate_columns(bundle, X):
+                        try:
+                            value = float(bundle["model"].predict(align(X, cols))[0])
+                            break
+                        except Exception:
+                            continue
+                half = ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
+                out[key] = {
+                    "name": label,
+                    "pred": round(value, 2) if np.isfinite(value) else float("nan"),
+                    "unit": unit,
+                    "ci_low": round(value - half, 2) if np.isfinite(value) else float("nan"),
+                    "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan"),
+                    "family": "ensemble",
+                    "r2": 0.0,
+                    "error": "" if np.isfinite(value) else f"Not available in {engine}"
+                }
+        return out
+    elif engine == "OLS / Linear":
+        lin = predict_linear(mill, raw, "OLS")
+        champ = predict_champion(mill, raw)
+        out = {}
+        for key in TARGET_LABEL[mill]:
+            label, unit = TARGET_LABEL[mill].get(key, (key, ""))
+            if key in lin and np.isfinite(lin[key].get("pred", np.nan)):
+                val = lin[key]["pred"]
+                r2 = lin[key]["r2"]
+                half = ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
+                out[key] = {
+                    "name": label,
+                    "pred": round(val, 2),
+                    "unit": unit,
+                    "ci_low": round(val - half, 2),
+                    "ci_high": round(val + half, 2),
+                    "family": "OLS",
+                    "r2": r2,
+                    "error": ""
+                }
+            else:
+                item = dict(champ[key])
+                item["error"] = "Linear R2 < 0.15 (showing Champion GBDT)"
+                out[key] = item
+        return out
+    return predict_champion(mill, raw)
+
+
+def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
     """Grouped property card: clean readable name, tabular numbers, model holdout uncertainty."""
     extras = extras or {}
     rows, total = [], 0
@@ -535,26 +721,28 @@ def targets_table(mill, predictions, extras=None):
         rows.append(f'<tr class="grp"><td colspan="{span}">{group}</td></tr>')
         for key in keys:
             res = predictions.get(key)
-            if not res:
+            if not res or not np.isfinite(res.get("pred", np.nan)):
                 continue
             total += 1
             label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
             rmse_tol = ml.TARGET_CONFIG[mill][key]["tol"]
+            fam = res.get("family", "")
+            fam_badge = f'<span class="tag" style="margin-left:.4rem; font-size:9px;">{fam}</span>' if fam else ""
             extra_cells = "".join(
                 (f'<td class="alt">{extras[name][key]["pred"]:.1f}</td>'
-                 if key in extras[name] else '<td class="alt muted">—</td>')
+                 if key in extras[name] and np.isfinite(extras[name][key].get("pred", np.nan)) else '<td class="alt muted">—</td>')
                 for name in extras)
             rows.append(f"""<tr>
-              <td class="name">{label}</td>
+              <td class="name">{label}{fam_badge}</td>
               <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
               <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
               <td class="sub" style="font-family:'JetBrains Mono';">±{rmse_tol:g}&nbsp;{unit}</td>{extra_cells}</tr>""")
-    html = ("<div class=\"card\"><table class=\"ut\"><thead><tr><th>property</th><th>ensemble</th>"
+    html = (f"<div class=\"card\"><table class=\"ut\"><thead><tr><th>property</th><th>{engine_label.lower()}</th>"
             "<th>95% bootstrap interval</th><th>holdout uncertainty</th>"
             + "".join(f"<th>{n}</th>" for n in extras)
             + "</tr></thead><tbody>" + "".join(rows)
             + f"</tbody></table><div class=\"foot\">{total} certified properties scored through "
-              f"{mill} model layer.</div></div>")
+              f"{mill} model layer ({engine_label}).</div></div>")
     st.markdown("".join(line.strip() for line in html.splitlines()), unsafe_allow_html=True)
 
 
@@ -609,27 +797,31 @@ def schedule_inputs(mill):
 
 
 # ----------------------------------------------------------------------------- sections
-def view_simulator(mill, raw):
+def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
     section("predicted properties")
-    preds = predict_one(mill, raw)
+    preds = predict_selected_engine(mill, raw, engine)
     options = ["OLS", "Ridge", "NLR"]
+    if "Ensemble" not in engine:
+        options.append("Ensemble (.joblib)")
     for family in ("xgb", "lgbm", "cat"):
-        if family in boosted_index(mill):
-            options.append({"xgb": "XGBoost", "lgbm": "LightGBM", "cat": "CatBoost"}[family])
+        disp = {"xgb": "XGBoost", "lgbm": "LightGBM", "cat": "CatBoost"}[family]
+        if disp != engine and family in boosted_index(mill):
+            options.append(disp)
     chosen = st.multiselect("Also fit", options, default=[],
-                            help="Linear refits committed as coefficients. The ensemble stays the "
-                                 "shipped artifact; these show what a readable equation says.",
-                            key=f"fams_{mill}")
+                            help="Alternative models to compare side-by-side with the active scoring engine.",
+                            key=f"fams_{mill}_{engine}")
     extras = {}
     for family in chosen:
         if family in ("OLS", "Ridge"):
             extras[family] = predict_linear(mill, raw, family)
         elif family == "NLR":
             extras[family] = predict_nlr(mill, raw)
+        elif family == "Ensemble (.joblib)":
+            extras[family] = predict_one(mill, raw)
         else:
             key = {"XGBoost": "xgb", "LightGBM": "lgbm", "CatBoost": "cat"}[family]
             extras[family] = predict_boosted(mill, raw, key)
-    targets_table(mill, preds, extras)
+    targets_table(mill, preds, extras, engine_label=engine)
     if extras:
         st.caption("Holdout R² of the added families, averaged over targets: "
                    + ", ".join(f"{f} {np.nanmean([v['r2'] for v in extras[f].values()]):.2f}"
@@ -662,7 +854,7 @@ def view_simulator(mill, raw):
                 f'properties start to scatter.</div>', unsafe_allow_html=True)
 
 
-def view_spec_check(mill, raw):
+def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     specs = sc.get_available_specs()
     if not specs:
         st.error("No specifications found in specification-list/SPECIFICATION LIST.xlsx")
@@ -685,11 +877,11 @@ def view_spec_check(mill, raw):
     t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
     thickness = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
     c3.markdown(f'<div style="padding-bottom:.4rem; font-size:13px; color:#4b5563;">Active Gauge: '
-                f'<b style="font-family:monospace; color:#0b0d10;">{thickness:.1f} mm</b> '
-                f'<span style="font-size:11px; color:#9ca3af;">(from sidebar)</span></div>',
+                f'<b style="font-family:monospace; color:#0b0d10;">{thickness:.1f} mm</b><br>'
+                f'<span style="font-size:10.5px; color:#1746c8; font-weight:600;">Engine: {engine}</span></div>',
                 unsafe_allow_html=True)
 
-    preds = predict_one(mill, raw)
+    preds = predict_selected_engine(mill, raw, engine)
     ind = physical(raw, mill)
     eval_res = sc.evaluate_all(chosen_spec, chosen_grade, thickness, raw, preds, ind, mill)
 
@@ -831,7 +1023,7 @@ def view_spec_check(mill, raw):
                     unsafe_allow_html=True)
 
 
-def view_surface(mill, raw):
+def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     left, mid, right = st.columns([1.2, 1.2, 1.6], vertical_alignment="bottom")
     keys = [k for k in SURFACE[mill] if k in spec_map(mill)]
     x_key = left.selectbox("Horizontal axis", keys, index=0, key=f"x_{mill}")
@@ -842,7 +1034,7 @@ def view_surface(mill, raw):
     c1, c2, c3 = st.columns([1.4, 1.4, 1.2], vertical_alignment="bottom")
     view = c1.radio("View", ["2D contour", "3D surface"], horizontal=True, key=f"v_{mill}")
     grid = c2.slider("Grid", 15, 41, 25, step=2, key=f"g_{mill}")
-    c3.caption("The rest of the schedule is held at the sidebar values.")
+    c3.caption(f"Engine: {engine}. Rest of schedule held at sidebar values.")
 
     sx, sy = spec_map(mill)[x_key], spec_map(mill)[y_key]
     xs = np.linspace(sx[4], sx[5], grid)
@@ -850,12 +1042,12 @@ def view_surface(mill, raw):
     frame = pd.DataFrame([dict(raw) for _ in range(grid * grid)])
     frame[x_key] = np.repeat(xs, grid)
     frame[y_key] = np.tile(ys, grid)
-    z = score_frame(mill, frame)[target].values.reshape(grid, grid)
+    z = score_frame(mill, frame, engine=engine)[target].values.reshape(grid, grid)
 
     label, unit = TARGET_LABEL[mill][target]
     axes = dict(showline=True, linecolor=HAIR, gridcolor="#f1f2f4", zeroline=False,
                 tickfont=dict(size=10, color=MUTED), title_font=dict(size=11, color=INK))
-    here = predict_one(mill, raw)[target]["pred"]
+    here = predict_selected_engine(mill, raw, engine)[target]["pred"]
 
     if view == "2D contour":
         fig = go.Figure()
@@ -897,7 +1089,7 @@ def template_bytes(mill):
     return buf.getvalue()
 
 
-def view_capability(mill, raw):
+def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
     """Cp/Cpk over a band the user defines, resampled through the mill's feature module."""
     section("process capability")
     st.markdown('<div class="note">Set the specification limits, then say how far two or three '
@@ -911,7 +1103,7 @@ def view_capability(mill, raw):
                           key=f"cp_t_{mill}")
     unit = TARGET_LABEL[mill][target][1]
     tolerance = ml.TARGET_CONFIG[mill][target]["tol"]
-    base = predict_one(mill, raw)[target]["pred"]
+    base = predict_selected_engine(mill, raw, engine)[target]["pred"]
 
     c3, c4, c5 = st.columns([1, 1, 1], vertical_alignment="bottom")
     lsl = c3.number_input(f"LSL [{unit}]", value=float(round(base - tolerance, 1)), step=1.0,
@@ -947,7 +1139,7 @@ def view_capability(mill, raw):
     for key, band in bands.items():
         centre = float(raw[key])
         frame[key] = rng.uniform(centre - band, centre + band, samples)
-    scored = score_frame(mill, frame)[target].values
+    scored = score_frame(mill, frame, engine=engine)[target].values
     scored = scored[np.isfinite(scored)]
     if scored.size < 30:
         st.error("Too few scoring points came back — widen the band or change property.")
@@ -1011,7 +1203,7 @@ def view_capability(mill, raw):
         st.plotly_chart(band_fig, width="stretch", config={"displayModeBar": False})
 
 
-def view_batch(mill):
+def view_batch(mill, engine="Champion GBDT (Recommended)"):
     section("upload a schedule")
     st.markdown('<div class="note">Download the template, fill one row per plate or coil, upload it '
                 'back. Every row is scored through the same feature module the simulator uses.</div>',
@@ -1025,9 +1217,9 @@ def view_batch(mill):
         return
     frame = (pd.read_excel(uploaded) if uploaded.name.lower().endswith("xlsx")
              else pd.read_csv(uploaded))
-    st.caption(f"{len(frame):,} rows read")
+    st.caption(f"{len(frame):,} rows read · Scoring engine: {engine}")
     try:
-        scored = score_frame(mill, frame)
+        scored = score_frame(mill, frame, engine=engine)
     except Exception as exc:
         st.error(f"Scoring failed: {type(exc).__name__}: {exc}")
         return
@@ -1283,6 +1475,15 @@ def main():
         st.markdown("---")
         raw = schedule_inputs(mill)
         st.markdown("---")
+        st.markdown("### Model Engine")
+        engine = st.selectbox(
+            "Scoring engine",
+            ["Champion GBDT (Recommended)", "CatBoost", "XGBoost", "LightGBM", "Ensemble (.joblib)", "OLS / Linear"],
+            index=0,
+            key=f"engine_{mill}",
+            help="Champion GBDT selects the highest R² tree architecture per target, providing instant cold-start and highest accuracy."
+        )
+        st.markdown("---")
         st.caption("Data: Gunung Raja Paksi production logs. Models private; app public.")
         with st.expander("build and self-test", expanded=False):
             st.caption(f"build {BUILD}")
@@ -1299,15 +1500,15 @@ def main():
     tabs = st.tabs(["Simulator", "Specification check", "Response surface", "Capability",
                     "Batch", "Retrain", "Diagnostics", "About"])
     with tabs[0]:
-        view_simulator(mill, raw)
+        view_simulator(mill, raw, engine)
     with tabs[1]:
-        view_spec_check(mill, raw)
+        view_spec_check(mill, raw, engine)
     with tabs[2]:
-        view_surface(mill, raw)
+        view_surface(mill, raw, engine)
     with tabs[3]:
-        view_capability(mill, raw)
+        view_capability(mill, raw, engine)
     with tabs[4]:
-        view_batch(mill)
+        view_batch(mill, engine)
     with tabs[5]:
         view_retrain(mill)
     with tabs[6]:

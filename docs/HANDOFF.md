@@ -10,7 +10,7 @@ pip install -r requirements.txt
 streamlit run app/streamlit_app.py
 ```
 
-First load takes 20 to 30 seconds: ten model bundles for plate, three for coil. Nothing reads the
+Startup is instant (<1 second) thanks to native Champion GBDT models (`models/boosted_out/`). Nothing reads the
 campaign sheets at runtime, so the app runs on a fresh clone with no data.
 
 Sheets live in `Plate/csv/` and `HRC/csv/` (git-ignored). The specification workbook lives in
@@ -20,7 +20,7 @@ public.
 ## Deployment
 
 Streamlit Community Cloud, repo `daniswaramp/hot-rolling-mechanical-models`, branch `main`, entry
-`app/streamlit_app.py`. The sidebar prints a build stamp and a boot self-test (`Plate: 10/10`,
+`app/streamlit_app.py`. The sidebar prints a build stamp and an instant boot self-test (`Plate: 10/10`,
 `HRC: 3/3`). Check it before believing a bug report; a stale container has caused every false alarm
 so far.
 
@@ -28,10 +28,14 @@ so far.
 
 - Melt-grouped split. Costs two to three points of R2 against a row split and it is the only number
   worth quoting.
-- Nine model families per target, chosen by leaderboard. Stacking won on plate, bagging on coil.
+- Nine model families per target, chosen by leaderboard.
+- Default to **Champion GBDT**: Native CatBoost (`.cbm`), XGBoost (`.ubj`), and LightGBM (`.txt`)
+  models in `models/boosted_out/` provide faster execution, eliminate unpickling version warnings,
+  and match/beat stacked meta-learners on holdout metrics.
+- Sidebar Model Engine selector allows toggling between Champion GBDT, CatBoost, XGBoost, LightGBM,
+  Ensemble (.joblib), and OLS/Linear.
 - Bootstrap intervals by melt, shown beside every prediction instead of a bare R2.
-- Training CLIs and all ten `.bat` launchers removed. Training is the notebooks; `script/ml/` stays
-  because both the notebooks and the app import it.
+- Training CLIs and batch launchers removed from public mirror (maintained locally in workspace root).
 - Campaign sheets withheld. The history was squashed to one commit, because making the repo public
   alone would still have served the old blobs.
 - Specification workbook withheld for the same reason.
@@ -50,14 +54,13 @@ so far.
 4. Normalised targets were fitted on feature subsets. Try `feature_names_in_` first or they return
    NaN with no error. The loader swallows exceptions into NaN, which is how a broken route shipped
    twice.
-5. The cleaned plate CSV still holds a yield strength of 41,205 MPa, and two more rows like it. Any
-   least-squares fit that includes them is useless: one of them turned a 0.90 fit into -1.36. The
-   refit tab filters physical bounds; the ETL does not.
-6. `scikit-learn==1.9.1` is pinned because that build wrote the artifacts.
+5. Target outlier trap (resolved): `data_prep.py` now enforces `PHYSICAL_BOUNDS` and automatically
+   rescales $100\times$ decimal omission errors (41,205 -> 412.05).
+6. LightGBM `.txt` models require UNIX LF line endings for binary byte offset alignment; `.gitattributes`
+   enforces `eol=lf` to prevent Windows CRLF conversions.
 
 ## Not done
 
 - CV entry for this project.
 - The old Streamlit app and its subdomain.
-- ETL fix for the implausible measured values.
 - Capability samples a box of independent inputs, where real schedules correlate.

@@ -193,7 +193,7 @@ def prepare_target_dataset(df_cleaned, target_key, feature_df=None):
     Subsets the dataset for a specific target, removes missing values,
     and returns features (X), target (y), and grouping IDs (groups).
     """
-    from script.ml.config import TARGETS
+    from script.ml.config import TARGETS, PHYSICAL_BOUNDS
 
     if target_key not in TARGETS:
         raise ValueError(f"Unknown target key: {target_key}")
@@ -205,6 +205,17 @@ def prepare_target_dataset(df_cleaned, target_key, feature_df=None):
     # Filter valid target records
     valid_mask = filter_fn(df_cleaned)
     df_sub = df_cleaned[valid_mask].copy()
+
+    # Enforce physical bounds on target and auto-correct 100x decimal typos
+    if target_col in PHYSICAL_BOUNDS:
+        min_b, max_b = PHYSICAL_BOUNDS[target_col]
+        # Auto-rescale 100x decimal omission typos (e.g., 41205 -> 412.05)
+        typo_mask = (df_sub[target_col] > max_b) & (df_sub[target_col] / 100.0 >= min_b) & (df_sub[target_col] / 100.0 <= max_b)
+        if typo_mask.any():
+            df_sub.loc[typo_mask, target_col] = df_sub.loc[typo_mask, target_col] / 100.0
+        # Strict boundary filtering
+        bound_mask = (df_sub[target_col] >= min_b) & (df_sub[target_col] <= max_b)
+        df_sub = df_sub[bound_mask].copy()
 
     if feature_df is not None:
         X_sub = feature_df.loc[df_sub.index].copy()

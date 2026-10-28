@@ -1,0 +1,5 @@
+# Enforce LF for LightGBM model files to prevent byte offset corruptions
+models/boosted_out/*.txt text eol=lf
+models/boosted_out/*.cbm binary
+models/boosted_out/*.ubj binary
+*.joblib binary
