@@ -1769,7 +1769,7 @@ fitted via Levenberg-Marquardt / Trust Region Reflective non-linear optimization
 
     if mill == "Plate":
         st.markdown("#### Heavy Plate Constitutive Formulation")
-        st.latex(r"\sigma\ (	ext{MPa}) = \sigma_0 + k_{hp} \cdot d_lpha^{-1/2} + k_{ss} \cdot \sigma_{ss} + k_{ce} \cdot CE_{	ext{IIW}}^2 + k_{cr} \cdot CR + k_arepsilon \cdot arepsilon_{	ext{total}}")
+        st.latex(r"\sigma\ (\text{MPa}) = \sigma_0 + k_{\mathrm{hp}} \cdot d_{\alpha}^{-1/2} + k_{\mathrm{ss}} \cdot \sigma_{\mathrm{ss}} + k_{\mathrm{ce}} \cdot CE_{\mathrm{IIW}}^2 + k_{\mathrm{cr}} \cdot CR + k_{\varepsilon} \cdot \varepsilon_{\mathrm{total}}")
 
         st.markdown("""
 <div class="card" style="padding: 1rem 1.25rem; margin: 1rem 0;">
@@ -1816,7 +1816,7 @@ fitted via Levenberg-Marquardt / Trust Region Reflective non-linear optimization
 
     else:
         st.markdown("#### Steckel Mill HRC Constitutive Formulation")
-        st.latex(r"\sigma\ (	ext{MPa}) = \sigma_0 + k_{ss} \cdot \sigma_{ss} + k_{hp} \cdot t^{-1/2} + k_arepsilon \cdot arepsilon_{	ext{STM}}^n - k_T \cdot (CT_{	ext{avg}} - 500)")
+        st.latex(r"\sigma\ (\text{MPa}) = \sigma_0 + k_{\mathrm{ss}} \cdot \sigma_{\mathrm{ss}} + k_{\mathrm{hp}} \cdot t^{-1/2} + k_{\varepsilon} \cdot \varepsilon_{\mathrm{STM}}^n - k_T \cdot (CT_{\mathrm{avg}} - 500)")
 
         st.markdown("""
 <div class="card" style="padding: 1rem 1.25rem; margin: 1rem 0;">
