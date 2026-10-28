@@ -392,6 +392,7 @@ def predict_one(mill, raw):
     frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
     X = feature_matrix(mill, frame)
     ci = ml.get_ci_data(mill)
+    lb = ml.get_leaderboard_data(mill)
     out, last_error = {}, {}
     for key, bundle in bundles(mill).items():
         if bundle is None:
@@ -405,14 +406,23 @@ def predict_one(mill, raw):
             except Exception as exc:
                 last_error[key] = f"{type(exc).__name__}: {exc}"
         half = ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
+        r2_val = 0.60
         if not ci.empty and "Target" in ci.columns:
             row = ci[ci["Target"] == key]
-            if not row.empty and "Val_RMSE" in row.columns:
-                half = 1.96 * (float(row["Val_RMSE"].values[0]) / np.sqrt(50))
+            if not row.empty:
+                if "Val_RMSE" in row.columns and pd.notna(row["Val_RMSE"].values[0]):
+                    half = 1.96 * (float(row["Val_RMSE"].values[0]) / np.sqrt(50))
+                if "Val_R2" in row.columns and pd.notna(row["Val_R2"].values[0]):
+                    r2_val = float(row["Val_R2"].values[0])
+        elif not lb.empty and "Target" in lb.columns:
+            row = lb[lb["Target"] == key]
+            if not row.empty and "Final_Val_R2" in row.columns and pd.notna(row["Final_Val_R2"].values[0]):
+                r2_val = float(row["Final_Val_R2"].values[0])
         label, unit = TARGET_LABEL[mill].get(key, (key, ""))
         out[key] = {"name": label, "pred": round(value, 2) if np.isfinite(value) else float("nan"),
                     "unit": unit, "ci_low": round(value - half, 2) if np.isfinite(value) else float("nan"),
                     "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan"),
+                    "r2": r2_val,
                     "error": last_error.get(key, "")}
     return out
 
@@ -823,10 +833,15 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
             extras[family] = predict_boosted(mill, raw, key)
     targets_table(mill, preds, extras, engine_label=engine)
     if extras:
-        st.caption("Holdout R² of the added families, averaged over targets: "
-                   + ", ".join(f"{f} {np.nanmean([v['r2'] for v in extras[f].values()]):.2f}"
-                               for f in extras)
-                   + ". Where a linear fit is hopeless the number says so.")
+        parts = []
+        for f in extras:
+            r2s = [float(v["r2"]) for v in extras[f].values() if isinstance(v, dict) and "r2" in v and pd.notna(v.get("r2"))]
+            if r2s:
+                parts.append(f"{f} {np.nanmean(r2s):.2f}")
+        if parts:
+            st.caption("Holdout R² of the added families, averaged over targets: "
+                       + ", ".join(parts)
+                       + ". Where a linear fit is hopeless the number says so.")
 
     broken = {k: v["error"] for k, v in preds.items() if v.get("error")}
     if broken:
