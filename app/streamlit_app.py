@@ -1,4 +1,4 @@
-"""Dual-mill mechanical property platform — fresh technical white UI.
+"""Plate Mill & Steckel Mill Prediction Platform — fresh technical white UI.
 
 Heavy plate and Steckel mill coil, one model layer. Sections: simulator, response surface, batch,
 retrain, diagnostics.
@@ -24,7 +24,7 @@ import model_loader as ml  # noqa: E402
 import spec_checker as sc  # noqa: E402
 
 st.set_page_config(
-    page_title="Dual-mill property platform",
+    page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -758,14 +758,28 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
 
 # ----------------------------------------------------------------------------- header
 def header(mill, n_targets):
-    route = ("Heavy plate · rougher, finisher, laminar ACC, optional normalising"
-             if mill == "Plate" else
-             "Steckel coil · rougher, reversing Steckel mill, runout table, downcoiler")
+    if mill == "Plate":
+        lede = ("An end-to-end predictive analytics suite that extracts engineered domain features across "
+                "roughing, finishing, laminar ACC, and optional normalizing routes, including cumulative "
+                "drafting strains, recrystallization stops, and cooling-rate kinetics. Benchmarking Ordinary "
+                "Least Squares (OLS), non-linear regression splines, and fine-tuned machine learning ensembles "
+                "validated on strict melt-grouped holdouts with bootstrap uncertainty estimation, the engine predicts "
+                "10 certified mechanical properties while executing multi-iterative residual and stability diagnostics. "
+                "Continuously maps dynamic Cp and Cpk process capability indices against tolerance bands and identifies "
+                "optimal setpoints using fine-tuned 2D and 3D response surface methodology (RSM) visualizations.")
+    else:
+        lede = ("An end-to-end predictive analytics suite that extracts engineered domain features across "
+                "roughing, reversing Steckel mill coiler boxes, runout table (ROT) laminar cooling, and downcoiling routes, "
+                "including cumulative drafting strains, thermal retention, and cooling kinetics. Benchmarking Ordinary "
+                "Least Squares (OLS), non-linear regression splines, and fine-tuned machine learning ensembles "
+                f"validated on strict melt-grouped holdouts with bootstrap uncertainty estimation, the engine predicts "
+                f"{n_targets} certified mechanical properties while executing multi-iterative residual and stability diagnostics. "
+                "Continuously maps dynamic Cp and Cpk process capability indices against tolerance bands and identifies "
+                "optimal setpoints using fine-tuned 2D and 3D response surface methodology (RSM) visualizations.")
     st.markdown(f"""
-<div class="kicker">Dual-mill property platform</div>
+<div class="kicker">Plate Mill & Steckel Mill Prediction Platform</div>
 <div class="title">Specification Limit & Mechanical Models</div>
-<div class="lede">{route}. {n_targets} certified properties, fitted on melt-grouped holdouts so
-sister plates never straddle the split.</div>
+<div class="lede">{lede}</div>
 """, unsafe_allow_html=True)
     hair()
 
