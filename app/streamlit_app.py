@@ -786,7 +786,7 @@ def schedule_inputs(mill):
             values["Rolling_Type"] = st.selectbox(
                 "Rolling type", ["AR", "TMCP", "N"], key=f"{mill}_rolling_type",
                 help="AR = as rolled, TMCP = thermomechanically controlled, N = normalised delivery.")
-        submitted = st.form_submit_button("Calculate", type="primary", width="stretch")
+        submitted = st.form_submit_button("Calculate", type="primary", use_container_width=True)
     if submitted or "schedule" not in st.session_state:
         st.session_state["schedule"] = dict(values)
         st.session_state["schedule_mill"] = mill
@@ -1075,7 +1075,7 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
                                      zaxis=dict(title=f"{label} [{unit}]", **axes),
                                      camera=dict(eye=dict(x=1.5, y=-1.5, z=1.0))),
                           paper_bgcolor="white")
-    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False, "scrollZoom": True})
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
     st.markdown(f'<div class="note">Surface held on the mill\'s own feature engineering, not a proxy: '
                 f'every node is a full pass through the {mill} pipeline. The marker is the current '
                 f'schedule at {here:.1f} {unit}.</div>', unsafe_allow_html=True)
@@ -1169,7 +1169,7 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
                       xaxis=dict(title=f"{TARGET_LABEL[mill][target][0]} [{unit}]", showline=True,
                                  linecolor=HAIR, gridcolor="#f4f5f7"),
                       yaxis=dict(title="count", showline=False, gridcolor="#f4f5f7"))
-    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     section("linear band per input")
     st.caption("Property against each drifting input, with a fitted line and a ±3σ band on the "
@@ -1200,7 +1200,7 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
                                           font=dict(size=11), x=0),
                                xaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
                                yaxis=dict(title=unit, showline=False, gridcolor="#f4f5f7"))
-        st.plotly_chart(band_fig, width="stretch", config={"displayModeBar": False})
+        st.plotly_chart(band_fig, use_container_width=True, config={"displayModeBar": False})
 
 
 def view_batch(mill, engine="Champion GBDT (Recommended)"):
@@ -1210,7 +1210,7 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
                 unsafe_allow_html=True)
     a, b = st.columns([1, 3], vertical_alignment="bottom")
     a.download_button("Template .xlsx", template_bytes(mill), file_name=f"{mill.lower()}_template.xlsx",
-                      width="stretch")
+                      use_container_width=True)
     uploaded = b.file_uploader("Filled sheet", type=["xlsx", "csv"], key=f"up_{mill}",
                                label_visibility="collapsed")
     if uploaded is None:
@@ -1225,7 +1225,7 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
         return
     table = pd.concat([frame[[c for c in frame.columns if c in spec_map(mill)]].reset_index(drop=True),
                        scored.add_prefix("pred_").reset_index(drop=True)], axis=1)
-    st.dataframe(table.head(200), width="stretch", height=320)
+    st.dataframe(table.head(200), use_container_width=True, height=320)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         table.to_excel(writer, index=False, sheet_name="scored")
@@ -1269,7 +1269,7 @@ def log_table(rows, key):
         return
     frame = pd.DataFrame(rows[-12:])[["when", "mill", "target", "model", "rows", "melts",
                                       "r2", "rmse", "split"]]
-    st.dataframe(frame.iloc[::-1], width="stretch", hide_index=True)
+    st.dataframe(frame.iloc[::-1], use_container_width=True, hide_index=True)
     st.download_button("Download training log (CSV)", frame.to_csv(index=False).encode(),
                        file_name="training_log.csv", key=f"logdl_{key}")
 
@@ -1283,7 +1283,7 @@ def view_retrain(mill):
 
     tl, tr = st.columns([1, 3], vertical_alignment="bottom")
     tl.download_button("Retrain template .xlsx", retrain_template_bytes(mill),
-                       file_name=f"{mill.lower()}_retrain_template.xlsx", width="stretch",
+                       file_name=f"{mill.lower()}_retrain_template.xlsx", use_container_width=True,
                        key=f"rttpl_{mill}")
     up = tr.file_uploader("Sheet with a measured property column", type=["xlsx", "csv"],
                           key=f"rt_{mill}", label_visibility="collapsed")
