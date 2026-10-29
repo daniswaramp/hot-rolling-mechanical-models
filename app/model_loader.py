@@ -178,6 +178,99 @@ def compute_physical_indicators(raw_dict: dict, mill_type: str) -> dict:
     }
 
 
+
+def compute_plate_normalizing_deltas(raw_inputs: dict):
+    """
+    Computes dynamic physical softening deltas for furnace-normalized Heavy Plate:
+    Delta TS = 12.0 + 8.5 * eps_FM + 0.35 * CR_ACC
+    Delta YS = 15.0 + 10.0 * eps_FM + 0.45 * CR_ACC
+    Delta EL = 1.5 + 0.03 * CR_ACC
+    """
+    plate_t = max(float(raw_inputs.get("Plate_T_mm", 16.0)), 1.0)
+    tb_t = float(raw_inputs.get("TB_Thickness_mm", plate_t * 2.0))
+    eps_fm = max(0.0, float(np.log(max(tb_t, plate_t * 1.01) / plate_t)))
+
+    frt = float(raw_inputs.get("FM_Finish_Temp", 830.0))
+    t_post = float(raw_inputs.get("ACC_Temp_Post_Laminar", 600.0))
+    headers = float(raw_inputs.get("ACC_Laminar_Header", raw_inputs.get("ACC_Headers_n", 0.0)))
+
+    cr_acc = max(0.0, float((frt - t_post) / plate_t * (headers + 0.5)))
+
+    delta_ts = 12.0 + (8.5 * eps_fm) + (0.35 * cr_acc)
+    delta_ys = 15.0 + (10.0 * eps_fm) + (0.45 * cr_acc)
+    delta_el = 1.5 + (0.03 * cr_acc)
+
+    return delta_ts, delta_ys, delta_el
+
+
+def apply_plate_normalizing_coupling(raw_inputs: dict, results: dict) -> dict:
+    """
+    Enforces physical metallurgy thermodynamic coupling:
+    Normalizing at ~920 °C erases TMCP dislocation density and fast cooling grain refinement.
+    Therefore:
+      TS_AN <= TS_BN - delta_ts  (Always lower tensile strength)
+      YS_AN <= YS_BN - delta_ys  (Always lower yield strength)
+      EL_AN >= EL_BN + delta_el  (Always higher elongation / ductility)
+    """
+    if "TS_BN" not in results or "TS_AN" not in results:
+        return results
+
+    ts_bn = results["TS_BN"].get("pred", np.nan)
+    ys_bn = results.get("YS_BN", {}).get("pred", np.nan)
+    el_bn = results.get("EL_BN", {}).get("pred", np.nan)
+
+    if not np.isfinite(ts_bn):
+        return results
+
+    delta_ts, delta_ys, delta_el = compute_plate_normalizing_deltas(raw_inputs)
+
+    # 1. Tensile Strength Coupling
+    ts_ceiling = round(ts_bn - delta_ts, 2)
+    raw_ts_an = results["TS_AN"].get("pred", np.nan)
+    if not np.isfinite(raw_ts_an) or raw_ts_an > ts_ceiling:
+        diff_an = (
+            results["TS_AN"]["ci_high"] - results["TS_AN"]["pred"]
+            if np.isfinite(results["TS_AN"].get("ci_high", np.nan))
+            else 10.0
+        )
+        results["TS_AN"]["pred"] = ts_ceiling
+        results["TS_AN"]["ci_low"] = round(ts_ceiling - diff_an, 2)
+        results["TS_AN"]["ci_high"] = round(ts_ceiling + diff_an, 2)
+        results["TS_AN"]["note"] = f"Physically coupled to blackplate (-{delta_ts:.1f} MPa softening)"
+
+    # 2. Yield Strength Coupling
+    if np.isfinite(ys_bn) and "YS_AN" in results:
+        ys_ceiling = round(ys_bn - delta_ys, 2)
+        raw_ys_an = results["YS_AN"].get("pred", np.nan)
+        if not np.isfinite(raw_ys_an) or raw_ys_an > ys_ceiling:
+            diff_an = (
+                results["YS_AN"]["ci_high"] - results["YS_AN"]["pred"]
+                if np.isfinite(results["YS_AN"].get("ci_high", np.nan))
+                else 10.0
+            )
+            results["YS_AN"]["pred"] = ys_ceiling
+            results["YS_AN"]["ci_low"] = round(ys_ceiling - diff_an, 2)
+            results["YS_AN"]["ci_high"] = round(ys_ceiling + diff_an, 2)
+            results["YS_AN"]["note"] = f"Physically coupled to blackplate (-{delta_ys:.1f} MPa softening)"
+
+    # 3. Elongation Coupling
+    if np.isfinite(el_bn) and "EL_AN" in results:
+        el_floor = round(el_bn + delta_el, 2)
+        raw_el_an = results["EL_AN"].get("pred", np.nan)
+        if not np.isfinite(raw_el_an) or raw_el_an < el_floor:
+            diff_an = (
+                results["EL_AN"]["ci_high"] - results["EL_AN"]["pred"]
+                if np.isfinite(results["EL_AN"].get("ci_high", np.nan))
+                else 1.2
+            )
+            results["EL_AN"]["pred"] = el_floor
+            results["EL_AN"]["ci_low"] = round(max(0.0, el_floor - diff_an), 2)
+            results["EL_AN"]["ci_high"] = round(el_floor + diff_an, 2)
+            results["EL_AN"]["note"] = f"Physically coupled to blackplate (+{delta_el:.1f}% ductility gain)"
+
+    return results
+
+
 def predict_single_sample(mill_type: str, raw_inputs: dict) -> dict:
     """
     Transforms raw inputs through exact metallurgical feature engineering and
@@ -234,4 +327,6 @@ def predict_single_sample(mill_type: str, raw_inputs: dict) -> dict:
             "val_r2": bundle.get("val_r2", None)
         }
 
+    if mill_type == "Plate":
+        results = apply_plate_normalizing_coupling(raw_inputs, results)
     return results

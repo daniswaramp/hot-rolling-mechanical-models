@@ -384,6 +384,25 @@ def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
                     break
                 except Exception:
                     continue
+    if mill == "Plate" and "TS_BN" in out.columns and "TS_AN" in out.columns:
+        plate_t = frame["Plate_T_mm"].fillna(16.0).clip(lower=1.0)
+        tb_t = frame["TB_Thickness_mm"].fillna(plate_t * 2.0)
+        eps_fm = np.maximum(0.0, np.log(np.maximum(tb_t, plate_t * 1.01) / plate_t))
+        frt = frame["FM_Finish_Temp"].fillna(830.0)
+        t_post = frame["ACC_Temp_Post_Laminar"].fillna(600.0)
+        hdr_col = "ACC_Laminar_Header" if "ACC_Laminar_Header" in frame.columns else "ACC_Headers_n"
+        headers = pd.to_numeric(frame.get(hdr_col, 0.0), errors="coerce").fillna(0.0)
+        cr_acc = np.maximum(0.0, (frt - t_post) / plate_t * (headers + 0.5))
+
+        delta_ts = 12.0 + (8.5 * eps_fm) + (0.35 * cr_acc)
+        delta_ys = 15.0 + (10.0 * eps_fm) + (0.45 * cr_acc)
+        delta_el = 1.5 + (0.03 * cr_acc)
+
+        out["TS_AN"] = np.minimum(out["TS_AN"], out["TS_BN"] - delta_ts)
+        if "YS_BN" in out.columns and "YS_AN" in out.columns:
+            out["YS_AN"] = np.minimum(out["YS_AN"], out["YS_BN"] - delta_ys)
+        if "EL_BN" in out.columns and "EL_AN" in out.columns:
+            out["EL_AN"] = np.maximum(out["EL_AN"], out["EL_BN"] + delta_el)
     return out
 
 
@@ -424,6 +443,8 @@ def predict_one(mill, raw):
                     "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan"),
                     "r2": r2_val,
                     "error": last_error.get(key, "")}
+    if mill == "Plate":
+        out = ml.apply_plate_normalizing_coupling(raw, out)
     return out
 
 
@@ -638,15 +659,17 @@ def predict_champion(mill, raw):
             "r2": cfg.get("r2", 0.0),
             "error": err
         }
+    if mill == "Plate":
+        out = ml.apply_plate_normalizing_coupling(raw, out)
     return out
 
 
 def predict_selected_engine(mill, raw, engine):
     """Dispatches prediction to the chosen engine."""
     if engine == "Champion GBDT (Recommended)":
-        return predict_champion(mill, raw)
+        out = predict_champion(mill, raw)
     elif engine == "Ensemble (.joblib)":
-        return predict_one(mill, raw)
+        out = predict_one(mill, raw)
     elif engine in ("CatBoost", "XGBoost", "LightGBM"):
         fam_key = {"CatBoost": "cat", "XGBoost": "xgb", "LightGBM": "lgbm"}[engine]
         boosted = predict_boosted(mill, raw, fam_key)
@@ -693,7 +716,6 @@ def predict_selected_engine(mill, raw, engine):
                     "r2": 0.0,
                     "error": "" if np.isfinite(value) else f"Not available in {engine}"
                 }
-        return out
     elif engine == "OLS / Linear":
         lin = predict_linear(mill, raw, "OLS")
         champ = predict_champion(mill, raw)
@@ -718,8 +740,12 @@ def predict_selected_engine(mill, raw, engine):
                 item = dict(champ[key])
                 item["error"] = "Linear R2 < 0.15 (showing Champion GBDT)"
                 out[key] = item
-        return out
-    return predict_champion(mill, raw)
+    else:
+        out = predict_champion(mill, raw)
+
+    if mill == "Plate":
+        out = ml.apply_plate_normalizing_coupling(raw, out)
+    return out
 
 
 def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
@@ -738,6 +764,9 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
             rmse_tol = ml.TARGET_CONFIG[mill][key]["tol"]
             fam = res.get("family", "")
             fam_badge = f'<span class="tag" style="margin-left:.4rem; font-size:9px;">{fam}</span>' if fam else ""
+            if mill == "Plate" and key in ("YS_AN", "TS_AN", "EL_AN"):
+                coupled_tip = res.get("note", "Coupled to blackplate via dynamic transformation kinetics")
+                fam_badge += f'<span class="tag" style="margin-left:.3rem; font-size:9px; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe;" title="{coupled_tip}">coupled</span>'
             extra_cells = "".join(
                 (f'<td class="alt">{extras[name][key]["pred"]:.1f}</td>'
                  if key in extras[name] and np.isfinite(extras[name][key].get("pred", np.nan)) else '<td class="alt muted">—</td>')
