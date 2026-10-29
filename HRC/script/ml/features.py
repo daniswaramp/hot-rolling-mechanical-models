@@ -25,9 +25,12 @@ def engineer_hrc_features(df: pd.DataFrame, is_train: bool = True, spec_map: dic
     X = pd.DataFrame(index=df.index)
 
     # 1. Base Dimensions
-    t = pd.to_numeric(df.get("Coil_T_mm"), errors='coerce').clip(lower=1.5, upper=25.0)
-    w = pd.to_numeric(df.get("Coil_W_mm"), errors='coerce').clip(lower=700.0, upper=2200.0)
-    tb = pd.to_numeric(df.get("TB_Thick_mm"), errors='coerce').clip(lower=15.0, upper=70.0)
+    t_s = df["Coil_T_mm"] if "Coil_T_mm" in df.columns else pd.Series(6.0, index=df.index)
+    t = pd.to_numeric(t_s, errors='coerce').fillna(6.0).clip(lower=1.5, upper=25.0)
+    w_s = df["Coil_W_mm"] if "Coil_W_mm" in df.columns else pd.Series(1250.0, index=df.index)
+    w = pd.to_numeric(w_s, errors='coerce').fillna(1250.0).clip(lower=700.0, upper=2200.0)
+    tb_s = df["TB_Thick_mm"] if "TB_Thick_mm" in df.columns else pd.Series(30.0, index=df.index)
+    tb = pd.to_numeric(tb_s, errors='coerce').fillna(30.0).clip(lower=15.0, upper=70.0)
 
     X["Coil_T_mm"] = t
     X["Coil_W_mm"] = w
@@ -78,10 +81,14 @@ def engineer_hrc_features(df: pd.DataFrame, is_train: bool = True, spec_map: dic
     X["Steckel_Draft_Ratio"] = (valid_tb - t) / valid_tb
 
     # 7. Thermal History
-    ttb = pd.to_numeric(df.get("Temp_Transfer_Bar_C"), errors='coerce').clip(lower=750.0, upper=1100.0)
-    ft = pd.to_numeric(df.get("Temp_FT_Avg_C"), errors='coerce').clip(lower=700.0, upper=980.0)
-    ct_top = pd.to_numeric(df.get("Temp_CT_Top_C"), errors='coerce').clip(lower=400.0, upper=750.0)
-    ct_bot = pd.to_numeric(df.get("Temp_CT_Bot_C"), errors='coerce').clip(lower=400.0, upper=750.0)
+    ttb_s = df["Temp_Transfer_Bar_C"] if "Temp_Transfer_Bar_C" in df.columns else pd.Series(950.0, index=df.index)
+    ttb = pd.to_numeric(ttb_s, errors='coerce').fillna(950.0).clip(lower=750.0, upper=1100.0)
+    ft_s = df["Temp_FT_Avg_C"] if "Temp_FT_Avg_C" in df.columns else pd.Series(850.0, index=df.index)
+    ft = pd.to_numeric(ft_s, errors='coerce').fillna(850.0).clip(lower=700.0, upper=980.0)
+    ct_top_s = df["Temp_CT_Top_C"] if "Temp_CT_Top_C" in df.columns else pd.Series(580.0, index=df.index)
+    ct_top = pd.to_numeric(ct_top_s, errors='coerce').fillna(580.0).clip(lower=400.0, upper=750.0)
+    ct_bot_s = df["Temp_CT_Bot_C"] if "Temp_CT_Bot_C" in df.columns else pd.Series(580.0, index=df.index)
+    ct_bot = pd.to_numeric(ct_bot_s, errors='coerce').fillna(580.0).clip(lower=400.0, upper=750.0)
     ct_avg = pd.concat([ct_top, ct_bot], axis=1).mean(axis=1)
 
     X["Temp_Transfer_Bar_C"] = ttb

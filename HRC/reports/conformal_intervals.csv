@@ -1,0 +1,4 @@
+Mill,Target,Unit,Champion_Family,Val_N,Val_RMSE,Val_MAE,Conformal_Half_Width_95,Coverage_95_Pct,Conformal_Half_Width_90,Coverage_90_Pct,Old_Naive_Half_Width,Old_Naive_Coverage_Pct
+HRC,YS_BN,MPa,cat,2221,26.931,20.159,53.25,95.0,42.23,90.0,7.46,25.8
+HRC,TS_BN,MPa,cat,2221,18.721,13.896,36.91,95.0,29.61,90.0,5.19,26.3
+HRC,EL_BN,%,cat,2221,2.746,2.155,5.43,95.0,4.46,90.0,0.76,23.4

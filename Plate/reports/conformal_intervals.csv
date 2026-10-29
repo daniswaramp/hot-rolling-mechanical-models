@@ -1,0 +1,11 @@
+Mill,Target,Unit,Champion_Family,Val_N,Val_RMSE,Val_MAE,Conformal_Half_Width_95,Coverage_95_Pct,Conformal_Half_Width_90,Coverage_90_Pct,Old_Naive_Half_Width,Old_Naive_Coverage_Pct
+Plate,YS_BN,MPa,cat,1632,16.972,12.722,33.96,95.0,25.85,90.0,4.7,25.2
+Plate,TS_BN,MPa,xgb,1631,13.687,9.447,27.26,95.0,20.55,90.0,3.79,31.3
+Plate,EL_BN,%,lgbm,1625,2.325,1.702,4.46,95.0,3.49,90.0,0.64,26.0
+Plate,YS_AN,MPa,cat,167,19.027,12.98,32.68,94.6,24.77,89.8,5.27,29.3
+Plate,TS_AN,MPa,xgb,167,17.715,12.557,39.31,94.6,31.2,89.8,4.91,33.5
+Plate,EL_AN,%,lgbm,167,2.715,2.077,5.04,94.6,4.07,89.8,0.75,26.3
+Plate,Impact_0C,J,cat,266,52.061,40.605,99.4,94.7,87.55,89.8,14.43,24.4
+Plate,Impact_m20C,J,cat,77,60.797,49.696,121.36,94.8,106.99,89.6,16.85,18.2
+Plate,Impact_m40C,J,lgbm,42,57.101,41.632,118.77,92.9,86.95,88.1,15.83,28.6
+Plate,Z_Test,%,joblib_bundle,86,5.978,4.726,9.95,94.2,8.58,89.5,1.66,23.3

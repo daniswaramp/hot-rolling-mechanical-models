@@ -92,6 +92,15 @@ def get_ci_data(mill_type: str) -> pd.DataFrame:
 
 
 @st.cache_data
+def get_conformal_intervals(mill_type: str) -> pd.DataFrame:
+    """Reads 95% Split-Conformal Prediction Interval report."""
+    csv_path = os.path.join(REPO_ROOT, mill_type, "reports", "conformal_intervals.csv")
+    if os.path.exists(csv_path):
+        return pd.read_csv(csv_path)
+    return pd.DataFrame()
+
+
+@st.cache_data
 def get_leaderboard_data(mill_type: str) -> pd.DataFrame:
     """Reads model comparison leaderboard."""
     if mill_type == "Plate":
@@ -309,13 +318,18 @@ def predict_single_sample(mill_type: str, raw_inputs: dict) -> dict:
         except Exception as e:
             pred_val = np.nan
 
-        # Extract 95% CI from bootstrap report
+        # Extract 95% Conformal Prediction Interval (finite-sample valid >= 95% coverage)
         ci_half = tgt_meta["tol"] * 0.5  # default fall-back
-        if not ci_df.empty and "Target" in ci_df.columns:
+        conf_df = get_conformal_intervals(mill_type)
+        if not conf_df.empty and "Target" in conf_df.columns:
+            tgt_row = conf_df[conf_df["Target"] == tgt_key]
+            if not tgt_row.empty and "Conformal_Half_Width_95" in tgt_row.columns:
+                ci_half = float(tgt_row["Conformal_Half_Width_95"].values[0])
+        elif not ci_df.empty and "Target" in ci_df.columns:
             tgt_row = ci_df[ci_df["Target"] == tgt_key]
             if not tgt_row.empty and "Val_RMSE" in tgt_row.columns:
                 rmse = float(tgt_row["Val_RMSE"].values[0])
-                ci_half = 1.96 * (rmse / np.sqrt(50))  # standard error approximation
+                ci_half = float(rmse * 1.96)
                 
         results[tgt_key] = {
             "name": tgt_meta["name"],

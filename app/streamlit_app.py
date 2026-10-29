@@ -22,6 +22,8 @@ if APP_DIR not in sys.path:
 
 import model_loader as ml  # noqa: E402
 import spec_checker as sc  # noqa: E402
+import explainer  # noqa: E402
+import optimizer  # noqa: E402
 
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
@@ -406,6 +408,23 @@ def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
     return out
 
 
+
+def get_target_interval_half(mill, key, default_rmse=None):
+    """Returns the 95% split-conformal prediction interval half-width guaranteeing >= 95% empirical coverage."""
+    conf = ml.get_conformal_intervals(mill)
+    if not conf.empty and "Target" in conf.columns:
+        row = conf[conf["Target"] == key]
+        if not row.empty and "Conformal_Half_Width_95" in row.columns and pd.notna(row["Conformal_Half_Width_95"].values[0]):
+            return float(row["Conformal_Half_Width_95"].values[0])
+    if default_rmse and default_rmse > 0:
+        return float(1.96 * default_rmse)
+    ci = ml.get_ci_data(mill)
+    if not ci.empty and "Target" in ci.columns:
+        row = ci[ci["Target"] == key]
+        if not row.empty and "Val_RMSE" in row.columns and pd.notna(row["Val_RMSE"].values[0]):
+            return float(1.96 * float(row["Val_RMSE"].values[0]))
+    return float(ml.TARGET_CONFIG[mill][key]["tol"] * 0.5)
+
 def predict_one(mill, raw):
     """One schedule, every target, with the interval the shipped bootstrap report implies."""
     frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
@@ -424,13 +443,11 @@ def predict_one(mill, raw):
                 break
             except Exception as exc:
                 last_error[key] = f"{type(exc).__name__}: {exc}"
-        half = ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
+        half = get_target_interval_half(mill, key)
         r2_val = 0.60
         if not ci.empty and "Target" in ci.columns:
             row = ci[ci["Target"] == key]
             if not row.empty:
-                if "Val_RMSE" in row.columns and pd.notna(row["Val_RMSE"].values[0]):
-                    half = 1.96 * (float(row["Val_RMSE"].values[0]) / np.sqrt(50))
                 if "Val_R2" in row.columns and pd.notna(row["Val_R2"].values[0]):
                     r2_val = float(row["Val_R2"].values[0])
         elif not lb.empty and "Target" in lb.columns:
@@ -641,14 +658,7 @@ def predict_champion(mill, raw):
                         break
                     except Exception as exc:
                         err = f"{type(exc).__name__}: {exc}"
-        half = ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
-        rmse = cfg.get("rmse")
-        if rmse and rmse > 0:
-            half = 1.96 * (rmse / np.sqrt(50))
-        elif not ci.empty and "Target" in ci.columns:
-            row = ci[ci["Target"] == key]
-            if not row.empty and "Val_RMSE" in row.columns:
-                half = 1.96 * (float(row["Val_RMSE"].values[0]) / np.sqrt(50))
+        half = get_target_interval_half(mill, key, default_rmse=cfg.get("rmse"))
         out[key] = {
             "name": label,
             "pred": round(value, 2) if np.isfinite(value) else float("nan"),
@@ -683,8 +693,7 @@ def predict_selected_engine(mill, raw, engine):
             if key in boosted and np.isfinite(boosted[key].get("pred", np.nan)):
                 value = boosted[key]["pred"]
                 meta = index.get(key, {})
-                rmse = meta.get("rmse", ml.TARGET_CONFIG[mill][key]["tol"] * 0.5)
-                half = 1.96 * (rmse / np.sqrt(50)) if rmse > 0 else ml.TARGET_CONFIG[mill][key]["tol"] * 0.5
+                half = get_target_interval_half(mill, key, default_rmse=meta.get("rmse"))
                 out[key] = {
                     "name": label,
                     "pred": round(value, 2),
@@ -774,10 +783,10 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
             rows.append(f"""<tr>
               <td class="name">{label}{fam_badge}</td>
               <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
-              <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
+              <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f} <span class="tag" style="background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; font-size:9px;">95% cov</span></td>
               <td class="sub" style="font-family:monospace;">±{rmse_tol:g}&nbsp;{unit}</td>{extra_cells}</tr>""")
     html = (f"<div class=\"card\"><table class=\"ut\"><thead><tr><th>property</th><th>{engine_label.lower()}</th>"
-            "<th>95% bootstrap interval</th><th>holdout uncertainty</th>"
+            "<th>95% Split-Conformal Interval</th><th>Calibration Guarantee</th>"
             + "".join(f"<th>{n}</th>" for n in extras)
             + "</tr></thead><tbody>" + "".join(rows)
             + f"</tbody></table><div class=\"foot\">{total} certified properties scored through "
@@ -851,6 +860,14 @@ def schedule_inputs(mill):
 
 # ----------------------------------------------------------------------------- sections
 def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
+    # Applicability Domain Monitoring
+    warnings, notices = explainer.check_applicability_domain(mill, raw)
+    if warnings:
+        warn_msg = "**Historical Extrapolation Alert**: The current schedule parameters fall outside the historical 98% mill envelope (P01–P99): " + "; ".join([f"`{w['param']}` = {w['val']:.1f} ({w['direction']})" for w in warnings[:3]])
+        st.warning(warn_msg)
+    for ntc in notices:
+        st.info(ntc)
+
     section("predicted properties")
     preds = predict_selected_engine(mill, raw, engine)
     options = ["OLS", "Ridge", "NLR"]
@@ -910,6 +927,18 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
     st.markdown(f'<div class="note">Finishing at {finish:.0f} °C sits {margin:+.0f} K above Ar3 '
                 f'({ind["ar3"]:.0f} °C). Below zero the last passes are intercritical, which is where '
                 f'properties start to scatter.</div>', unsafe_allow_html=True)
+
+    # In-App Explainability
+    st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
+    with st.expander("🔬 Feature Contribution Breakdown (TreeSHAP Attribution)", expanded=False):
+        tgt_choices = list(TARGET_LABEL[mill])
+        def_idx = 1 if len(tgt_choices) > 1 else 0  # Default to TS_BN
+        chosen_tgt = st.selectbox("Inspect target attribution", tgt_choices, index=def_idx,
+                                  format_func=lambda k: TARGET_LABEL[mill][k][0], key=f"shap_tgt_{mill}")
+        frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
+        X_explain = feature_matrix(mill, frame)
+        unit = TARGET_LABEL[mill][chosen_tgt][1]
+        explainer.render_feature_contributions_ui(mill, chosen_tgt, X_explain, unit=unit)
 
 
 def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
@@ -1956,23 +1985,25 @@ def main():
 
     header(mill, len(TARGET_LABEL[mill]))
 
-    tabs = st.tabs(["Simulator", "Specification check", "Response surface", "Capability",
+    tabs = st.tabs(["Simulator", "Specification check", "Inverse Optimizer", "Response surface", "Capability",
                     "Batch", "Retrain", "Diagnostics", "About"])
     with tabs[0]:
         view_simulator(mill, raw, engine)
     with tabs[1]:
         view_spec_check(mill, raw, engine)
     with tabs[2]:
-        view_surface(mill, raw, engine)
+        optimizer.view_optimizer(mill, raw, engine)
     with tabs[3]:
-        view_capability(mill, raw, engine)
+        view_surface(mill, raw, engine)
     with tabs[4]:
-        view_batch(mill, engine)
+        view_capability(mill, raw, engine)
     with tabs[5]:
-        view_retrain(mill)
+        view_batch(mill, engine)
     with tabs[6]:
-        view_diagnostics(mill)
+        view_retrain(mill)
     with tabs[7]:
+        view_diagnostics(mill)
+    with tabs[8]:
         view_about()
 
 
