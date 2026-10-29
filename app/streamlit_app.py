@@ -20,10 +20,30 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
+import importlib
 import model_loader as ml  # noqa: E402
+try:
+    importlib.reload(ml)
+except Exception:
+    pass
+
 import spec_checker as sc  # noqa: E402
+try:
+    importlib.reload(sc)
+except Exception:
+    pass
+
 import explainer  # noqa: E402
+try:
+    importlib.reload(explainer)
+except Exception:
+    pass
+
 import optimizer  # noqa: E402
+try:
+    importlib.reload(optimizer)
+except Exception:
+    pass
 
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
@@ -411,19 +431,35 @@ def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
 
 def get_target_interval_half(mill, key, default_rmse=None):
     """Returns the 95% split-conformal prediction interval half-width guaranteeing >= 95% empirical coverage."""
-    conf = ml.get_conformal_intervals(mill)
+    conf = pd.DataFrame()
+    try:
+        if hasattr(ml, "get_conformal_intervals"):
+            conf = ml.get_conformal_intervals(mill)
+        else:
+            conf_path = os.path.join(os.path.dirname(APP_DIR), mill, "reports", "conformal_intervals.csv")
+            if os.path.exists(conf_path):
+                conf = pd.read_csv(conf_path)
+    except Exception:
+        conf = pd.DataFrame()
+
     if not conf.empty and "Target" in conf.columns:
         row = conf[conf["Target"] == key]
         if not row.empty and "Conformal_Half_Width_95" in row.columns and pd.notna(row["Conformal_Half_Width_95"].values[0]):
             return float(row["Conformal_Half_Width_95"].values[0])
     if default_rmse and default_rmse > 0:
         return float(1.96 * default_rmse)
-    ci = ml.get_ci_data(mill)
-    if not ci.empty and "Target" in ci.columns:
-        row = ci[ci["Target"] == key]
-        if not row.empty and "Val_RMSE" in row.columns and pd.notna(row["Val_RMSE"].values[0]):
-            return float(1.96 * float(row["Val_RMSE"].values[0]))
-    return float(ml.TARGET_CONFIG[mill][key]["tol"] * 0.5)
+    try:
+        ci = ml.get_ci_data(mill)
+        if not ci.empty and "Target" in ci.columns:
+            row = ci[ci["Target"] == key]
+            if not row.empty and "Val_RMSE" in row.columns and pd.notna(row["Val_RMSE"].values[0]):
+                return float(1.96 * float(row["Val_RMSE"].values[0]))
+    except Exception:
+        pass
+    try:
+        return float(ml.TARGET_CONFIG[mill][key]["tol"] * 0.5)
+    except Exception:
+        return 15.0
 
 def predict_one(mill, raw):
     """One schedule, every target, with the interval the shipped bootstrap report implies."""

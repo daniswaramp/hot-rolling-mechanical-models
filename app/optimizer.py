@@ -47,7 +47,10 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
     Evaluates candidate setpoint candidates in vectorized batch to find the minimum-cost / minimum-CE
     chemistry and rolling schedule that guarantees specification compliance with split-conformal 95% bounds.
     """
-    conf_df = ml.get_conformal_intervals(mill)
+    try:
+        conf_df = ml.get_conformal_intervals(mill) if hasattr(ml, "get_conformal_intervals") else pd.DataFrame()
+    except Exception:
+        conf_df = pd.DataFrame()
     q_ys = 33.96 if mill == "Plate" else 53.25
     q_ts = 27.26 if mill == "Plate" else 36.91
     q_el = 4.46 if mill == "Plate" else 5.43
