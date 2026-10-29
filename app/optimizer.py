@@ -203,7 +203,8 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
         "n_compliant": len(compliant_df),
         "q_ys": q_ys,
         "q_ts": q_ts,
-        "q_el": q_el
+        "q_el": q_el,
+        "candidates_df": cand_df
     }
 
 

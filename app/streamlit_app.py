@@ -1681,14 +1681,24 @@ def view_diagnostics(mill):
             unsafe_allow_html=True,
         )
 
-    # 4. Interactive EDA & Audit Charts
+    # 4. Interactive Engineering & Technology Deep-Dive Tabs
     st.markdown('<div style="height:1.8rem"></div>', unsafe_allow_html=True)
-    st.markdown("#### 3. Interactive EDA & Model Audit Charts")
+    st.markdown("#### 3. Technology, Training & Optimization Deep Dive")
+    st.caption("Interactive inspection of model calibration, inverse setpoint optimization, physical metallurgy features, and cloud training architecture.")
     
     val_df = load_val_predictions(mill)
-    audit_tabs = st.tabs(["🎯 Parity & Residual Errors (Held-Out Melts)", "📊 Process Operating Window (EDA)", "🏆 Top Feature Drivers"])
+    conf_df = ml.get_conformal_intervals(mill)
     
-    with audit_tabs[0]:
+    diag_tabs = st.tabs([
+        "🎯 Parity & Residual Errors",
+        "🛡️ Conformal Calibration & Uncertainty",
+        "⚙️ Inverse Optimization & Pareto Frontier",
+        "🔬 Metallurgy Features & Physics Sandbox",
+        "🏗️ System Architecture & Cloud Training",
+        "📊 Process Window (EDA) & Drivers"
+    ])
+    
+    with diag_tabs[0]:
         st.caption("Visual audit of predictions versus actual measured test values on held-out melt heats.")
         avail_targets = []
         if mill == "Plate":
@@ -1767,7 +1777,267 @@ def view_diagnostics(mill):
         else:
             st.caption("Validation prediction logs not available.")
 
-    with audit_tabs[1]:
+    with diag_tabs[1]:
+        st.caption("Inductive split-conformal prediction intervals guarantee distribution-free finite-sample coverage on held-out ladle melts.")
+        st.markdown(r"""
+        <div class="note" style="margin-bottom:1rem;">
+          <b>Why Gaussian Standard Errors Fail in Production</b>: The naive formula <code>±1.96 · RMSE / √n</code> measures the confidence of an aggregate sample mean, <b>not an individual rolled plate or coil</b>. In single-unit plant testing, naive intervals capture only ~25% of certified heats. Split-conformal calibration computes the exact empirical quantile of nonconformity scores $\hat{q}_{0.95}$, guaranteeing $\ge 95\%$ coverage on every future heat without assuming normal distributions.
+        </div>
+        """, unsafe_allow_html=True)
+
+        if not conf_df.empty and "Target" in conf_df.columns:
+            avail_conf_targets = conf_df["Target"].tolist()
+            sel_conf_t = st.selectbox("Select Target Property to Inspect Conformal Calibration", avail_conf_targets,
+                                      format_func=lambda k: TARGET_LABEL[mill].get(k, (k, ""))[0], key=f"sel_conf_{mill}")
+            conf_row = conf_df[conf_df["Target"] == sel_conf_t].iloc[0]
+
+            c_m1, c_m2, c_m3, c_m4, c_m5 = st.columns(5)
+            c_m1.metric("Held-Out Test Samples", f"{int(conf_row['Val_N']):,}")
+            c_m2.metric("Holdout RMSE", f"{conf_row['Val_RMSE']:.2f} {conf_row.get('Unit', '')}")
+            c_m3.metric("Naive Formula (Old)", f"±{conf_row['Old_Naive_Half_Width']:.2f} {conf_row.get('Unit', '')}",
+                        delta=f"Coverage: {conf_row['Old_Naive_Coverage_Pct']:.1f}% (FAIL)", delta_color="inverse")
+            c_m4.metric("95% Conformal (Active)", f"±{conf_row['Conformal_Half_Width_95']:.2f} {conf_row.get('Unit', '')}",
+                        delta=f"Coverage: {conf_row['Coverage_95_Pct']:.1f}% (VALID)", delta_color="normal")
+            c_m5.metric("90% Conformal", f"±{conf_row['Conformal_Half_Width_90']:.2f} {conf_row.get('Unit', '')}",
+                        delta=f"Coverage: {conf_row['Coverage_90_Pct']:.1f}%", delta_color="normal")
+
+            col_cc1, col_cc2 = st.columns([1.2, 1.0])
+            with col_cc1:
+                fig_cov = go.Figure()
+                fig_cov.add_trace(go.Bar(
+                    x=conf_df["Target"], y=conf_df["Old_Naive_Coverage_Pct"],
+                    name="Old Naive Formula (~25%)", marker_color="#f87171",
+                    text=[f"{v:.1f}%" for v in conf_df["Old_Naive_Coverage_Pct"]], textposition="auto"
+                ))
+                fig_cov.add_trace(go.Bar(
+                    x=conf_df["Target"], y=conf_df["Coverage_95_Pct"],
+                    name="95% Split-Conformal (Calibrated)", marker_color="#1746c8",
+                    text=[f"{v:.1f}%" for v in conf_df["Coverage_95_Pct"]], textposition="auto"
+                ))
+                fig_cov.add_hline(y=95.0, line_dash="dash", line_color="#10b981", line_width=1.5,
+                                  annotation_text="95% Nominal Guarantee", annotation_position="top left")
+                fig_cov.update_layout(
+                    title=dict(text="Empirical Coverage Audit: Naive Gaussian SE vs Split-Conformal Calibration", font=dict(size=12)),
+                    xaxis=dict(title="Target Mechanical Property", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                    yaxis=dict(title="Empirical Coverage on Held-Out Heats (%)", range=[0, 105], showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                    barmode="group", height=360, margin=dict(l=10, r=10, t=35, b=10),
+                    plot_bgcolor="white", paper_bgcolor="white", legend=dict(orientation="h", y=1.12, x=0.0)
+                )
+                st.plotly_chart(fig_cov, use_container_width=True)
+
+            with col_cc2:
+                fig_w = go.Figure()
+                fig_w.add_trace(go.Bar(
+                    x=conf_df["Target"], y=conf_df["Conformal_Half_Width_95"],
+                    name="95% Conformal Width (±)", marker_color="#3b82f6",
+                    text=[f"±{v:.1f} {u}" for v, u in zip(conf_df["Conformal_Half_Width_95"], conf_df["Unit"])], textposition="auto"
+                ))
+                fig_w.add_trace(go.Bar(
+                    x=conf_df["Target"], y=conf_df["Old_Naive_Half_Width"],
+                    name="Old Naive Width (±)", marker_color="#d1d5db",
+                    text=[f"±{v:.1f}" for v in conf_df["Old_Naive_Half_Width"]], textposition="auto"
+                ))
+                fig_w.update_layout(
+                    title=dict(text=f"Prediction Interval Half-Width Comparison ({mill})", font=dict(size=12)),
+                    xaxis=dict(title="Target Property", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                    yaxis=dict(title="Interval Half-Width (± Value)", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                    barmode="group", height=360, margin=dict(l=10, r=10, t=35, b=10),
+                    plot_bgcolor="white", paper_bgcolor="white", legend=dict(orientation="h", y=1.12, x=0.0)
+                )
+                st.plotly_chart(fig_w, use_container_width=True)
+        else:
+            st.caption("Conformal interval data not available.")
+
+    with diag_tabs[2]:
+        st.caption("Reverse engineering: solving for optimal chemistry and thermomechanical rolling setpoints to fulfill target specification limits at minimal Carbon Equivalent.")
+        presets = optimizer.PRESET_GRADES[mill]
+        c_s1, c_s2, c_s3 = st.columns([2.0, 1.5, 1.5], vertical_alignment="bottom")
+        diag_opt_spec = c_s1.selectbox("Customer Specification Standard", list(presets.keys()), index=0, key=f"diag_opt_spec_{mill}")
+        s_cfg = presets[diag_opt_spec]
+        d_thick = c_s2.slider("Finish Gauge (mm)", min_value=6.0 if mill=="HRC" else 10.0, max_value=16.0 if mill=="HRC" else 60.0,
+                              value=10.0 if mill=="HRC" else 20.0, step=1.0, key=f"diag_opt_thick_{mill}")
+        d_obj = c_s3.selectbox("Optimization Objective", ["Minimum CE_IIW (Cost)", "Maximum Safety Buffer (Cpk)"], index=0, key=f"diag_opt_obj_{mill}")
+        obj_key = "min_ce" if "Cost" in d_obj else "max_buffer"
+
+        default_base = {spec[1]: spec[6] for spec in SPECS[mill] if len(spec) > 6}
+        opt_run = optimizer.run_inverse_optimization(mill, s_cfg, d_thick, default_base, objective_mode=obj_key)
+
+        if opt_run and "candidates_df" in opt_run and not opt_run["candidates_df"].empty:
+            cands = opt_run["candidates_df"]
+            best = opt_run["best_schedule"]
+            q_ys = opt_run["q_ys"]
+            q_ts = opt_run["q_ts"]
+
+            o_m1, o_m2, o_m3, o_m4 = st.columns(4)
+            o_m1.metric("Evaluated Schedules", f"{opt_run['n_evaluated']:,}")
+            o_m2.metric("Feasible Schedules (95% Compliant)", f"{opt_run['n_compliant']:,}",
+                        delta=f"{opt_run['n_compliant']/opt_run['n_evaluated']*100:.1f}% Yield")
+            o_m3.metric("Champion CE_IIW", f"{best['ce_iiw']:.3f}")
+            o_m4.metric("Optimal Chemistry", f"C: {best['Chem_C']:.2f}% · Mn: {best['Chem_Mn']:.2f}% · Nb: {best.get('Chem_Nb', 0):.3f}%")
+
+            fig_opt = go.Figure()
+
+            non_comp = cands[(cands["lower_ys"] < s_cfg.get("ys_min", 0)) | (cands["lower_ts"] < s_cfg.get("ts_min", 0))]
+            if not non_comp.empty:
+                fig_opt.add_trace(go.Scatter(
+                    x=non_comp["ce_iiw"], y=non_comp["pred_ys"],
+                    mode="markers", marker=dict(size=6, color="#cbd5e1", opacity=0.6),
+                    name="Infeasible (Below 95% Spec)",
+                    text=[f"C: {c:.2f}%, Mn: {mn:.2f}%<br>Pred YS: {y} MPa (Lower 95%: {ly} MPa)<br>Req YS: {s_cfg.get('ys_min', 0)} MPa"
+                          for c, mn, y, ly in zip(non_comp["Chem_C"], non_comp["Chem_Mn"], non_comp["pred_ys"], non_comp["lower_ys"])],
+                    hoverinfo="text"
+                ))
+
+            comp = cands[(cands["lower_ys"] >= s_cfg.get("ys_min", 0)) & (cands["lower_ts"] >= s_cfg.get("ts_min", 0))]
+            if not comp.empty:
+                fig_opt.add_trace(go.Scatter(
+                    x=comp["ce_iiw"], y=comp["pred_ys"],
+                    mode="markers", marker=dict(size=7, color="#1746c8", opacity=0.7),
+                    name="Feasible (Cpk ≥ 1.33 Conformal)",
+                    text=[f"C: {c:.2f}%, Mn: {mn:.2f}%<br>Pred YS: {y} MPa (Lower 95%: {ly} MPa)<br>Req YS: {s_cfg.get('ys_min', 0)} MPa"
+                          for c, mn, y, ly in zip(comp["Chem_C"], comp["Chem_Mn"], comp["pred_ys"], comp["lower_ys"])],
+                    hoverinfo="text"
+                ))
+
+            fig_opt.add_trace(go.Scatter(
+                x=[best["ce_iiw"]], y=[best["pred_ys"]],
+                mode="markers+text",
+                marker=dict(size=16, color="#f59e0b", symbol="star", line=dict(color="#b45309", width=1.5)),
+                name="Optimal Setpoint", text=["Optimal Champion"], textposition="top center"
+            ))
+
+            if "ys_min" in s_cfg:
+                fig_opt.add_hline(
+                    y=s_cfg["ys_min"] + q_ys, line_dash="dot", line_color="#10b981", line_width=1.5,
+                    annotation_text=f"Compliance Threshold (Spec Min + 95% Conformal Buffer: {s_cfg['ys_min'] + q_ys:.1f} MPa)",
+                    annotation_position="bottom right"
+                )
+
+            fig_opt.update_layout(
+                title=dict(text=f"Inverse Setpoint Search Landscape — {diag_opt_spec} ({d_thick} mm Plate)", font=dict(size=12)),
+                xaxis=dict(title="Carbon Equivalent (CE_IIW = C + Mn/6 + 5Nb)", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                yaxis=dict(title="Predicted Yield Strength [MPa]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                height=380, margin=dict(l=10, r=10, t=35, b=10),
+                plot_bgcolor="white", paper_bgcolor="white", legend=dict(orientation="h", y=1.12, x=0.0)
+            )
+            st.plotly_chart(fig_opt, use_container_width=True)
+        else:
+            st.caption("Inverse optimization evaluation could not be completed.")
+
+    with diag_tabs[3]:
+        st.caption("Interactive physics sandbox: adjust chemical composition and thermomechanical rolling parameters to see the real-time contribution of each physical dislocation mechanism.")
+        p_col1, p_col2, p_col3 = st.columns(3)
+        sb_c = p_col1.slider("Carbon [%C]", 0.08, 0.25, 0.16, 0.01, format="%.2f", key=f"sb_c_{mill}")
+        sb_mn = p_col2.slider("Manganese [%Mn]", 0.60, 1.80, 1.20, 0.05, format="%.2f", key=f"sb_mn_{mill}")
+        sb_si = p_col3.slider("Silicon [%Si]", 0.10, 0.50, 0.25, 0.02, format="%.2f", key=f"sb_si_{mill}")
+
+        p_col4, p_col5, p_col6 = st.columns(3)
+        sb_nb = p_col4.slider("Niobium [%Nb]", 0.000, 0.040, 0.015, 0.002, format="%.3f", key=f"sb_nb_{mill}")
+        sb_t = p_col5.slider("Finish Thickness [mm]", 6.0 if mill=="HRC" else 8.0, 16.0 if mill=="HRC" else 80.0, 10.0 if mill=="HRC" else 20.0, 1.0, key=f"sb_t_{mill}")
+        sb_frt = p_col6.slider("Finish Rolling Temp [°C]", 780.0, 920.0, 830.0, 5.0, key=f"sb_frt_{mill}")
+
+        sigma_ss = 32.0 * sb_mn + 84.0 * sb_si + 43.0 * 0.02 + 38.0 * 0.02 + 80.0 * 0.002 + 354.0 * 0.003
+        inv_sqrt_t = 1.0 / np.sqrt(max(1.0, sb_t))
+        ce_iiw = sb_c + (sb_mn / 6.0) + (0.02 + 0.005 + 0.005) / 5.0 + 0.04 / 15.0
+        ar3 = 910.0 - 310.0 * sb_c - 80.0 * sb_mn - 20.0 * 0.02 - 15.0 * 0.02 - 55.0 * 0.02
+        supercool = max(0.0, ar3 - sb_frt)
+
+        sb_m1, sb_m2, sb_m3, sb_m4, sb_m5 = st.columns(5)
+        sb_m1.metric("Pickering Solid Solution (σ_ss)", f"{sigma_ss:.1f} MPa")
+        sb_m2.metric("Hall-Petch Proxy (t^-0.5)", f"{inv_sqrt_t:.3f} mm^-0.5")
+        sb_m3.metric("Carbon Equivalent (CE_IIW)", f"{ce_iiw:.3f}")
+        sb_m4.metric("Ar3 Phase Transformation", f"{ar3:.1f} °C")
+        sb_m5.metric("Transformation Supercooling", f"{supercool:.1f} °C")
+
+        d_sigma0 = 96.5
+        d_hp = 300.0 * inv_sqrt_t
+        d_ss = 2.73 * (sb_mn * 32.0 + sb_si * 84.0) / 100.0
+        d_nb = 2500.0 * sb_nb
+        d_cr = 15.0 if mill == "Plate" else 25.0
+
+        phys_df = pd.DataFrame([
+            {"Mechanism": "1. Base Lattice Friction (σ₀)", "Strength_MPa": d_sigma0},
+            {"Mechanism": "2. Hall-Petch Grain Refinement (k_hp · t^-0.5)", "Strength_MPa": d_hp},
+            {"Mechanism": "3. Solid Solution Hardening (Pickering σ_ss)", "Strength_MPa": d_ss},
+            {"Mechanism": "4. Microalloy Precipitation (Nb Carbonitrides)", "Strength_MPa": d_nb},
+            {"Mechanism": "5. TMCP Cooling Severity / True Strain", "Strength_MPa": d_cr},
+        ])
+        total_calc_ys = phys_df["Strength_MPa"].sum()
+
+        fig_phys = go.Figure(go.Bar(
+            x=phys_df["Mechanism"], y=phys_df["Strength_MPa"],
+            marker_color=["#64748b", "#1746c8", "#2563eb", "#3b82f6", "#60a5fa"],
+            text=[f"+{v:.1f} MPa" for v in phys_df["Strength_MPa"]], textposition="auto"
+        ))
+        fig_phys.update_layout(
+            title=dict(text=f"Decomposed Strengthening Mechanism Breakdown (Calculated Physical YS: ~{total_calc_ys:.1f} MPa)", font=dict(size=12)),
+            xaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+            yaxis=dict(title="Strength Contribution [MPa]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+            height=340, margin=dict(l=10, r=10, t=35, b=10), plot_bgcolor="white", paper_bgcolor="white"
+        )
+        st.plotly_chart(fig_phys, use_container_width=True)
+
+    with diag_tabs[4]:
+        st.caption("End-to-end industrial machine learning engineering stack: from raw Excel campaign sheets to serverless distributed training and edge deployment.")
+        st.markdown(f"""
+        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1rem 0;">
+          <div class="card" style="padding: 1.1rem;">
+            <span class="pill ok">1. Data Ingestion &amp; ETL</span>
+            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Pure Python Calamine Engine</div>
+            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
+              Extracts <b>{total_records:,} {mill} production records</b> from multi-sheet plant workbooks using Rust-accelerated <code>python-calamine</code> in 8–14 seconds. 
+              Zero <code>win32com.client</code> or Microsoft Office runtime required.
+            </p>
+          </div>
+
+          <div class="card" style="padding: 1.1rem;">
+            <span class="pill ok">2. Quality Control &amp; Physics</span>
+            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Typo Rescaling &amp; Featurization</div>
+            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
+              Automatic detection and correction of 100x decimal entry shifts (e.g. 41,205 &rarr; 412.05 MPa). 
+              Computes metallurgical features: Pickering lattice distortion (&sigma;<sub>ss</sub>), Hall-Petch grain proxy (<i>t</i><sup>-0.5</sup>), true strain (&epsilon;), and transformation margins (<i>FRT - Ar<sub>3</sub></i>).
+            </p>
+          </div>
+
+          <div class="card" style="padding: 1.1rem;">
+            <span class="pill ok">3. Zero Data Leakage</span>
+            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Melt-Level Group Partitioning</div>
+            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
+              Multiple plates or coils cut from the same parent melt heat share identical chemistry. 
+              <code>GroupShuffleSplit</code> strictly partitions by <code>Heat_ID</code> (80% Train : 20% Holdout) ensuring <b>0.0% data leakage across {holdout_heats:,} held-out heats</b>.
+            </p>
+          </div>
+
+          <div class="card" style="padding: 1.1rem;">
+            <span class="pill ok">4. Serverless Cloud Compute</span>
+            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Modal Cloud Debian Containers</div>
+            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
+              Heavy model training, Bayesian hyperparameter search, and 100-iteration bootstrapping run remotely on Modal Cloud with 4–8 vCPUs and 16 GB RAM. 
+              Local workstations remain lightweight and 100% responsive.
+            </p>
+          </div>
+
+          <div class="card" style="padding: 1.1rem;">
+            <span class="pill ok">5. Multi-Model Ladder</span>
+            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">6 Model Families Evaluated</div>
+            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
+              Every target is benchmarked across 2 whitebox models (OLS Linear, NLR Constitutive Physics Fit), 
+              regularized RidgeCV, 3 gradient boosted decision trees (XGBoost, LightGBM, CatBoost), and a meta-stacking ensemble.
+            </p>
+          </div>
+
+          <div class="card" style="padding: 1.1rem;">
+            <span class="pill ok">6. Cold-Start Deployment</span>
+            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Champion GBDT Engine</div>
+            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
+              Champion GBDT models serialized to native C-level binary formats in <code>models/boosted_out/</code>. 
+              Provides &lt;0.5s cold-start time and sub-second inference in Streamlit Community Cloud.
+            </p>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with diag_tabs[5]:
         st.caption("Operating windows and parameter distribution ranges across the production campaign.")
         eda_vars = [row[1] for row in SPECS[mill]]
         eda_choice = st.selectbox("Select Process Parameter / Chemistry for Distribution EDA", eda_vars,
@@ -1804,7 +2074,7 @@ def view_diagnostics(mill):
         )
         st.plotly_chart(fig_dist, use_container_width=True)
 
-    with audit_tabs[2]:
+        st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
         st.caption("Top physical and chemical variables driving model predictions, ranked by tree split importance.")
         top_features_plate = [
             ("sigma_ss (Pickering Solid Solution)", 0.285),

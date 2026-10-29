@@ -40,7 +40,8 @@ def engineer_hrc_features(df: pd.DataFrame, is_train: bool = True, spec_map: dic
     chem_elements = ["C", "Si", "Mn", "P", "S", "Nb", "Cu", "Cr", "Ni", "Mo", "V", "Al", "Ti", "N", "B", "CE"]
     for el in chem_elements:
         col = f"Chem_{el}"
-        val = pd.to_numeric(df.get(col), errors='coerce').fillna(0.0)
+        s = df[col] if col in df.columns else pd.Series(0.0, index=df.index)
+        val = pd.to_numeric(s, errors='coerce').fillna(0.0)
         X[col] = val
 
     c = X["Chem_C"]
