@@ -20,6 +20,21 @@ BOOSTED_DIR = os.path.join(MODELS_DIR, "boosted_out")
 
 import model_loader as ml
 import spec_checker as sc
+import constraints as cons
+
+
+def route_for(mill: str, finish_temp: float, headers: float) -> str:
+    """Infer the rolling route from the solved setpoints.
+
+    AR   : no laminar cooling
+    TMCP : accelerated cooling started below the recrystallisation stop (~850 C)
+    CR   : accelerated cooling but still finishing above 850 C
+    """
+    if mill != "Plate" or headers <= 0:
+        return "AR"
+    if finish_temp < 850.0 and headers >= 4:
+        return "TMCP"
+    return "CR"
 
 
 PRESET_GRADES = {
@@ -42,11 +57,88 @@ PRESET_GRADES = {
 }
 
 
-def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, base_inputs: dict, objective_mode: str = "min_ce"):
+def score_candidates(mill: str, X_all):
+    """Predict TS_BN and YS_BN for a feature frame.
+
+    Order of preference:
+      1. models/boosted_out (CatBoost / XGBoost / LightGBM artefacts + boosted_metrics.json)
+      2. the per-mill joblib bundles used by the rest of the app
+    Returns (pred_ts, pred_ys) or None when no model can be loaded.
+    """
+
+    def from_boosted():
+        metrics_path = os.path.join(BOOSTED_DIR, "boosted_metrics.json")
+        if not os.path.exists(metrics_path):
+            return None
+        with open(metrics_path, "r") as fh:
+            metrics = json.load(fh)
+        preds = {}
+        for target, preferred in (("TS_BN", "xgb"), ("YS_BN", "cat")):
+            key = f"{mill}|{target}|{preferred}"
+            if key not in metrics:
+                alternatives = [k for k in metrics if k.startswith(f"{mill}|{target}|")]
+                if not alternatives:
+                    return None
+                key = alternatives[0]
+            cols = metrics.get(key, {}).get("features", [])
+            X = pd.DataFrame({c: (X_all[c] if c in X_all.columns else 0.0) for c in cols},
+                             index=X_all.index)
+            algo = key.rsplit("|", 1)[-1]
+            if algo == "xgb":
+                model = xgb.XGBRegressor()
+                model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_xgb.ubj"))
+            elif algo == "cat":
+                model = CatBoostRegressor()
+                model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_cat.cbm"))
+            else:
+                import lightgbm as lgb
+                model = lgb.Booster(model_file=os.path.join(BOOSTED_DIR, f"{mill}_{target}_lgbm.txt"))
+            preds[target] = np.asarray(model.predict(X)).ravel()
+        return preds["TS_BN"], preds["YS_BN"]
+
+    def from_bundles():
+        preds = {}
+        for target in ("TS_BN", "YS_BN"):
+            ok = False
+            # tuned ensemble first, then the plain best_model (some HRC ensembles fail to
+            # unpickle into the shared StackingEnsemble class and must be skipped)
+            for use_tuned in (True, False):
+                bundle = ml.load_model_bundle(mill, target, use_tuned=use_tuned)
+                if bundle is None:
+                    continue
+                try:
+                    cols = bundle.get("feature_names", list(X_all.columns))
+                    X = pd.DataFrame({c: (X_all[c] if c in X_all.columns else 0.0) for c in cols},
+                                     index=X_all.index)
+                    preds[target] = np.asarray(bundle["model"].predict(X)).ravel()
+                    ok = True
+                    break
+                except Exception:
+                    continue
+            if not ok:
+                return None
+        return preds["TS_BN"], preds["YS_BN"]
+
+    for source in (from_boosted, from_bundles):
+        try:
+            result = source()
+        except Exception:
+            result = None
+        if result is not None:
+            return result
+    return None
+
+
+def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, base_inputs: dict,
+                             objective_mode: str = "min_ce", limits: dict = None):
     """
     Evaluates candidate setpoint candidates in vectorized batch to find the minimum-cost / minimum-CE
     chemistry and rolling schedule that guarantees specification compliance with split-conformal 95% bounds.
+
+    Every process temperature swept here is bounded by `limits` (see constraints.py), so the solver can
+    never return a setpoint outside the house band.
     """
+    limits = limits or {}
     try:
         conf_df = ml.get_conformal_intervals(mill) if hasattr(ml, "get_conformal_intervals") else pd.DataFrame()
     except Exception:
@@ -66,18 +158,27 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
         if not r_el.empty and "Conformal_Half_Width_95" in r_el.columns:
             q_el = float(r_el["Conformal_Half_Width_95"].values[0])
 
-    # Discretized search space
+    # Discretized search space. Chemistry stays on a fixed grid; every process temperature is
+    # swept across the house limits instead of a hard-coded map.
     c_grid = [0.12, 0.14, 0.16, 0.18, 0.20]
     mn_grid = [0.70, 0.90, 1.10, 1.30, 1.50]
     nb_grid = [0.000, 0.015, 0.030] if mill == "Plate" else [0.000, 0.015]
-    
+
+    def spread(key, fallback, n=3):
+        lo, hi = limits.get(key, fallback)
+        if hi <= lo:
+            lo, hi = fallback
+        return [float(round(v, 1)) for v in np.linspace(lo, hi, n)]
+
     if mill == "Plate":
-        frt_grid = [810.0, 840.0, 870.0]
+        frt_grid = spread("FM_Finish_Temp", (810.0, 870.0))
+        entry_grid = spread("FM_Temp_Before_Rolling", (930.0, 990.0))
+        post_grid = spread("ACC_Temp_Post_Laminar", (580.0, 800.0))
         hdr_grid = [0.0, 4.0, 8.0]
-        tpost_map = {0.0: 820.0, 4.0: 640.0, 8.0: 580.0}
     else:
-        ft_grid = [830.0, 860.0, 890.0]
-        ct_grid = [560.0, 600.0, 640.0]
+        ft_grid = spread("Temp_FT_Avg_C", (830.0, 890.0))
+        ct_grid = spread("Temp_CT_Top_C", (560.0, 640.0))
+        tb_grid = spread("Temp_Transfer_Bar_C", (930.0, 1030.0))
 
     # Generate schedule candidates
     candidates = []
@@ -85,38 +186,43 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
         for c in c_grid:
             for mn in mn_grid:
                 for nb in nb_grid:
-                    for frt in frt_grid:
-                        for hdr in hdr_grid:
-                            row = dict(base_inputs)
-                            row["Plate_T_mm"] = thickness
-                            row["Chem_C"] = c
-                            row["Chem_Mn"] = mn
-                            row["Chem_Nb"] = nb
-                            row["FM_Finish_Temp"] = frt
-                            row["ACC_Laminar_Header"] = hdr
-                            row["ACC_Headers_n"] = hdr
-                            row["ACC_Active"] = 1.0 if hdr > 0 else 0.0
-                            row["ACC_Temp_Post_Laminar"] = tpost_map.get(hdr, 600.0)
-                            row["TB_Ratio"] = 2.5
-                            row["FM_Last_Pass_Drafting"] = thickness * 0.18
-                            row["Rolling_Type"] = "CR" if hdr > 0 else "AR"
-                            candidates.append(row)
+                    for entry in entry_grid:
+                        for frt in frt_grid:
+                            for hdr in hdr_grid:
+                                for post in post_grid:
+                                    row = dict(base_inputs)
+                                    row["Plate_T_mm"] = thickness
+                                    row["Chem_C"] = c
+                                    row["Chem_Mn"] = mn
+                                    row["Chem_Nb"] = nb
+                                    row["FM_Temp_Before_Rolling"] = entry
+                                    row["FM_Finish_Temp"] = frt
+                                    row["ACC_Laminar_Header"] = hdr
+                                    row["ACC_Headers_n"] = hdr
+                                    row["ACC_Active"] = 1.0 if hdr > 0 else 0.0
+                                    row["ACC_Temp_Post_Laminar"] = min(post, frt - 20.0)
+                                    row["TB_Ratio"] = 2.5
+                                    row["FM_Last_Pass_Drafting"] = thickness * 0.18
+                                    row["Rolling_Type"] = route_for(mill, frt, hdr)
+                                    candidates.append(row)
     else:
         for c in c_grid:
             for mn in mn_grid:
                 for nb in nb_grid:
-                    for ft in ft_grid:
-                        for ct in ct_grid:
-                            row = dict(base_inputs)
-                            row["Coil_T_mm"] = thickness
-                            row["Chem_C"] = c
-                            row["Chem_Mn"] = mn
-                            row["Chem_Nb"] = nb
-                            row["Temp_FT_Avg_C"] = ft
-                            row["Temp_CT_Top_C"] = ct
-                            row["Temp_CT_Bot_C"] = ct
-                            row["TB_Thick_mm"] = max(30.0, thickness * 3.0)
-                            candidates.append(row)
+                    for tb in tb_grid:
+                        for ft in ft_grid:
+                            for ct in ct_grid:
+                                row = dict(base_inputs)
+                                row["Coil_T_mm"] = thickness
+                                row["Chem_C"] = c
+                                row["Chem_Mn"] = mn
+                                row["Chem_Nb"] = nb
+                                row["Temp_Transfer_Bar_C"] = tb
+                                row["Temp_FT_Avg_C"] = ft
+                                row["Temp_CT_Top_C"] = ct
+                                row["Temp_CT_Bot_C"] = ct
+                                row["TB_Thick_mm"] = max(30.0, thickness * 3.0)
+                                candidates.append(row)
 
     cand_df = pd.DataFrame(candidates)
     if mill == "Plate":
@@ -128,41 +234,12 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
             return None
         X_all, _ = ml.engineer_hrc_features(cand_df, is_train=False)
 
-    # Load champion models for fast batch inference
-    with open(os.path.join(BOOSTED_DIR, "boosted_metrics.json"), "r") as f:
-        bm = json.load(f)
-
-    # 1. TS Model
-    ts_key = f"{mill}|TS_BN|xgb" if f"{mill}|TS_BN|xgb" in bm else f"{mill}|TS_BN|cat"
-    ts_feats = bm.get(ts_key, {}).get("features", [])
-    X_ts = pd.DataFrame(index=X_all.index)
-    for col in ts_feats:
-        X_ts[col] = X_all[col] if col in X_all.columns else 0.0
-
-    if "xgb" in ts_key:
-        m_ts = xgb.XGBRegressor()
-        m_ts.load_model(os.path.join(BOOSTED_DIR, f"{mill}_TS_BN_xgb.ubj"))
-        pred_ts = m_ts.predict(X_ts)
-    else:
-        m_ts = CatBoostRegressor()
-        m_ts.load_model(os.path.join(BOOSTED_DIR, f"{mill}_TS_BN_cat.cbm"))
-        pred_ts = m_ts.predict(X_ts)
-
-    # 2. YS Model
-    ys_key = f"{mill}|YS_BN|cat" if f"{mill}|YS_BN|cat" in bm else f"{mill}|YS_BN|xgb"
-    ys_feats = bm.get(ys_key, {}).get("features", [])
-    X_ys = pd.DataFrame(index=X_all.index)
-    for col in ys_feats:
-        X_ys[col] = X_all[col] if col in X_all.columns else 0.0
-
-    if "cat" in ys_key:
-        m_ys = CatBoostRegressor()
-        m_ys.load_model(os.path.join(BOOSTED_DIR, f"{mill}_YS_BN_cat.cbm"))
-        pred_ys = m_ys.predict(X_ys)
-    else:
-        m_ys = xgb.XGBRegressor()
-        m_ys.load_model(os.path.join(BOOSTED_DIR, f"{mill}_YS_BN_xgb.ubj"))
-        pred_ys = m_ys.predict(X_ys)
+    # Score every candidate. Prefers the boosted_out artifacts; falls back to the per-mill
+    # joblib bundles the rest of the app uses. Returns (pred_ts, pred_ys) or None.
+    scored = score_candidates(mill, X_all)
+    if scored is None:
+        return None
+    pred_ts, pred_ys = scored
 
     # Filter compliant schedules with conformal safety buffer
     req_ys = target_spec.get("ys_min", 325.0)
@@ -196,22 +273,38 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
             best_row = compliant_df.sort_values(by=["margin"], ascending=False).iloc[0]
         is_fully_compliant = True
 
+    best_schedule = best_row.to_dict()
+    best_schedule["route"] = route_for(
+        mill,
+        float(best_schedule.get("FM_Finish_Temp", best_schedule.get("Temp_FT_Avg_C", 0.0))),
+        float(best_schedule.get("ACC_Headers_n", 0.0)),
+    )
+
+    # Post-solve guard: nothing may leave the house band. The grids are already built inside it,
+    # so this should be a no-op except for the post-laminar joint rule; report it if it ever bites.
+    clamped_schedule, violations = cons.clamp_raw(mill, best_schedule, limits)
+    clamped_schedule["route"] = best_schedule["route"]
+
     return {
-        "best_schedule": best_row.to_dict(),
+        "best_schedule": clamped_schedule,
         "is_compliant": is_fully_compliant,
         "n_evaluated": len(cand_df),
         "n_compliant": len(compliant_df),
         "q_ys": q_ys,
         "q_ts": q_ts,
         "q_el": q_el,
+        "limits": dict(limits),
+        "clamped": bool(violations),
+        "violations": violations,
         "candidates_df": cand_df
     }
 
 
-def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)"):
+def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)", limits: dict = None):
     """
     Renders the interactive Inverse Setpoint Optimizer in Streamlit.
     """
+    limits = limits or {}
     st.markdown('<div class="kicker">Automated Inverse Design</div>', unsafe_allow_html=True)
     st.markdown('<div class="title">Reverse Setpoint Optimizer</div>', unsafe_allow_html=True)
     st.markdown(
@@ -242,12 +335,16 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     c2.metric("Min Tensile Strength (TS)", f"≥ {spec_cfg['ts_min']:.0f} MPa")
     c3.metric("Min Elongation (EL)", f"≥ {spec_cfg['el_min']:.0f} %")
 
+    if limits:
+        st.caption("House limits enforced by the solver — " + cons.describe(limits))
+
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
     if st.button("⚡ Solve Optimal Rolling & Chemistry Schedule", type="primary", use_container_width=True):
         with st.spinner("Evaluating multi-parameter response space with split-conformal verification..."):
             t0 = time.time()
-            res = run_inverse_optimization(mill, spec_cfg, target_gauge, raw, objective_mode=obj_key)
+            res = run_inverse_optimization(mill, spec_cfg, target_gauge, raw, objective_mode=obj_key,
+                                           limits=limits)
             elapsed = time.time() - t0
 
         if not res:
@@ -286,7 +383,14 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                 {"Parameter": "Coiling Temp (CT)", "Current": f"{raw.get('Temp_CT_Top_C', 580):.0f} °C", "Optimized": f"{best.get('Temp_CT_Top_C'):.0f} °C", "Unit": "°C"},
             ])
 
+        comp_rows.insert(4, {"Parameter": "Rolling route", "Current": str(raw.get("Rolling_Type", "AR")),
+                             "Optimized": str(best.get("route", "AR")), "Unit": ""})
         st.dataframe(pd.DataFrame(comp_rows), hide_index=True, use_container_width=True)
+
+        if res.get("clamped"):
+            st.warning("Schedule clamped into the house limits: " + "; ".join(res.get("violations", [])))
+        if limits:
+            st.caption("Limits in force — " + cons.describe(limits))
 
         # Verification Metrics Strip
         st.markdown("#### 🎯 Verified Mechanical Performance (with Split-Conformal 95% Bounds)")

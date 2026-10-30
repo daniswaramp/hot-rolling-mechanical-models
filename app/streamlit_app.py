@@ -14,6 +14,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +43,12 @@ except Exception:
 import optimizer  # noqa: E402
 try:
     importlib.reload(optimizer)
+except Exception:
+    pass
+
+import constraints as cons  # noqa: E402
+try:
+    importlib.reload(cons)
 except Exception:
     pass
 
@@ -272,6 +279,25 @@ def hair():
 # ----------------------------------------------------------------------------- data helpers
 def spec_map(mill):
     return {row[1]: row for row in SPECS[mill]}
+
+
+def surface_keys(mill):
+    """Every numeric input is sweepable; the historical thermal keys stay first."""
+    numeric = [row[1] for row in SPECS[mill]]
+    preferred = [k for k in SURFACE[mill] if k in numeric]
+    return preferred + [k for k in numeric if k not in preferred]
+
+
+def axis_range(mill, key, limits):
+    """Sweep range for an axis: mill envelope intersected with the house limits."""
+    row = spec_map(mill)[key]
+    lo, hi = float(row[4]), float(row[5])
+    if limits and key in limits:
+        lo = max(lo, float(limits[key][0]))
+        hi = min(hi, float(limits[key][1]))
+    if hi <= lo:
+        lo, hi = float(row[4]), float(row[5])
+    return lo, hi
 
 
 def defaults(mill):
@@ -1147,30 +1173,42 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
 
 
 def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
+    limits = cons.get_limits(mill, SPECS[mill])
+    keys = surface_keys(mill)
+    labels = {row[1]: row[2] for row in SPECS[mill]}
+    axes = dict(showline=True, linecolor=HAIR, gridcolor="#f1f2f4", zeroline=False,
+                tickfont=dict(size=10, color=MUTED), title_font=dict(size=11, color=INK))
+
+    head = st.columns([1.6, 1.2, 1.4], vertical_alignment="bottom")
+    view = head[0].radio("View", ["2D contour", "3D surface", "1D slice"],
+                         horizontal=True, key=f"v_{mill}")
+    head[2].caption(("Bounded by house limits — " + cons.describe(limits)) if limits
+                    else f"Engine: {engine}. Rest of schedule held at sidebar values.")
+
+    if view == "1D slice":
+        _surface_slice(mill, raw, engine, keys, labels, limits, axes)
+        return
+
     left, mid, right = st.columns([1.2, 1.2, 1.6], vertical_alignment="bottom")
-    keys = [k for k in SURFACE[mill] if k in spec_map(mill)]
-    x_key = left.selectbox("Horizontal axis", keys, index=0, key=f"x_{mill}")
-    y_key = mid.selectbox("Vertical axis", [k for k in keys if k != x_key], index=1, key=f"y_{mill}")
+    x_key = left.selectbox("Horizontal axis", keys, index=0, key=f"x_{mill}",
+                           format_func=lambda k: labels.get(k, k))
+    y_key = mid.selectbox("Vertical axis", [k for k in keys if k != x_key], index=1, key=f"y_{mill}",
+                          format_func=lambda k: labels.get(k, k))
     target = right.selectbox("Property", list(TARGET_LABEL[mill]),
                              format_func=lambda k: TARGET_LABEL[mill][k][0], key=f"t_{mill}")
-
-    c1, c2, c3 = st.columns([1.4, 1.4, 1.2], vertical_alignment="bottom")
-    view = c1.radio("View", ["2D contour", "3D surface"], horizontal=True, key=f"v_{mill}")
-    grid = c2.slider("Grid", 15, 41, 25, step=2, key=f"g_{mill}")
-    c3.caption(f"Engine: {engine}. Rest of schedule held at sidebar values.")
+    grid = st.slider("Grid", 15, 41, 25, step=2, key=f"g_{mill}")
 
     sx, sy = spec_map(mill)[x_key], spec_map(mill)[y_key]
-    xs = np.linspace(sx[4], sx[5], grid)
-    ys = np.linspace(sy[4], sy[5], grid)
+    xs = np.linspace(*axis_range(mill, x_key, limits), grid)
+    ys = np.linspace(*axis_range(mill, y_key, limits), grid)
     frame = pd.DataFrame([dict(raw) for _ in range(grid * grid)])
     frame[x_key] = np.repeat(xs, grid)
     frame[y_key] = np.tile(ys, grid)
     z = score_frame(mill, frame, engine=engine)[target].values.reshape(grid, grid)
 
     label, unit = TARGET_LABEL[mill][target]
-    axes = dict(showline=True, linecolor=HAIR, gridcolor="#f1f2f4", zeroline=False,
-                tickfont=dict(size=10, color=MUTED), title_font=dict(size=11, color=INK))
-    here = predict_selected_engine(mill, raw, engine)[target]["pred"]
+    point = cons.clamp_raw(mill, raw, limits)[0]
+    here = predict_selected_engine(mill, point, engine)[target]["pred"]
 
     if view == "2D contour":
         fig = go.Figure()
@@ -1179,11 +1217,11 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
             labelfont=dict(size=9, color="white")), line=dict(width=.4, color="rgba(255,255,255,.6)"),
             hovertemplate=f"{sx[2]}: %{{x:.1f}}<br>{sy[2]}: %{{y:.1f}}<br>{label}: %{{z:.1f}} {unit}<extra></extra>",
         ))
-        fig.add_trace(go.Scatter(x=[raw[x_key]], y=[raw[y_key]], mode="markers",
+        fig.add_trace(go.Scatter(x=[point[x_key]], y=[point[y_key]], mode="markers",
                                  marker=dict(size=13, color=INK, line=dict(color="white", width=2.5)),
                                  hovertemplate=f"this schedule<br>{label}: {here:.1f} {unit}<extra></extra>",
                                  showlegend=False))
-        fig.add_annotation(x=raw[x_key], y=raw[y_key], text=f"<b>{here:.1f} {unit}</b>",
+        fig.add_annotation(x=point[x_key], y=point[y_key], text=f"<b>{here:.1f} {unit}</b>",
                            showarrow=True, arrowhead=0, ax=0, ay=-30, bgcolor="white",
                            bordercolor=INK, borderwidth=1, font=dict(size=11, family="JetBrains Mono"))
         fig.update_xaxes(title=sx[2], **axes); fig.update_yaxes(title=sy[2], **axes)
@@ -1191,7 +1229,7 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     else:
         fig = go.Figure(go.Surface(x=xs, y=ys, z=z, colorscale="Blues", showscale=False,
                                    contours=dict(z=dict(show=True, usecolormap=True, project_z=True))))
-        fig.add_trace(go.Scatter3d(x=[raw[x_key]], y=[raw[y_key]], z=[here], mode="markers",
+        fig.add_trace(go.Scatter3d(x=[point[x_key]], y=[point[y_key]], z=[here], mode="markers",
                                    marker=dict(size=5, color=INK), name="this schedule"))
         fig.update_layout(height=560, margin=dict(l=0, r=0, t=0, b=0),
                           scene=dict(xaxis=dict(title=sx[2], **axes), yaxis=dict(title=sy[2], **axes),
@@ -1202,6 +1240,106 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     st.markdown(f'<div class="note">Surface held on the mill\'s own feature engineering, not a proxy: '
                 f'every node is a full pass through the {mill} pipeline. The marker is the current '
                 f'schedule at {here:.1f} {unit}.</div>', unsafe_allow_html=True)
+
+
+@st.cache_data(show_spinner=False)
+def _slice_scores(mill, x_key, xs, engine, raw_tuple):
+    """One vectorised pass: sweep X, hold everything else, score every target."""
+    frame = pd.DataFrame([dict(raw_tuple) for _ in range(len(xs))])
+    frame[x_key] = np.asarray(xs, dtype=float)
+    return score_frame(mill, frame, engine=engine)
+
+
+def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
+    """1D X-Y slice: X = any numeric input, Y = one or more properties."""
+    c = st.columns([1.5, 2.6, 1.0], vertical_alignment="bottom")
+    x_key = c[0].selectbox("X axis (independent)", keys, index=0, key=f"xs_{mill}",
+                           format_func=lambda k: labels.get(k, k))
+    y_keys = c[1].multiselect("Y axis (dependent)", list(TARGET_LABEL[mill]),
+                              default=["YS_BN", "TS_BN"],
+                              format_func=lambda k: TARGET_LABEL[mill][k][0], key=f"ys_{mill}")
+    n = c[2].slider("Points", 11, 121, 41, step=5, key=f"np_{mill}")
+
+    if not y_keys:
+        st.info("Select at least one property for the Y axis.")
+        return
+
+    lo, hi = axis_range(mill, x_key, limits)
+    xs = np.linspace(lo, hi, n)
+    point = cons.clamp_raw(mill, raw, limits)[0]
+    try:
+        scores = _slice_scores(mill, x_key, tuple(xs), engine, tuple(sorted(dict(raw).items())))
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Sweep failed: {exc}")
+        return
+
+    conf = ml.get_conformal_intervals(mill)
+
+    def half_width(key):
+        if conf is not None and not conf.empty and "Target" in conf.columns:
+            row = conf[conf["Target"] == key]
+            if not row.empty and "Conformal_Half_Width_95" in row.columns:
+                return float(row["Conformal_Half_Width_95"].values[0])
+        return None
+
+    by_unit = {}
+    for key in y_keys:
+        by_unit.setdefault(TARGET_LABEL[mill][key][1], []).append(key)
+    units = list(by_unit)
+
+    fig = make_subplots(rows=len(units), cols=1, shared_xaxes=True, vertical_spacing=0.12,
+                        subplot_titles=[f"[{u}]" for u in units])
+    palette = [INK, "#2563eb", "#0ea5e9", "#7c3aed", "#db2777", "#059669"]
+    first_key, hw = y_keys[0], half_width(y_keys[0])
+
+    for r, unit in enumerate(units, start=1):
+        for i, key in enumerate(by_unit[unit]):
+            label, _ = TARGET_LABEL[mill][key]
+            y = scores[key].to_numpy(dtype=float)
+            color = palette[i % len(palette)]
+            if key == first_key and hw:
+                fig.add_trace(go.Scatter(x=xs, y=y + hw, line=dict(width=0), hoverinfo="skip",
+                                         showlegend=False), row=r, col=1)
+                fig.add_trace(go.Scatter(x=xs, y=y - hw, line=dict(width=0), fill="tonexty",
+                                         fillcolor="rgba(37,99,235,.12)", hoverinfo="skip",
+                                         showlegend=False, name=f"{label} 95% band"), row=r, col=1)
+            fig.add_trace(go.Scatter(
+                x=xs, y=y, mode="lines", name=label, line=dict(color=color, width=2.2),
+                hovertemplate=f"{labels.get(x_key, x_key)} %{{x:.2f}}<br>{label} %{{y:.1f}} {unit}<extra></extra>",
+            ), row=r, col=1)
+        fig.update_yaxes(title=unit, row=r, col=1, **axes)
+        if x_key in limits:
+            for xv in limits[x_key]:
+                fig.add_vline(x=xv, line=dict(color="#9ca3af", width=1, dash="dash"), row=r, col=1)
+
+    op = predict_selected_engine(mill, point, engine)
+    op_x = float(point.get(x_key, xs[len(xs) // 2]))
+    for r, unit in enumerate(units, start=1):
+        for key in by_unit[unit]:
+            val = op.get(key, {}).get("pred")
+            if val is not None and np.isfinite(val):
+                fig.add_trace(go.Scatter(
+                    x=[op_x], y=[float(val)], mode="markers", showlegend=False,
+                    marker=dict(size=9, color=INK, line=dict(color="white", width=2)),
+                    hovertemplate=f"this schedule<br>{TARGET_LABEL[mill][key][0]} {float(val):.1f} {unit}<extra></extra>",
+                ), row=r, col=1)
+
+    fig.update_xaxes(title=labels.get(x_key, x_key), row=len(units), col=1, **axes)
+    fig.update_layout(height=280 * len(units) + 90, margin=dict(l=10, r=10, t=40, b=10),
+                      plot_bgcolor="white", legend=dict(orientation="h", y=1.12, x=0))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
+
+    show_row = {labels.get(x_key, x_key): round(op_x, 3)}
+    for key in y_keys:
+        val = op.get(key, {}).get("pred")
+        show_row[TARGET_LABEL[mill][key][0]] = (round(float(val), 2) if val is not None and np.isfinite(val) else None)
+    st.dataframe(pd.DataFrame([show_row]), hide_index=True, use_container_width=True)
+
+    note = (f"Slice through the {mill} pipeline at the sidebar schedule; "
+            f"{labels.get(x_key, x_key)} swept over {lo:.0f}-{hi:.0f}"
+            + (", bounded by the house limits" if x_key in limits else "")
+            + (f". Shaded band is the 95% split-conformal interval for {TARGET_LABEL[mill][first_key][0]}." if hw else "."))
+    st.markdown(f'<div class="note">{note}</div>', unsafe_allow_html=True)
 
 
 def template_bytes(mill):
@@ -2268,6 +2406,7 @@ def main():
                         format_func=lambda m: "Heavy plate" if m == "Plate" else "Steckel coil")
         st.markdown("---")
         raw = schedule_inputs(mill)
+        limits = cons.render_editor(mill, SPECS[mill])
         st.markdown("---")
         st.markdown("### Model Engine")
         engine = st.selectbox(
@@ -2298,7 +2437,7 @@ def main():
     with tabs[1]:
         view_spec_check(mill, raw, engine)
     with tabs[2]:
-        optimizer.view_optimizer(mill, raw, engine)
+        optimizer.view_optimizer(mill, raw, engine, limits=limits)
     with tabs[3]:
         view_surface(mill, raw, engine)
     with tabs[4]:
