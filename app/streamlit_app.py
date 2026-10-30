@@ -938,13 +938,22 @@ def schedule_inputs(mill):
         geometry = tuple((g, float(values.get(g, 0.0))) for g in ts.GEOMETRY[mill])
         stats = ts.cached_stats(mill, key, geometry, float(step), (float(_lo), float(_hi)))
         if stats is None:
-            st.caption("No training rows carry this input.")
+            have_table = not ts.load_table(mill).empty
+            have_bundle = bool(ts.load_bundle())
+            st.warning("No training rows for this input in this build.")
+            st.caption(f"cleaned CSV: {'found' if have_table else 'not shipped'} · "
+                       f"bundled summary: {'found' if have_bundle else 'not shipped'}")
+            if not have_table and not have_bundle:
+                st.caption("Running an older build. models/training_stats.json is part of the current "
+                           "commit, so reboot the app to pick it up.")
         else:
             st.dataframe(ts.summary_frame(stats), hide_index=True, use_container_width=True)
             note = f"{stats['rows']:,} training rows · {stats['band']}"
             if stats.get("dropped"):
                 note += f" · {stats['dropped']} out-of-range values dropped"
             st.caption(note)
+            st.caption("source: " + ("bundled summary" if stats.get("source") == "bundle"
+                                     else "cleaned training table"))
 
     return st.session_state["schedule"]
 
