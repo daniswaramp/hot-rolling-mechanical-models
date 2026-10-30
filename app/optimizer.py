@@ -323,14 +323,33 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
                                 candidates.append(row)
 
     cand_df = pd.DataFrame(candidates)
-    if mill == "Plate":
-        if ml.engineer_plate_features is None:
-            return None
-        X_all = ml.engineer_plate_features(cand_df)
-    else:
-        if ml.engineer_hrc_features is None:
-            return None
-        X_all, _ = ml.engineer_hrc_features(cand_df, is_train=False)
+
+    # The mill feature modules expect a complete chemistry row. Callers hand us only the
+    # columns they care about, so fill the rest here rather than letting the module decide
+    # what a missing element means.
+    for el in ("C", "Si", "Mn", "P", "S", "Nb", "Cu", "Cr", "Ni", "Mo", "V", "Al", "Ti", "N", "B"):
+        col = f"Chem_{el}"
+        if col not in cand_df.columns:
+            cand_df[col] = 0.0
+    if "Chem_CE" not in cand_df.columns:
+        cand_df["Chem_CE"] = (cand_df["Chem_C"] + cand_df["Chem_Mn"] / 6.0
+                              + (cand_df["Chem_Cr"] + cand_df["Chem_Mo"] + cand_df["Chem_V"]) / 5.0
+                              + (cand_df["Chem_Ni"] + cand_df["Chem_Cu"]) / 15.0)
+    if mill == "Plate" and "Rolling_Type" not in cand_df.columns:
+        cand_df["Rolling_Type"] = "AR"
+
+    try:
+        if mill == "Plate":
+            if ml.engineer_plate_features is None:
+                return None
+            X_all = ml.engineer_plate_features(cand_df)
+        else:
+            if ml.engineer_hrc_features is None:
+                return None
+            X_all, _ = ml.engineer_hrc_features(cand_df, is_train=False)
+    except Exception:
+        # A feature-module failure should cost the panel, not the whole page.
+        return None
 
     # Score every candidate. Prefers the boosted_out artifacts; falls back to the per-mill
     # joblib bundles the rest of the app uses. Returns (pred_ts, pred_ys) or None.

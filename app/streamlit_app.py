@@ -418,15 +418,22 @@ def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
                     continue
                 except Exception:
                     pass
-            # Fallback to joblib bundle
-            bundle = ml.load_model_bundle(mill, key)
-            if bundle is not None:
+            # Fallback to a joblib bundle. Some HRC tuned ensembles fail to unpickle into the
+            # shared StackingEnsemble class, so try the plain best_model as well.
+            for use_tuned in (True, False):
+                bundle = ml.load_model_bundle(mill, key, use_tuned=use_tuned)
+                if bundle is None:
+                    continue
+                filled = False
                 for cols in candidate_columns(bundle, X):
                     try:
                         out[key] = bundle["model"].predict(align(X, cols))
+                        filled = True
                         break
                     except Exception:
                         continue
+                if filled:
+                    break
     else:
         for key, bundle in bundles(mill).items():
             if bundle is None:
@@ -1242,7 +1249,12 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     frame = pd.DataFrame([dict(raw) for _ in range(grid * grid)])
     frame[x_key] = np.repeat(xs, grid)
     frame[y_key] = np.tile(ys, grid)
-    z = score_frame(mill, frame, engine=engine)[target].values.reshape(grid, grid)
+    scored = score_frame(mill, frame, engine=engine)
+    if target not in scored.columns:
+        st.error(f"{TARGET_LABEL[mill][target][0]} could not be scored on this route, so the "
+                 f"surface has nothing to draw. Switch engine or check models/ for {mill}.")
+        return
+    z = scored[target].values.reshape(grid, grid)
 
     label, unit = TARGET_LABEL[mill][target]
     point = cons.clamp_raw(mill, raw, limits)[0]
@@ -1312,6 +1324,14 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
         return
 
     conf = ml.get_conformal_intervals(mill)
+
+    missing = [k for k in y_keys if k not in scores.columns]
+    if missing:
+        st.warning("Not scored on this route: "
+                   + ", ".join(TARGET_LABEL[mill][k][0] for k in missing))
+        y_keys = [k for k in y_keys if k in scores.columns]
+    if not y_keys:
+        return
 
     def half_width(key):
         if conf is not None and not conf.empty and "Target" in conf.columns:
