@@ -21,6 +21,7 @@ BOOSTED_DIR = os.path.join(MODELS_DIR, "boosted_out")
 import model_loader as ml
 import spec_checker as sc
 import constraints as cons
+import grade_templates as gt
 
 
 def route_for(mill: str, finish_temp: float, headers: float) -> str:
@@ -474,6 +475,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         limits, chem_caps = cons.render_editor(mill, spec_rows, st)
     limits = limits or {}
     chem_caps = chem_caps or {}
+    raw = dict(raw)
     st.markdown('<div class="kicker">Automated Inverse Design</div>', unsafe_allow_html=True)
     st.markdown('<div class="title">Reverse Setpoint Optimizer</div>', unsafe_allow_html=True)
     st.markdown(
@@ -485,7 +487,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
     # 1. Spec Selection Bar
-    col1, col2, col3 = st.columns([2.5, 2.0, 1.5], vertical_alignment="bottom")
+    col1, col2, col3 = st.columns([2.5, 1.5, 2.0], vertical_alignment="bottom")
     presets = PRESET_GRADES[mill]
     spec_names = list(presets.keys())
     chosen_spec = col1.selectbox("Target Standard / Grade", spec_names, index=0, key=f"opt_spec_{mill}")
@@ -494,6 +496,14 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
     cur_t = float(raw.get(t_key, 20.0 if mill == "Plate" else 6.0))
     target_gauge = col2.number_input(f"Target Gauge ({t_key})", min_value=3.0, max_value=120.0, value=cur_t, step=1.0)
+
+    start_choices = [gt.SIMULATOR] + gt.names()
+    starting = col3.selectbox(
+        "Starting chemistry (internal grade)", start_choices, key=f"opt_start_{mill}",
+        help="Seeds the solver's base chemistry with the midpoint of an internal grade's "
+             "permitted MIN/MAX band. The solver still varies C, Mn and Nb across its grid.")
+    if starting != gt.SIMULATOR:
+        raw.update(gt.chemistry(starting))
 
     chosen_objectives = st.multiselect(
         "Optimisation objectives",

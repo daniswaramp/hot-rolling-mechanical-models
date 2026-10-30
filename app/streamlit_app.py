@@ -58,6 +58,12 @@ try:
 except Exception:
     pass
 
+import grade_templates as gt  # noqa: E402
+try:
+    importlib.reload(gt)
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -900,9 +906,58 @@ def header(mill, n_targets):
 
 
 # ----------------------------------------------------------------------------- inputs
+def chemistry_template(mill):
+    """Seed the chemistry inputs from an internal grade's band midpoint."""
+    choices = gt.names()
+    if not choices:
+        return
+    choice = st.sidebar.selectbox(
+        "Chemistry template", [gt.MANUAL] + choices, key=f"{mill}_grade_template",
+        help="Midpoint of an internal grade's permitted MIN/MAX band from the grade database. "
+             "Choosing one fills the chemistry inputs; the rolling schedule is left untouched.")
+    marker = f"{mill}_grade_template_applied"
+    previous = st.session_state.get(marker)
+    if choice == gt.MANUAL:
+        st.session_state[marker] = choice
+        return
+
+    record = gt.get(choice)
+    if not record:
+        return
+    median = record.get("median", {})
+    caption = " · ".join(f"{el} {median[el]:.3f}" for el in ("C", "Mn", "Si", "Nb")
+                         if el in median)
+    if record.get("ce_median") is not None:
+        caption += f" · CE {record['ce_median']:.3f}"
+    st.sidebar.caption(caption)
+    st.sidebar.caption("band midpoint, not a mill aim — edit any element below before calculating")
+
+    ranges = {row[1]: (float(row[4]), float(row[5])) for row in SPECS[mill]}
+    applied, held = {}, []
+    for key, value in gt.chemistry(choice).items():
+        if key not in ranges:
+            continue
+        lo, hi = ranges[key]
+        bounded = float(min(max(value, lo), hi))
+        if bounded != value:
+            held.append(f"{key.replace('Chem_', '')} {value:g} → {bounded:g}")
+        applied[key] = bounded
+    if held:
+        st.sidebar.caption("Outside the app's input range, held at the limit: " + " · ".join(held))
+
+    if choice == previous:
+        return
+    for key, value in applied.items():
+        st.session_state[f"{mill}_{key}"] = value
+    if st.session_state.get("schedule_mill") == mill and "schedule" in st.session_state:
+        st.session_state["schedule"].update(applied)
+    st.session_state[marker] = choice
+
+
 def schedule_inputs(mill):
     st.sidebar.markdown(f"### {mill} schedule")
     st.sidebar.caption("Every value here feeds the mill's own feature module.")
+    chemistry_template(mill)
     values = {}
     groups = []
     for row in SPECS[mill]:
@@ -917,9 +972,11 @@ def schedule_inputs(mill):
                     fmt = "%.4f" if step < 0.001 else ("%.3f" if step < 0.01 else
                                                        ("%.2f" if step < 1 else "%.0f"))
                     shown_unit = "°C" if unit == "C" else unit
+                    widget_key = f"{mill}_{key}"
+                    fallback = {} if widget_key in st.session_state else {"value": float(default)}
                     values[key] = st.number_input(f"{label} [{shown_unit}]", min_value=float(lo),
-                                                  max_value=float(hi), value=float(default),
-                                                  step=float(step), format=fmt, key=f"{mill}_{key}")
+                                                  max_value=float(hi), step=float(step),
+                                                  format=fmt, key=widget_key, **fallback)
         if mill == "Plate":
             st.markdown('<div class="note">Delivery route</div>', unsafe_allow_html=True)
             values["Rolling_Type"] = st.selectbox(
