@@ -180,7 +180,8 @@ def cached_stats(mill, key, geometry, step, bounds=None):
     return variable_stats(mill, key, dict(geometry), step, bounds)
 
 
-def summary_frame(stats, unit=""):
+def summary_frame(stats):
+    """One row, seven columns, ready for st.dataframe."""
     labels = ["Min", "Q1", "Median (Q2)", "Q3", "Max", "Mode", "Mean"]
     values = [stats["min"], stats["q1"], stats["median"], stats["q3"],
               stats["max"], stats["mode"], stats["mean"]]

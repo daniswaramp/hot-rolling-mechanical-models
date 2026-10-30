@@ -927,24 +927,24 @@ def schedule_inputs(mill):
         st.session_state["schedule_mill"] = mill
 
     with st.sidebar.expander("Training statistics", expanded=False):
-        st.caption("One button per input. Each shows how that variable actually ran in the "
-                   "cleaned training table, narrowed to heats near the gauge and width above.")
+        st.caption("How one input actually ran in the cleaned training table, narrowed to heats "
+                   "near the gauge and width above.")
+        picks = [row for row in SPECS[mill] if row[0] != "Geometry"]
+        unit_of = lambda row: "°C" if row[3] == "C" else row[3]
+        choice = st.selectbox("Input", range(len(picks)),
+                              format_func=lambda i: f"{picks[i][2]}  [{unit_of(picks[i])}]",
+                              key=f"stat_var_{mill}")
+        group, key, label, unit, _lo, _hi, _default, step = picks[choice]
         geometry = tuple((g, float(values.get(g, 0.0))) for g in ts.GEOMETRY[mill])
-        for group, key, label, unit, _lo, _hi, _default, step in SPECS[mill]:
-            if group == "Geometry":
-                continue
-            shown_unit = "°C" if unit == "C" else unit
-            with st.popover(f"{label}  [{shown_unit}]"):
-                stats = ts.cached_stats(mill, key, geometry, float(step), (float(_lo), float(_hi)))
-                if stats is None:
-                    st.caption("No training rows carry this input.")
-                    continue
-                st.dataframe(ts.summary_frame(stats, shown_unit), hide_index=True,
-                             use_container_width=True)
-                note = f"{stats['rows']:,} training rows · {stats['band']}"
-                if stats.get("dropped"):
-                    note += f" · {stats['dropped']} out-of-range values dropped"
-                st.caption(note)
+        stats = ts.cached_stats(mill, key, geometry, float(step), (float(_lo), float(_hi)))
+        if stats is None:
+            st.caption("No training rows carry this input.")
+        else:
+            st.dataframe(ts.summary_frame(stats), hide_index=True, use_container_width=True)
+            note = f"{stats['rows']:,} training rows · {stats['band']}"
+            if stats.get("dropped"):
+                note += f" · {stats['dropped']} out-of-range values dropped"
+            st.caption(note)
 
     return st.session_state["schedule"]
 
