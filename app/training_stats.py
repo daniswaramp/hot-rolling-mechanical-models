@@ -6,6 +6,7 @@ and width. The band widens until enough rows are left, and the caption says whic
 band was used so a thin sample is never presented as the whole population.
 """
 
+import json
 import os
 
 import numpy as np
@@ -19,6 +20,8 @@ TABLES = {
     "Plate": os.path.join(ROOT, "Plate", "csv", "plate_rolling_2026_cleaned.csv"),
     "HRC": os.path.join(ROOT, "HRC", "csv", "steckel_mill_cleaned.csv"),
 }
+
+BUNDLE_PATH = os.path.join(ROOT, "models", "training_stats.json")
 
 GEOMETRY = {
     "Plate": ["Plate_T_mm", "Plate_W_mm"],
@@ -76,6 +79,52 @@ def _decimals(step):
     return int(max(0, min(6, round(-np.log10(step)))))
 
 
+@st.cache_data(show_spinner=False)
+def load_bundle():
+    """Precomputed summary shipped with the deployment, since the raw heats stay local."""
+    try:
+        with open(BUNDLE_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _bundle_stats(mill, key, raw):
+    payload = load_bundle().get(mill)
+    if not payload:
+        return None
+    variable = payload.get("variables", {}).get(key)
+    if not variable:
+        return None
+
+    thickness = None
+    geometry_key = (GEOMETRY.get(mill) or [None])[0]
+    if geometry_key:
+        try:
+            thickness = float(raw.get(geometry_key))
+        except (TypeError, ValueError):
+            thickness = None
+
+    chosen = variable.get("all")
+    band = "whole training table (bundled summary)"
+    if thickness is not None:
+        for bucket in variable.get("bins", []):
+            stats = bucket.get("stats")
+            if (bucket["lo"] <= thickness <= bucket["hi"] and stats
+                    and stats.get("n", 0) >= MIN_ROWS):
+                chosen = stats
+                band = f"thickness {bucket['lo']:.0f}-{bucket['hi']:.0f} mm (bundled summary)"
+                break
+    if not chosen:
+        return None
+    out = dict(chosen)
+    out["rows"] = int(out.pop("n", 0))
+    if out.get("mode") is None:
+        out["mode"] = float("nan")
+    out.update({"band": band, "dropped": 0, "source": "bundle"})
+    return out
+
+
 def variable_stats(mill, key, raw, step=None, bounds=None):
     """Min, quartiles, max, mode and mean for one input, filtered by the entered geometry.
 
@@ -84,7 +133,9 @@ def variable_stats(mill, key, raw, step=None, bounds=None):
     and they would wreck the summary.
     """
     table = load_table(mill)
-    if table.empty or key not in table.columns:
+    if table.empty:
+        return _bundle_stats(mill, key, raw)
+    if key not in table.columns:
         return None
 
     subset, band = None, "all rows"
