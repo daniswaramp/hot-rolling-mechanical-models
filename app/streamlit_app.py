@@ -52,6 +52,12 @@ try:
 except Exception:
     pass
 
+import training_stats as ts  # noqa: E402
+try:
+    importlib.reload(ts)
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -196,7 +202,7 @@ h1, h2, h3, h4 { font-family: 'Inter', sans-serif; color: #0b0d10; letter-spacin
 
 .kicker { font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: #1746c8; font-weight: 600; line-height: 1.6; }
 .title { font-size: 30px; line-height: 1.15; font-weight: 600; margin: .35rem 0 .5rem; letter-spacing: -.03em; color: #0b0d10; }
-.lede { font-size: 14.5px; color: #4b5563; max-width: 64ch; line-height: 1.55; }
+.lede { font-size: 14.5px; color: #4b5563; max-width: none; line-height: 1.62; text-wrap: pretty; }
 .hair { height: 1px; background: #e5e7eb; margin: 1.4rem 0 1.2rem; border: 0; }
 
 .section { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #4b5563;
@@ -858,24 +864,26 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
 
 # ----------------------------------------------------------------------------- header
 def header(mill, n_targets):
-    if mill == "Plate":
-        lede = ("An end-to-end predictive analytics suite that extracts engineered domain features across "
-                "roughing, finishing, laminar ACC, and optional normalizing routes, including cumulative "
-                "drafting strains, recrystallization stops, and cooling-rate kinetics. Benchmarking Ordinary "
-                "Least Squares (OLS), non-linear regression splines, and fine-tuned machine learning ensembles "
-                "validated on strict melt-grouped holdouts with bootstrap uncertainty estimation, the engine predicts "
-                "10 certified mechanical properties while executing multi-iterative residual and stability diagnostics. "
-                "Continuously maps dynamic Cp and Cpk process capability indices against tolerance bands and identifies "
-                "optimal setpoints using fine-tuned 2D and 3D response surface methodology (RSM) visualizations.")
-    else:
-        lede = ("An end-to-end predictive analytics suite that extracts engineered domain features across "
-                "roughing, reversing Steckel mill coiler boxes, runout table (ROT) laminar cooling, and downcoiling routes, "
-                "including cumulative drafting strains, thermal retention, and cooling kinetics. Benchmarking Ordinary "
-                "Least Squares (OLS), non-linear regression splines, and fine-tuned machine learning ensembles "
-                f"validated on strict melt-grouped holdouts with bootstrap uncertainty estimation, the engine predicts "
-                f"{n_targets} certified mechanical properties while executing multi-iterative residual and stability diagnostics. "
-                "Continuously maps dynamic Cp and Cpk process capability indices against tolerance bands and identifies "
-                "optimal setpoints using fine-tuned 2D and 3D response surface methodology (RSM) visualizations.")
+    route = ("the roughing and finishing mills with laminar accelerated cooling, plus the optional "
+             "furnace-normalising route" if mill == "Plate"
+             else "the reversing Steckel mill, the runout table and the downcoiler")
+    lede = (
+        f"The engine takes a rolling schedule and a heat chemistry off {route} and returns the "
+        f"{n_targets} mechanical properties that schedule should certify. The features are the mill's "
+        f"own physics: true strain accumulated through the passes, the recrystallisation stop, the "
+        f"finishing margin above Ar3, and the cooling rate the steel actually sees. Plate and Steckel "
+        f"coil each run a separate feature module, so plate numbers never borrow from coil data."
+        "<br><br>"
+        "Every property is fitted three ways. Ordinary least squares and a metallurgical non-linear "
+        "fit give the whitebox reading, gradient-boosted trees give the accuracy. All of it is scored "
+        "on melts held out as whole heats, so sister plates from one heat never straddle the split, and "
+        "the interval beside each number comes from split-conformal calibration rather than a bare RMSE. "
+        "The diagnostics tab shows where the residuals actually sit."
+        "<br><br>"
+        "The same page turns those predictions into Cp and Cpk against limits you set, draws a 1D slice, "
+        "a 2D contour or a 3D surface across any two inputs, and gives the inverse optimizer the window "
+        "it needs to propose setpoints."
+    )
     st.markdown(f"""
 <div class="kicker">Plate Mill & Steckel Mill Prediction Platform</div>
 <div class="title">Specification Limit & Mechanical Models</div>
@@ -917,6 +925,27 @@ def schedule_inputs(mill):
     if st.session_state.get("schedule_mill") != mill:
         st.session_state["schedule"] = dict(values)
         st.session_state["schedule_mill"] = mill
+
+    with st.sidebar.expander("Training statistics", expanded=False):
+        st.caption("One button per input. Each shows how that variable actually ran in the "
+                   "cleaned training table, narrowed to heats near the gauge and width above.")
+        geometry = tuple((g, float(values.get(g, 0.0))) for g in ts.GEOMETRY[mill])
+        for group, key, label, unit, _lo, _hi, _default, step in SPECS[mill]:
+            if group == "Geometry":
+                continue
+            shown_unit = "°C" if unit == "C" else unit
+            with st.popover(f"{label}  [{shown_unit}]"):
+                stats = ts.cached_stats(mill, key, geometry, float(step), (float(_lo), float(_hi)))
+                if stats is None:
+                    st.caption("No training rows carry this input.")
+                    continue
+                st.dataframe(ts.summary_frame(stats, shown_unit), hide_index=True,
+                             use_container_width=True)
+                note = f"{stats['rows']:,} training rows · {stats['band']}"
+                if stats.get("dropped"):
+                    note += f" · {stats['dropped']} out-of-range values dropped"
+                st.caption(note)
+
     return st.session_state["schedule"]
 
 
@@ -2406,7 +2435,6 @@ def main():
                         format_func=lambda m: "Heavy plate" if m == "Plate" else "Steckel coil")
         st.markdown("---")
         raw = schedule_inputs(mill)
-        limits = cons.render_editor(mill, SPECS[mill])
         st.markdown("---")
         st.markdown("### Model Engine")
         engine = st.selectbox(
@@ -2437,7 +2465,7 @@ def main():
     with tabs[1]:
         view_spec_check(mill, raw, engine)
     with tabs[2]:
-        optimizer.view_optimizer(mill, raw, engine, limits=limits)
+        optimizer.view_optimizer(mill, raw, engine, spec_rows=SPECS[mill])
     with tabs[3]:
         view_surface(mill, raw, engine)
     with tabs[4]:

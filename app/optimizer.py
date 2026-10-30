@@ -37,6 +37,102 @@ def route_for(mill: str, finish_temp: float, headers: float) -> str:
     return "CR"
 
 
+# relative alloy cost per 0.01 wt%, used by the cost objective
+ALLOY_COST = {"C": 1.0, "Mn": 1.0, "Si": 1.2, "Al": 2.0, "Nb": 25.0, "V": 20.0,
+              "Mo": 30.0, "Ti": 15.0, "Cu": 5.0, "Ni": 8.0, "Cr": 6.0}
+
+# each objective is scored on a compliant candidate and read as "lower is better"
+# once its direction has been applied
+OBJECTIVES = {
+    "min_ce": {
+        "label": "Minimum CE_IIW",
+        "help": "leanest weldable chemistry",
+        "col": "ce_iiw", "better": "low",
+    },
+    "min_pcm": {
+        "label": "Minimum P_cm",
+        "help": "lowest cold-cracking risk",
+        "col": "pcm", "better": "low",
+    },
+    "min_cost": {
+        "label": "Minimum alloy cost",
+        "help": "C, Mn and microalloy spend at relative prices",
+        "col": "cost_proxy", "better": "low",
+    },
+    "max_margin": {
+        "label": "Maximum safety margin",
+        "help": "room above the YS and TS requirement at the 95% bound",
+        "col": "margin", "better": "high",
+    },
+    "min_overshoot": {
+        "label": "Minimum TS overshoot",
+        "help": "closest to the target without going under it",
+        "col": "ts_headroom", "better": "low",
+    },
+    "max_finish_temp": {
+        "label": "Maximize finish temperature",
+        "help": "finish as hot as the window allows",
+        "col": {"Plate": "FM_Finish_Temp", "HRC": "Temp_FT_Avg_C"}, "better": "high",
+    },
+    "max_entry_temp": {
+        "label": "Maximize entry temperature",
+        "help": "hotter entry into the finishing train",
+        "col": {"Plate": "FM_Temp_Before_Rolling", "HRC": "Temp_Transfer_Bar_C"}, "better": "high",
+    },
+    "max_post_laminar": {
+        "label": "Maximize post-laminar temperature",
+        "help": "less water at the laminar headers",
+        "col": "ACC_Temp_Post_Laminar", "better": "high", "mills": ["Plate"],
+    },
+    "max_coiling_temp": {
+        "label": "Maximize coiling temperature",
+        "help": "hotter coiler, softer coil",
+        "col": "Temp_CT_Top_C", "better": "high", "mills": ["HRC"],
+    },
+}
+
+DEFAULT_MILLS = ("Plate", "HRC")
+
+
+def available_objectives(mill):
+    """Objectives that make sense for this route."""
+    return [k for k, spec in OBJECTIVES.items() if mill in spec.get("mills", DEFAULT_MILLS)]
+
+
+def objective_column(spec, mill):
+    col = spec["col"]
+    return col.get(mill) if isinstance(col, dict) else col
+
+
+def objective_scores(frame: pd.DataFrame, keys, mill) -> pd.Series:
+    """Normalise each chosen objective to 0..1 across the compliant set and average them.
+
+    Lower is better in every case, so the winner is the row with the smallest score.
+    """
+    parts = []
+    for key in keys:
+        spec = OBJECTIVES.get(key)
+        if spec is None or mill not in spec.get("mills", DEFAULT_MILLS):
+            continue
+        col = objective_column(spec, mill)
+        if col not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[col], errors="coerce").astype(float)
+        if values.notna().any():
+            values = values.fillna(values.mean())
+        lo, hi = float(values.min()), float(values.max())
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-12:
+            parts.append(pd.Series(0.0, index=frame.index))
+            continue
+        norm = (values - lo) / (hi - lo)
+        if spec["better"] == "high":
+            norm = 1.0 - norm
+        parts.append(norm)
+    if not parts:
+        return None
+    return pd.concat(parts, axis=1).mean(axis=1)
+
+
 PRESET_GRADES = {
     "Plate": {
         "ASTM A 572 Gr 50": {"ys_min": 345.0, "ts_min": 450.0, "el_min": 18.0, "c_max": 0.23, "mn_max": 1.35},
@@ -130,13 +226,15 @@ def score_candidates(mill: str, X_all):
 
 
 def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, base_inputs: dict,
-                             objective_mode: str = "min_ce", limits: dict = None):
+                             objective_mode: str = None, limits: dict = None,
+                             chem_caps: dict = None, objectives=None):
     """
-    Evaluates candidate setpoint candidates in vectorized batch to find the minimum-cost / minimum-CE
-    chemistry and rolling schedule that guarantees specification compliance with split-conformal 95% bounds.
+    Scores candidate setpoints in one vectorised batch and returns the schedule that clears the
+    specification with split-conformal 95% bounds while best satisfying the selected objectives.
 
     Every process temperature swept here is bounded by `limits` (see constraints.py), so the solver can
-    never return a setpoint outside the house band.
+    never return a setpoint outside the house band. `objectives` takes any keys from OBJECTIVES; when
+    more than one is chosen they are normalised across the compliant set and averaged.
     """
     limits = limits or {}
     try:
@@ -249,13 +347,56 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
     lower_ys = pred_ys - q_ys
     lower_ts = pred_ts - q_ts
 
-    compliant_mask = (lower_ys >= req_ys) & (lower_ts >= req_ts)
+    # chemistry caps, computed on the full formulae
+    chem_caps = chem_caps or {}
+    ce_col = cons.ce_iiw(cand_df["Chem_C"], cand_df["Chem_Mn"], cand_df.get("Chem_Cr", 0.0),
+                         cand_df.get("Chem_Mo", 0.0), cand_df.get("Chem_V", 0.0),
+                         cand_df.get("Chem_Ni", 0.0), cand_df.get("Chem_Cu", 0.0))
+    pcm_col = cons.pcm(cand_df["Chem_C"], cand_df.get("Chem_Si", 0.0), cand_df["Chem_Mn"],
+                       cand_df.get("Chem_Cu", 0.0), cand_df.get("Chem_Cr", 0.0),
+                       cand_df.get("Chem_Ni", 0.0), cand_df.get("Chem_Mo", 0.0),
+                       cand_df.get("Chem_V", 0.0), cand_df.get("Chem_B", 0.0))
+    ce_col = np.asarray(ce_col, dtype=float)
+    pcm_col = np.asarray(pcm_col, dtype=float)
+
+    cap_mask = np.ones(len(cand_df), dtype=bool)
+    if chem_caps.get("ceq") is not None:
+        cap_mask &= ce_col <= float(chem_caps["ceq"])
+    if chem_caps.get("pcm") is not None:
+        cap_mask &= pcm_col <= float(chem_caps["pcm"])
+
+    compliant_mask = (lower_ys >= req_ys) & (lower_ts >= req_ts) & cap_mask
 
     cand_df["pred_ys"] = np.round(pred_ys, 1)
     cand_df["pred_ts"] = np.round(pred_ts, 1)
     cand_df["lower_ys"] = np.round(lower_ys, 1)
     cand_df["lower_ts"] = np.round(lower_ts, 1)
-    cand_df["ce_iiw"] = np.round(cand_df["Chem_C"] + cand_df["Chem_Mn"] / 6.0 + 5.0 * cand_df["Chem_Nb"], 3)
+    cand_df["ce_iiw"] = np.round(ce_col, 3)
+    cand_df["pcm"] = np.round(pcm_col, 3)
+
+    # columns the objective library reads
+    cost_col = np.zeros(len(cand_df))
+    for el, weight in ALLOY_COST.items():
+        col = f"Chem_{el}"
+        if col in cand_df.columns:
+            cost_col += weight * pd.to_numeric(cand_df[col], errors="coerce").fillna(0.0).to_numpy() * 100.0
+    cand_df["cost_proxy"] = np.round(cost_col, 2)
+
+    selected = [k for k in (objectives or []) if k in available_objectives(mill)]
+    if not selected:
+        selected = ["max_margin"] if objective_mode == "max_margin" else ["min_ce"]
+
+    # what the permitted window can actually reach, once the caps are applied
+    window = {}
+    if cap_mask.any():
+        ys_in = pred_ys[cap_mask]
+        ts_in = pred_ts[cap_mask]
+        window = {
+            "ys_range": (float(np.min(ys_in)), float(np.max(ys_in))),
+            "ts_range": (float(np.min(ts_in)), float(np.max(ts_in))),
+            "n_inside": int(cap_mask.sum()),
+            "reachable": bool(np.max(ys_in) >= req_ys and np.max(ts_in) >= req_ts),
+        }
 
     compliant_df = cand_df[compliant_mask].copy()
 
@@ -265,12 +406,14 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
         best_row = cand_df.sort_values(by=["shortfall", "ce_iiw"]).iloc[0]
         is_fully_compliant = False
     else:
-        if objective_mode == "min_ce":
-            best_row = compliant_df.sort_values(by=["ce_iiw", "pred_ys"]).iloc[0]
+        compliant_df["margin"] = np.minimum(compliant_df["lower_ys"] - req_ys,
+                                            compliant_df["lower_ts"] - req_ts)
+        compliant_df["ts_headroom"] = compliant_df["pred_ts"] - req_ts
+        score = objective_scores(compliant_df, selected, mill)
+        if score is not None:
+            best_row = compliant_df.loc[score.idxmin()]
         else:
-            # Max safety margin
-            compliant_df["margin"] = (compliant_df["lower_ys"] - req_ys) + (compliant_df["lower_ts"] - req_ts)
-            best_row = compliant_df.sort_values(by=["margin"], ascending=False).iloc[0]
+            best_row = compliant_df.iloc[0]
         is_fully_compliant = True
 
     best_schedule = best_row.to_dict()
@@ -294,17 +437,24 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
         "q_ts": q_ts,
         "q_el": q_el,
         "limits": dict(limits),
+        "chem_caps": dict(chem_caps),
+        "objectives": selected,
+        "window": window,
         "clamped": bool(violations),
         "violations": violations,
         "candidates_df": cand_df
     }
 
 
-def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)", limits: dict = None):
+def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)",
+                   limits: dict = None, spec_rows=None, chem_caps: dict = None):
     """
     Renders the interactive Inverse Setpoint Optimizer in Streamlit.
     """
+    if spec_rows:
+        limits, chem_caps = cons.render_editor(mill, spec_rows, st)
     limits = limits or {}
+    chem_caps = chem_caps or {}
     st.markdown('<div class="kicker">Automated Inverse Design</div>', unsafe_allow_html=True)
     st.markdown('<div class="title">Reverse Setpoint Optimizer</div>', unsafe_allow_html=True)
     st.markdown(
@@ -326,8 +476,17 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     cur_t = float(raw.get(t_key, 20.0 if mill == "Plate" else 6.0))
     target_gauge = col2.number_input(f"Target Gauge ({t_key})", min_value=3.0, max_value=120.0, value=cur_t, step=1.0)
 
-    obj_mode = col3.selectbox("Optimization Strategy", ["Minimum CE / Alloy Cost", "Maximum Safety Buffer"], index=0)
-    obj_key = "min_ce" if "Minimum" in obj_mode else "max_margin"
+    chosen_objectives = st.multiselect(
+        "Optimisation objectives",
+        options=available_objectives(mill),
+        default=["min_ce", "max_margin"],
+        format_func=lambda k: OBJECTIVES[k]["label"],
+        help="Pick one or several. Multiple objectives are normalised across the compliant candidates "
+             "and averaged, so no single objective wins just because its units are larger.")
+    if not chosen_objectives:
+        st.info("Pick at least one objective before solving.")
+        return
+    st.caption(" · ".join(OBJECTIVES[k]["help"] for k in chosen_objectives))
 
     # Show Target Requirements
     c1, c2, c3 = st.columns(3)
@@ -335,16 +494,17 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     c2.metric("Min Tensile Strength (TS)", f"≥ {spec_cfg['ts_min']:.0f} MPa")
     c3.metric("Min Elongation (EL)", f"≥ {spec_cfg['el_min']:.0f} %")
 
-    if limits:
-        st.caption("House limits enforced by the solver — " + cons.describe(limits))
+    if limits or chem_caps:
+        st.caption("Solver constraints — " + cons.describe(limits) + " · " + cons.describe_caps(chem_caps))
 
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
     if st.button("⚡ Solve Optimal Rolling & Chemistry Schedule", type="primary", use_container_width=True):
         with st.spinner("Evaluating multi-parameter response space with split-conformal verification..."):
             t0 = time.time()
-            res = run_inverse_optimization(mill, spec_cfg, target_gauge, raw, objective_mode=obj_key,
-                                           limits=limits)
+            res = run_inverse_optimization(mill, spec_cfg, target_gauge, raw,
+                                           limits=limits, chem_caps=chem_caps,
+                                           objectives=chosen_objectives)
             elapsed = time.time() - t0
 
         if not res:
@@ -388,9 +548,28 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         st.dataframe(pd.DataFrame(comp_rows), hide_index=True, use_container_width=True)
 
         if res.get("clamped"):
-            st.warning("Schedule clamped into the house limits: " + "; ".join(res.get("violations", [])))
-        if limits:
-            st.caption("Limits in force — " + cons.describe(limits))
+            st.warning("Schedule clamped into the permitted window: " + "; ".join(res.get("violations", [])))
+
+        window = res.get("window") or {}
+        if window:
+            ys_lo, ys_hi = window["ys_range"]
+            ts_lo, ts_hi = window["ts_range"]
+            band1, band2, band3 = st.columns(3)
+            band1.metric("Yield reachable in window", f"{ys_lo:.0f} - {ys_hi:.0f} MPa",
+                         delta=f"target {spec_cfg['ys_min']:.0f}",
+                         delta_color="normal" if window["reachable"] else "inverse")
+            band2.metric("Tensile reachable in window", f"{ts_lo:.0f} - {ts_hi:.0f} MPa",
+                         delta=f"target {spec_cfg['ts_min']:.0f}")
+            band3.metric("Candidates inside caps", f"{window['n_inside']:,}",
+                         delta=f"of {res['n_evaluated']:,}")
+            if not window["reachable"]:
+                st.warning("The permitted window cannot reach this specification. "
+                           "Widen the temperature band, relax a chemistry cap, or lower the gauge.")
+
+        if limits or chem_caps or res.get("objectives"):
+            labels = ", ".join(OBJECTIVES[k]["label"] for k in res.get("objectives", []))
+            st.caption("Constraints in force — " + cons.describe(limits) + " · " + cons.describe_caps(chem_caps)
+                       + (" · objectives: " + labels if labels else ""))
 
         # Verification Metrics Strip
         st.markdown("#### 🎯 Verified Mechanical Performance (with Split-Conformal 95% Bounds)")
