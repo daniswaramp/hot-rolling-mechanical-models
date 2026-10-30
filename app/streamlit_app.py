@@ -949,46 +949,40 @@ def chemistry_template(mill):
         return
     for key, value in applied.items():
         st.session_state[f"{mill}_{key}"] = value
-    if st.session_state.get("schedule_mill") == mill and "schedule" in st.session_state:
-        st.session_state["schedule"].update(applied)
     st.session_state[marker] = choice
 
 
 def schedule_inputs(mill):
     st.sidebar.markdown(f"### {mill} schedule")
-    st.sidebar.caption("Every value here feeds the mill's own feature module.")
+    st.sidebar.caption("Every value here feeds the mill's own feature module. Edits apply as you "
+                       "make them; there is no separate calculate step.")
     chemistry_template(mill)
     values = {}
     groups = []
     for row in SPECS[mill]:
         if row[0] not in groups:
             groups.append(row[0])
-    with st.sidebar.form(f"schedule_{mill}", border=False):
-        for group in groups:
-            with st.expander(group, expanded=group in ("Finishing mill", "Steckel mill")):
-                for g, key, label, unit, lo, hi, default, step in SPECS[mill]:
-                    if g != group:
-                        continue
-                    fmt = "%.4f" if step < 0.001 else ("%.3f" if step < 0.01 else
-                                                       ("%.2f" if step < 1 else "%.0f"))
-                    shown_unit = "°C" if unit == "C" else unit
-                    widget_key = f"{mill}_{key}"
-                    fallback = {} if widget_key in st.session_state else {"value": float(default)}
-                    values[key] = st.number_input(f"{label} [{shown_unit}]", min_value=float(lo),
-                                                  max_value=float(hi), step=float(step),
-                                                  format=fmt, key=widget_key, **fallback)
-        if mill == "Plate":
-            st.markdown('<div class="note">Delivery route</div>', unsafe_allow_html=True)
-            values["Rolling_Type"] = st.selectbox(
-                "Rolling type", ["AR", "TMCP", "N"], key=f"{mill}_rolling_type",
-                help="AR = as rolled, TMCP = thermomechanically controlled, N = normalised delivery.")
-        submitted = st.form_submit_button("Calculate", type="primary", use_container_width=True)
-    if submitted or "schedule" not in st.session_state:
-        st.session_state["schedule"] = dict(values)
-        st.session_state["schedule_mill"] = mill
-    if st.session_state.get("schedule_mill") != mill:
-        st.session_state["schedule"] = dict(values)
-        st.session_state["schedule_mill"] = mill
+    for group in groups:
+        with st.expander(group, expanded=group in ("Finishing mill", "Steckel mill")):
+            for g, key, label, unit, lo, hi, default, step in SPECS[mill]:
+                if g != group:
+                    continue
+                fmt = "%.4f" if step < 0.001 else ("%.3f" if step < 0.01 else
+                                                   ("%.2f" if step < 1 else "%.0f"))
+                shown_unit = "°C" if unit == "C" else unit
+                widget_key = f"{mill}_{key}"
+                seeded = st.session_state.get(widget_key)
+                values[key] = st.number_input(f"{label} [{shown_unit}]", min_value=float(lo),
+                                              max_value=float(hi), step=float(step), format=fmt,
+                                              key=widget_key,
+                                              value=float(default if seeded is None else seeded))
+    if mill == "Plate":
+        st.markdown('<div class="note">Delivery route</div>', unsafe_allow_html=True)
+        values["Rolling_Type"] = st.selectbox(
+            "Rolling type", ["AR", "TMCP", "N"], key=f"{mill}_rolling_type",
+            help="AR = as rolled, TMCP = thermomechanically controlled, N = normalised delivery.")
+    st.session_state["schedule"] = dict(values)
+    st.session_state["schedule_mill"] = mill
 
     with st.sidebar.expander("Training statistics", expanded=False):
         st.caption("How one input actually ran in the cleaned training table, narrowed to heats "
