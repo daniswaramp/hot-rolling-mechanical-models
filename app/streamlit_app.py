@@ -64,6 +64,12 @@ try:
 except Exception:
     pass
 
+import trend_stats as tst  # noqa: E402
+try:
+    importlib.reload(tst)
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -1375,6 +1381,8 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
         return
 
     conf = ml.get_conformal_intervals(mill)
+    gauge = raw.get(ts.GEOMETRY[mill][0])
+    observed = tst.bins_for(mill, x_key, gauge)
 
     missing = [k for k in y_keys if k not in scores.columns]
     if missing:
@@ -1416,6 +1424,20 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
                 x=xs, y=y, mode="lines", name=label, line=dict(color=color, width=2.2),
                 hovertemplate=f"{labels.get(x_key, x_key)} %{{x:.2f}}<br>{label} %{{y:.1f}} {unit}<extra></extra>",
             ), row=r, col=1)
+
+            points = [(b["x"], b["targets"][key]) for b in observed if key in b.get("targets", {})]
+            if points:
+                fig.add_trace(go.Scatter(
+                    x=[p[0] for p in points], y=[p[1]["mean"] for p in points],
+                    error_y=dict(type="data", array=[p[1]["se"] for p in points],
+                                 thickness=1, width=3, color="#9ca3af"),
+                    mode="markers", name=f"{label} · observed, adjusted",
+                    marker=dict(size=7, symbol="diamond-open", color=color),
+                    customdata=[p[1]["n"] for p in points],
+                    hovertemplate=(f"{labels.get(x_key, x_key)} %{{x:.1f}}<br>"
+                                   f"observed {label} %{{y:.1f}} {unit}<br>n=%{{customdata}}"
+                                   "<extra></extra>"),
+                ), row=r, col=1)
         fig.update_yaxes(title=unit, row=r, col=1, **axes)
         if x_key in limits:
             for xv in limits[x_key]:
@@ -1448,6 +1470,11 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
             f"{labels.get(x_key, x_key)} swept over {lo:.0f}-{hi:.0f}"
             + (", bounded by the house limits" if x_key in limits else "")
             + (f". Shaded band is the 95% split-conformal interval for {TARGET_LABEL[mill][first_key][0]}." if hw else "."))
+    if observed:
+        note += (" Open diamonds are population means from the cleaned training table, adjusted for "
+                 "chemistry, gauge and cooling (partial residual) and narrowed to the entered "
+                 "gauge band — not this exact schedule; bars are ±1 standard error. Where that "
+                 "scatter is wider than the step you are reading, the step is not distinguishable.")
     st.markdown(f'<div class="note">{note}</div>', unsafe_allow_html=True)
 
 
