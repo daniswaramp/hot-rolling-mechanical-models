@@ -15,11 +15,13 @@ The platform is partitioned into two distinct steel rolling product routes:
 1. **`Plate\` (Heavy Plate Sequential Rolling)**:
    - **Product**: Thick structural, pressure vessel, and offshore steel plates (gauge $6\text{ mm} - 120\text{ mm}$).
    - **Process**: Reheating furnace $\rightarrow$ Roughing mill $\rightarrow$ Finishing mill $\rightarrow$ Accelerated Cooling (ACC Laminar headers) $\rightarrow$ As-Rolled / TMCP (Before Normalizing) and optional furnace heat treatment (After Normalizing).
-   - **Active Dataset**: 23,845 plates extracted from `Plate\raw\PLATE SEQUENTIAL ROLLING RESULT - 2026.xlsx`.
+   - **Active Dataset**: 23,845 plates extracted from `Plate\raw\PLATE SEQUENTIAL ROLLING RESULT - 2026.xlsx`
+     (sanitised in place: 534 cells repaired, 0 duplicate rows).
 2. **`HRC\` (Steckel Mill Hot Rolled Coil)**:
    - **Product**: Continuous hot-rolled strip coiled into coils (gauge $2.5\text{ mm} - 16\text{ mm}$).
    - **Process**: Reheating furnace $\rightarrow$ Plate/Roughing mill $\rightarrow$ 4-high reversing Steckel Mill (with heated mandrel coiler boxes) $\rightarrow$ Runout Table (ROT) laminar spray cooling $\rightarrow$ Downcoiler.
-   - **Active Dataset**: 20,298 coils extracted from `HRC\raw\STECKEL_MILL_REPORT.xlsx`.
+   - **Active Dataset**: 20,298 coils extracted from `HRC\raw\STECKEL_MILL_REPORT.xlsx`
+     (sanitised in place: 1,182 duplicate records removed → 19,116 usable rows, 7,515 cells repaired).
 
 Two surfaces sit on top of those pipelines:
 

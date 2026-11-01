@@ -171,15 +171,19 @@ def evaluate_thickness(row, thickness, mill):
     }
 
 
-def evaluate_chemistry(row, raw_inputs, physical_indicators=None):
+def evaluate_chemistry(row, raw_inputs, physical_indicators=None, available_keys=None):
     """Evaluate chemical composition and carbon equivalents against standard limits.
 
     Splits elements into:
-    - active_checks: elements that have a specified Min and/or Max
+    - active_checks: elements that have a specified Min and/or Max and a value the app can supply
     - unconstrained: elements with no specified limit (-)
+    - unverifiable: elements with a limit but no input on this route (e.g. Boron on plate,
+      which the schedule form never asks for). These are excluded from pass/fail counting
+      instead of silently passing as 0.0.
     """
     active_checks = []
     unconstrained = []
+    unverifiable = []
     pass_count = 0
     fail_count = 0
 
@@ -188,9 +192,11 @@ def evaluate_chemistry(row, raw_inputs, physical_indicators=None):
         all_specs += CE_ELEMENTS
 
     for app_key, col_min, col_max, label in all_specs:
-        actual_val = float(
-            raw_inputs.get(app_key, physical_indicators.get(app_key, 0.0) if physical_indicators else 0.0)
-        )
+        supplied = True
+        if available_keys is not None:
+            supplied = app_key in available_keys
+        default = physical_indicators.get(app_key, 0.0) if physical_indicators else 0.0
+        actual_val = float(raw_inputs.get(app_key, default))
 
         min_val, min_note = parse_limit(row.get(col_min)) if col_min else (None, "")
         max_val, max_note = parse_limit(row.get(col_max)) if col_max else (None, "")
@@ -202,6 +208,16 @@ def evaluate_chemistry(row, raw_inputs, physical_indicators=None):
                 "key": app_key,
                 "label": label,
                 "actual": actual_val,
+            })
+            continue
+
+        if not supplied:
+            unverifiable.append({
+                "key": app_key,
+                "label": label,
+                "min": min_val,
+                "max": max_val,
+                "notes": "no input on this route — the schedule form does not carry this element",
             })
             continue
 
@@ -241,7 +257,8 @@ def evaluate_chemistry(row, raw_inputs, physical_indicators=None):
             "notes": ", ".join(notes),
         })
 
-    overall_status = "ALL_PASS" if fail_count == 0 else f"{fail_count}_OUT_OF_SPEC"
+    overall_status = "ALL_PASS" if fail_count == 0 and not unverifiable else (
+        f"{fail_count}_OUT_OF_SPEC" if fail_count else "PARTIAL_VERIFICATION")
 
     return {
         "status": overall_status,
@@ -249,6 +266,7 @@ def evaluate_chemistry(row, raw_inputs, physical_indicators=None):
         "fail_count": fail_count,
         "active_checks": active_checks,
         "unconstrained": unconstrained,
+        "unverifiable": unverifiable,
     }
 
 
@@ -422,22 +440,50 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
             "note": f"Footnote [{el_note}]" if el_note else "",
         })
 
-    # 4. Impact Toughness (Plate route only)
+    # 4. Impact toughness (Plate route only). The workbook states limits at eleven
+    # temperatures; the models cover 0, -20 and -40 C. Everything else is reported
+    # as NOT_VERIFIABLE rather than silently passing.
+    unverifiable_count = 0
     if mill == "Plate":
-        impact_map = [
-            ("Impact_0C", "Impact 0 (TR) [J]", "Impact 0 (LG) [J]", "Charpy 0 °C"),
-            ("Impact_m20C", "Impact -20 (TR) [J]", "Impact -20 (LG) [J]", "Charpy -20 °C"),
-            ("Impact_m40C", "Impact -40 (TR) [J]", "Impact -40 (LG) [J]", "Charpy -40 °C"),
-        ]
-        for imp_key, col_tr, col_lg, imp_label in impact_map:
-            imp_tr, imp_note_tr = parse_limit(row.get(col_tr))
-            imp_lg, imp_note_lg = parse_limit(row.get(col_lg))
-            imp_min = imp_tr if imp_tr is not None else imp_lg
-            imp_dir = "TR" if imp_tr is not None else ("LG" if imp_lg is not None else "")
-            imp_note = imp_note_tr if imp_tr is not None else imp_note_lg
+        impact_models = {0: "Impact_0C", -20: "Impact_m20C", -40: "Impact_m40C"}
+        pattern = re.compile(r"^Impact ([+-]?\d+) \((TR|LG)\) \[J\]$")
+        stated = {}
+        for col in row.index:
+            match = pattern.match(str(col))
+            if not match:
+                continue
+            temperature = int(match.group(1))
+            value, note = parse_limit(row.get(col))
+            if value is None:
+                continue
+            # transverse preferred over longitudinal when both carry the same limit
+            if temperature not in stated or match.group(2) == "TR":
+                stated[temperature] = (value, note, match.group(2))
+
+        for temperature in sorted(stated, reverse=True):
+            imp_min, imp_note, direction = stated[temperature]
+            imp_key = impact_models.get(temperature)
+            imp_label = f"Charpy {temperature:+d} °C" if temperature else "Charpy 0 °C"
+            if imp_key is None:
+                unverifiable_count += 1
+                checks.append({
+                    "property": imp_label,
+                    "key": None,
+                    "unit": "J",
+                    "req_label": f"≥ {imp_min:.0f} J",
+                    "limit_min": imp_min,
+                    "limit_max": None,
+                    "pred": None,
+                    "ci_low": None,
+                    "ci_high": None,
+                    "margin": None,
+                    "verdict": "NOT_VERIFIABLE",
+                    "note": "no impact model at this temperature",
+                })
+                continue
 
             imp_pred_obj = predictions.get(imp_key, {})
-            if imp_min is not None and imp_pred_obj and np.isfinite(imp_pred_obj.get("pred", np.nan)):
+            if imp_pred_obj and np.isfinite(imp_pred_obj.get("pred", np.nan)):
                 pred = imp_pred_obj["pred"]
                 ci_low = imp_pred_obj.get("ci_low", pred)
                 ci_high = imp_pred_obj.get("ci_high", pred)
@@ -454,7 +500,7 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
                     pass_count += 1
 
                 checks.append({
-                    "property": f"{imp_label} ({imp_dir})",
+                    "property": f"{imp_label} ({direction})",
                     "key": imp_key,
                     "unit": "J",
                     "req_label": f"≥ {imp_min:.0f} J",
@@ -472,6 +518,10 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
         overall_status = "NON_COMPLIANT"
     elif risk_count > 0:
         overall_status = "MARGINAL_RISK"
+    elif unverifiable_count > 0 and pass_count > 0:
+        overall_status = "PARTIAL_VERIFICATION"
+    elif unverifiable_count > 0:
+        overall_status = "NOT_VERIFIABLE"
     elif pass_count > 0:
         overall_status = "COMPLIANT"
     else:
@@ -483,12 +533,13 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
         "pass_count": pass_count,
         "risk_count": risk_count,
         "fail_count": fail_count,
+        "unverifiable_count": unverifiable_count,
         "checks": checks,
     }
 
 
 def evaluate_all(spec=None, grade=None, thickness=None, raw_inputs=None, predictions=None,
-                 physical_indicators=None, mill="Plate"):
+                 physical_indicators=None, mill="Plate", available_keys=None):
     """Perform complete end-to-end specification validation."""
     matched_row, match_info = find_matching_spec_row(spec, grade, thickness)
     if matched_row is None:
@@ -498,7 +549,7 @@ def evaluate_all(spec=None, grade=None, thickness=None, raw_inputs=None, predict
         }
 
     gauge_eval = evaluate_thickness(matched_row, thickness, mill)
-    chem_eval = evaluate_chemistry(matched_row, raw_inputs, physical_indicators)
+    chem_eval = evaluate_chemistry(matched_row, raw_inputs, physical_indicators, available_keys)
     rolling_type = str(raw_inputs.get("Rolling_Type", "AR"))
     mech_eval = evaluate_mechanical(matched_row, predictions, mill, rolling_type)
 

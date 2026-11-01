@@ -6,7 +6,9 @@ defend, for both routes at the plant: heavy plate off the roughing and finishing
 mill coil off the reversing mill.
 
 Plate: 23,845 plates, 84 logged columns, ten certified properties including Charpy at 0, -20 and
--40 °C and through-thickness reduction of area. Coil: 20,298 coils, three properties.
+-40 °C and through-thickness reduction of area. Coil: 20,298 coils logged, 19,116 usable after
+the sanitising pass removed 1,182 duplicate records, three properties. Both tables carry a
+written audit trail (`reports/sanitise_log.csv` stays out of the public mirror with the heats).
 
 ---
 

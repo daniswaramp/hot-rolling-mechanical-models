@@ -407,17 +407,71 @@ def align(X, cols):
     return pd.DataFrame({c: (X[c] if c in X.columns else 0.0) for c in cols}, index=X.index)
 
 
+def _nlr_scores(mill, frame):
+    """Vectorised NLR: the same five terms predict_nlr builds, for a whole frame."""
+    table = nlr_models(mill)
+    out = pd.DataFrame(index=frame.index)
+    if not table:
+        return out
+    thick = pd.to_numeric(frame.get("Plate_T_mm" if mill == "Plate" else "Coil_T_mm"),
+                          errors="coerce").fillna(16.0 if mill == "Plate" else 6.0).clip(lower=1.0)
+    slab = pd.to_numeric(frame.get("Slab_T_mm" if mill == "Plate" else "TB_Thick_mm"),
+                         errors="coerce").fillna(218.0 if mill == "Plate" else 32.0).clip(lower=1.0)
+    headers = (pd.to_numeric(frame.get("ACC_Laminar_Header"), errors="coerce").fillna(0.0)
+               if mill == "Plate" else pd.Series(0.0, index=frame.index))
+
+    def num(col, default):
+        return pd.to_numeric(frame.get(col), errors="coerce").fillna(default)
+
+    terms = {
+        "t": thick,
+        "sigma_ss": (32 * num("Chem_Mn", .9) + 84 * num("Chem_Si", .2)
+                     + 38 * num("Chem_Cu", .02) + 32 * num("Chem_Ni", .02)),
+        "CE": (num("Chem_C", .16) + num("Chem_Mn", .9) / 6
+               + (num("Chem_Cr", .02) + num("Chem_Mo", .01) + num("Chem_V", .005)) / 5
+               + (num("Chem_Ni", .02) + num("Chem_Cu", .02)) / 15),
+        "CoolingRate": (headers + 0.1) / thick ** 1.5,
+        "eps_total": np.log(slab / thick),
+    }
+    for key, model in table.items():
+        value = pd.Series(float(model["intercept"]), index=frame.index)
+        for term in model["terms"]:
+            values = terms.get(term["var"])
+            if values is None:
+                continue
+            value = value + term["coef"] * values ** term["power"]
+        out[key] = value
+    return out
+
+
 def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
-    """Vectorised scoring: features once, then every target."""
+    """Vectorised scoring: features once, then every target.
+
+    The engine argument must be honoured identically on every tab; an unsupported
+    engine raises rather than silently scoring with something else.
+    """
     frame = prepare_frame(mill, frame)
     X = feature_matrix(mill, frame)
     out = pd.DataFrame(index=frame.index)
-    if engine in ("Champion GBDT (Recommended)", "CatBoost", "XGBoost", "LightGBM"):
+    if engine == "OLS / Linear":
+        for key, spec in linear_families(mill).items():
+            if spec["ols"]["r2"] < 0.15:
+                continue          # a linear fit this bad is not an answer, it is noise in MPa
+            missing = [c for c in spec["features"] if c not in X.columns]
+            if missing:
+                continue
+            values = X[spec["features"]].to_numpy(dtype=float)
+            values = np.nan_to_num(values, nan=0.0)
+            out[key] = spec["ols"]["intercept"] + values @ np.asarray(spec["ols"]["coef"], dtype=float)
+    elif engine == "NLR":
+        out = _nlr_scores(mill, frame)
+    elif engine in ("Champion GBDT (Recommended)", "CatBoost", "XGBoost", "LightGBM"):
         plan = champion_plan(mill)
         idx = boosted_index(mill)
         for key in TARGET_LABEL[mill]:
             if engine == "Champion GBDT (Recommended)":
-                fam = plan.get(key, {}).get("family", "ensemble")
+                cfg = plan.get(key) or {}
+                fam = cfg.get("family")
             else:
                 fam = {"CatBoost": "cat", "XGBoost": "xgb", "LightGBM": "lgbm"}[engine]
             model = boosted_model(mill, fam, key) if fam in ("cat", "xgb", "lgbm") else None
@@ -446,7 +500,7 @@ def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
                         continue
                 if filled:
                     break
-    else:
+    elif engine == "Ensemble (.joblib)":
         for key, bundle in bundles(mill).items():
             if bundle is None:
                 continue
@@ -457,19 +511,10 @@ def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
                     break
                 except Exception:
                     continue
+    else:
+        raise ValueError(f"Unsupported scoring engine: {engine!r}")
     if mill == "Plate" and "TS_BN" in out.columns and "TS_AN" in out.columns:
-        plate_t = frame["Plate_T_mm"].fillna(16.0).clip(lower=1.0)
-        tb_t = frame["TB_Thickness_mm"].fillna(plate_t * 2.0)
-        eps_fm = np.maximum(0.0, np.log(np.maximum(tb_t, plate_t * 1.01) / plate_t))
-        frt = frame["FM_Finish_Temp"].fillna(830.0)
-        t_post = frame["ACC_Temp_Post_Laminar"].fillna(600.0)
-        hdr_col = "ACC_Laminar_Header" if "ACC_Laminar_Header" in frame.columns else "ACC_Headers_n"
-        headers = pd.to_numeric(frame.get(hdr_col, 0.0), errors="coerce").fillna(0.0)
-        cr_acc = np.maximum(0.0, (frt - t_post) / plate_t * (headers + 0.5))
-
-        delta_ts = 12.0 + (8.5 * eps_fm) + (0.35 * cr_acc)
-        delta_ys = 15.0 + (10.0 * eps_fm) + (0.45 * cr_acc)
-        delta_el = 1.5 + (0.03 * cr_acc)
+        delta_ts, delta_ys, delta_el = ml.plate_softening_deltas_frame(frame)
 
         out["TS_AN"] = np.minimum(out["TS_AN"], out["TS_BN"] - delta_ts)
         if "YS_BN" in out.columns and "YS_AN" in out.columns:
@@ -579,32 +624,16 @@ def nlr_models(mill):
         return {}
 
 
-def nlr_terms(mill, raw):
-    """The five terms the fitted NLR equations use, from the raw schedule."""
-    thick = max(float(raw.get("Plate_T_mm" if mill == "Plate" else "Coil_T_mm", 16.0)), 1.0)
-    slab = max(float(raw.get("Slab_T_mm" if mill == "Plate" else "TB_Thick_mm", 218.0)), 1.0)
-    headers = float(raw.get("ACC_Laminar_Header", 0.0)) if mill == "Plate" else 0.0
-    c, mn, si = (float(raw.get(k, d)) for k, d in (("Chem_C", .16), ("Chem_Mn", .9), ("Chem_Si", .2)))
-    cu, ni = float(raw.get("Chem_Cu", .02)), float(raw.get("Chem_Ni", .02))
-    cr, mo, v = float(raw.get("Chem_Cr", .02)), float(raw.get("Chem_Mo", .01)), float(raw.get("Chem_V", .005))
-    return {
-        "t": thick,
-        "sigma_ss": 32 * mn + 84 * si + 38 * cu + 32 * ni,
-        "CE": c + mn / 6 + (cr + mo + v) / 5 + (ni + cu) / 15,
-        "CoolingRate": (headers + 0.1) / thick ** 1.5,
-        "eps_total": float(np.log(slab / thick)),
-    }
-
-
 def predict_nlr(mill, raw):
     table = nlr_models(mill)
-    values = nlr_terms(mill, raw)
+    if not table:
+        return {}
+    frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
+    scores = _nlr_scores(mill, frame)
     out = {}
     for key, model in table.items():
-        value = model["intercept"]
-        for term in model["terms"]:
-            value += term["coef"] * values.get(term["var"], 0.0) ** term["power"]
-        out[key] = {"pred": float(value), "r2": float(model.get("r2", 0.0))}
+        if key in scores and np.isfinite(scores[key].iloc[0]):
+            out[key] = {"pred": float(scores[key].iloc[0]), "r2": float(model.get("r2", 0.0))}
     return out
 
 
@@ -675,7 +704,9 @@ def predict_linear(mill, raw, family):
     row = X.iloc[0]
     out = {}
     for key, spec in table.items():
-        values = np.array([float(row.get(c, 0.0) or 0.0) for c in spec["features"]])
+        # NaN is truthy, so `or` will not save you here; a missing feature must be 0.0
+        values = np.array([float(row[c]) if c in row.index and np.isfinite(row[c]) else 0.0
+                           for c in spec["features"]], dtype=float)
         if family == "OLS":
             value = spec["ols"]["intercept"] + float(np.dot(spec["ols"]["coef"], values))
             r2 = spec["ols"]["r2"]
@@ -691,7 +722,12 @@ def predict_linear(mill, raw, family):
 
 @st.cache_resource(show_spinner=False)
 def champion_plan(mill):
-    """Determines the champion model family and holdout stats per target."""
+    """Determines the champion model family and holdout stats per target.
+
+    Targets without a boosted artifact get None here; predict_champion then falls back
+    to the shipped joblib bundle and reports the leaderboard's own numbers. Never
+    invent a score for a target the artifacts cannot back.
+    """
     index = boosted_index(mill)
     plan = {}
     for target in TARGET_LABEL[mill]:
@@ -706,8 +742,26 @@ def champion_plan(mill):
         if best_fam is not None:
             plan[target] = {"family": best_fam, "r2": best_r2, "rmse": best_rmse}
         else:
-            plan[target] = {"family": "ensemble", "r2": 0.617, "rmse": 4.41}
+            plan[target] = None
     return plan
+
+
+def _holdout_r2(mill, key):
+    """The shipped holdout R2 for one target, from the bootstrap report or leaderboard."""
+    try:
+        ci = ml.get_ci_data(mill)
+        if not ci.empty and "Target" in ci.columns:
+            row = ci[ci["Target"] == key]
+            if not row.empty and "Val_R2" in row.columns and pd.notna(row["Val_R2"].values[0]):
+                return float(row["Val_R2"].values[0])
+        lb = ml.get_leaderboard_data(mill)
+        if not lb.empty and "Target" in lb.columns:
+            row = lb[lb["Target"] == key]
+            if not row.empty and "Final_Val_R2" in row.columns and pd.notna(row["Final_Val_R2"].values[0]):
+                return float(row["Final_Val_R2"].values[0])
+    except Exception:
+        pass
+    return None
 
 
 def predict_champion(mill, raw):
@@ -715,12 +769,11 @@ def predict_champion(mill, raw):
     frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
     X = feature_matrix(mill, frame)
     plan = champion_plan(mill)
-    ci = ml.get_ci_data(mill)
     out = {}
     for key in TARGET_LABEL[mill]:
         label, unit = TARGET_LABEL[mill].get(key, (key, ""))
-        cfg = plan.get(key, {})
-        fam = cfg.get("family", "ensemble")
+        cfg = plan.get(key) or {}
+        fam = cfg.get("family")
         value = np.nan
         err = ""
         if fam in ("xgb", "lgbm", "cat"):
@@ -745,6 +798,8 @@ def predict_champion(mill, raw):
                         break
                     except Exception as exc:
                         err = f"{type(exc).__name__}: {exc}"
+        if not np.isfinite(value) and not err:
+            err = "no scoring artifact for this target"
         half = get_target_interval_half(mill, key, default_rmse=cfg.get("rmse"))
         out[key] = {
             "name": label,
@@ -753,7 +808,7 @@ def predict_champion(mill, raw):
             "ci_low": round(value - half, 2) if np.isfinite(value) else float("nan"),
             "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan"),
             "family": fam,
-            "r2": cfg.get("r2", 0.0),
+            "r2": cfg.get("r2", _holdout_r2(mill, key)),
             "error": err
         }
     if mill == "Plate":
@@ -873,7 +928,7 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
               <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f} <span class="tag" style="background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; font-size:9px;">95% cov</span></td>
               <td class="sub" style="font-family:monospace;">±{rmse_tol:g}&nbsp;{unit}</td>{extra_cells}</tr>""")
     html = (f"<div class=\"card\"><table class=\"ut\"><thead><tr><th>property</th><th>{engine_label.lower()}</th>"
-            "<th>95% Split-Conformal Interval</th><th>Calibration Guarantee</th>"
+            "<th>95% Split-Conformal Interval</th><th>Certification Tolerance</th>"
             + "".join(f"<th>{n}</th>" for n in extras)
             + "</tr></thead><tbody>" + "".join(rows)
             + f"</tbody></table><div class=\"foot\">{total} certified properties scored through "
@@ -1134,7 +1189,9 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
 
     preds = predict_selected_engine(mill, raw, engine)
     ind = physical(raw, mill)
-    eval_res = sc.evaluate_all(chosen_spec, chosen_grade, thickness, raw, preds, ind, mill)
+    supplied = {row[1] for row in SPECS[mill]} | {"ce_iiw", "pcm"}
+    eval_res = sc.evaluate_all(chosen_spec, chosen_grade, thickness, raw, preds, ind, mill,
+                               available_keys=supplied)
 
     if not eval_res["matched"]:
         st.warning(eval_res.get("message", "No matching tier found."))
@@ -1152,17 +1209,24 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
 
     # Chem verdict pill
     c_status = chem_info["status"]
-    c_pill_cls = "ok" if c_status == "ALL_PASS" else "bad"
-    c_pill_text = "ALL PASS" if c_status == "ALL_PASS" else f"{chem_info['fail_count']} OUT OF SPEC"
+    c_pill_cls = "ok" if c_status == "ALL_PASS" else ("warn" if c_status == "PARTIAL_VERIFICATION" else "bad")
+    if c_status == "ALL_PASS":
+        c_pill_text = "ALL PASS"
+    elif c_status == "PARTIAL_VERIFICATION":
+        c_pill_text = f"PARTIAL — {len(chem_info.get('unverifiable', []))} NOT VERIFIABLE"
+    else:
+        c_pill_text = f"{chem_info['fail_count']} OUT OF SPEC"
 
     # Mech verdict pill
     m_status = mech_info["status"]
     if m_status == "COMPLIANT":
         m_pill_cls, m_pill_text = "ok", "COMPLIANT"
-    elif m_status == "MARGINAL_RISK":
-        m_pill_cls, m_pill_text = "warn", "MARGINAL RISK"
+    elif m_status in ("MARGINAL_RISK", "PARTIAL_VERIFICATION"):
+        m_pill_cls, m_pill_text = "warn", "MARGINAL RISK" if m_status == "MARGINAL_RISK" else "PARTIAL — IMPACT NOT VERIFIABLE"
     elif m_status == "NON_COMPLIANT":
         m_pill_cls, m_pill_text = "bad", "NON-COMPLIANT"
+    elif m_status == "NOT_VERIFIABLE":
+        m_pill_cls, m_pill_text = "warn", "NOT VERIFIABLE"
     else:
         m_pill_cls, m_pill_text = "neutral", "NO REQ SPECIFIED"
 
@@ -1193,15 +1257,25 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     # 1. Mechanical Decency Table
     st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
     section("mechanical properties decency & certification compliance")
-    st.caption(f"Correlates {mill} ML predictions and 95% bootstrap confidence intervals against "
+    st.caption(f"Correlates {mill} ML predictions and 95% split-conformal prediction intervals against "
                f"{chosen_spec} Grade {chosen_grade} requirements. "
-               f"A marginal risk indicates the point prediction passes but the 95% bootstrap bound crosses the limit under process variance.")
+               f"A marginal risk indicates the point prediction passes but the 95% interval bound crosses the limit under process variance.")
 
     mech_checks = mech_info.get("checks", [])
     if mech_checks:
         m_rows = []
         for chk in mech_checks:
             verdict = chk["verdict"]
+            if verdict == "NOT_VERIFIABLE":
+                m_rows.append(f"""<tr>
+                  <td class="name">{chk['property']} <span class="sub" style="margin-left:.4rem;">no model at this temperature</span></td>
+                  <td class="sub" style="font-weight:600; color:#374151;">{chk['req_label']}</td>
+                  <td class="val" style="color:#9ca3af;">—</td>
+                  <td class="rng">—</td>
+                  <td class="sub">—</td>
+                  <td class="flag"><span class="pill warn">NOT VERIFIABLE</span></td>
+                </tr>""")
+                continue
             v_pill = "ok" if verdict == "COMPLIANT" else ("warn" if verdict == "MARGINAL_RISK" else "bad")
             v_label = "COMPLIANT" if verdict == "COMPLIANT" else ("MARGINAL RISK" if verdict == "MARGINAL_RISK" else "NON-COMPLIANT")
             sign = "+" if chk["margin"] >= 0 else ""
@@ -1216,7 +1290,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
         st.markdown(
             '<div class="card"><table class="ut">'
             '<thead><tr><th>property</th><th>standard requirement</th><th>predicted</th>'
-            '<th>95% bootstrap interval</th><th>safety margin</th><th>verdict</th></tr></thead><tbody>'
+            '<th>95% prediction interval</th><th>safety margin</th><th>verdict</th></tr></thead><tbody>'
             + "".join(m_rows) +
             '</tbody></table></div>',
             unsafe_allow_html=True,
@@ -1263,6 +1337,14 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
         uncon_pills = " ".join([f'<span class="tag" style="margin:.15rem .2rem; background:#f9fafb;">{u["label"].split()[0]}: {u["actual"]:.3g}%</span>'
                                 for u in unconstrained])
         st.markdown(f'<div style="margin-top:.6rem; font-size:12px; color:#6b7280;">Unconstrained trace inputs (no standard limit):<br>{uncon_pills}</div>',
+                    unsafe_allow_html=True)
+
+    unverifiable_chem = chem_info.get("unverifiable", [])
+    if unverifiable_chem:
+        names = ", ".join(u["label"] for u in unverifiable_chem)
+        st.markdown(f'<div class="note">The standard states limits for {names}, but the '
+                    f'{mill} schedule form does not carry that element, so the limit cannot be '
+                    f'verified here. Enter it in an uploaded sheet or judge it at the ladle.',
                     unsafe_allow_html=True)
 
     # 3. Standard Notes & Footnotes Callout
@@ -1536,8 +1618,10 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
     for key, band in bands.items():
         centre = float(raw[key])
         frame[key] = rng.uniform(centre - band, centre + band, samples)
-    scored = score_frame(mill, frame, engine=engine)[target].values
-    scored = scored[np.isfinite(scored)]
+    scored_all = score_frame(mill, frame, engine=engine)[target].values
+    keep = np.isfinite(scored_all)
+    frame = frame.loc[keep].reset_index(drop=True)
+    scored = scored_all[keep]
     if scored.size < 30:
         st.error("Too few scoring points came back — widen the band or change property.")
         return
@@ -1546,14 +1630,23 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
     cp = (usl - lsl) / (6 * sd) if sd > 0 else float("inf")
     cpk = min(usl - mean, mean - lsl) / (3 * sd) if sd > 0 else float("inf")
     oos = float(np.mean((scored < lsl) | (scored > usl)) * 100)
+    # the sampled band only carries process drift; the model's own residual is a
+    # separate source of spread and belongs in a certification decision
+    sigma_model = get_target_interval_half(mill, target) / 1.96
+    sigma_total = float(np.sqrt(sd ** 2 + sigma_model ** 2))
+    cpk_total = min(usl - mean, mean - lsl) / (3 * sigma_total) if sigma_total > 0 else float("inf")
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Cp", f"{cp:.2f}")
     m2.metric("Cpk", f"{cpk:.2f}")
-    m3.metric("mean", f"{mean:.1f} {unit}")
-    m4.metric("out of spec", f"{oos:.1f} %")
-    st.caption(f"σ {sd:.2f} {unit} · {scored.size} scored points · band "
+    m3.metric("Cpk incl. model σ", f"{cpk_total:.2f}")
+    m4.metric("mean", f"{mean:.1f} {unit}")
+    m5.metric("out of spec", f"{oos:.1f} %")
+    st.caption(f"process σ {sd:.2f} {unit} · model σ {sigma_model:.2f} {unit} · "
+               f"{scored.size} scored points · band "
                + ", ".join(f"{spec_map(mill)[k][2]} ±{bands[k]:g}" for k in bands))
+    st.caption("Cp and Cpk describe the sampled process band only. Cpk incl. model σ adds the "
+               "model's residual spread — use that one before promising a certification limit.")
 
     fig = go.Figure(go.Histogram(x=scored, nbinsx=45, marker_color="#c9d7f5",
                                  marker_line_color="#1746c8", marker_line_width=.6))
@@ -1615,6 +1708,17 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
     frame = (pd.read_excel(uploaded) if uploaded.name.lower().endswith("xlsx")
              else pd.read_csv(uploaded))
     st.caption(f"{len(frame):,} rows read · Scoring engine: {engine}")
+    missing_inputs = [row[1] for row in SPECS[mill] if row[1] not in frame.columns]
+    if missing_inputs:
+        st.error("These input columns are missing from the sheet: "
+                 + ", ".join(missing_inputs)
+                 + ". Download the template for the exact headers — scoring would otherwise "
+                   "substitute defaults without telling you.")
+        return
+    if len(frame) > 20000:
+        st.error(f"{len(frame):,} rows is above the 20,000-row limit; split the sheet and "
+                 "upload twice so the browser does not run out of memory.")
+        return
     try:
         scored = score_frame(mill, frame, engine=engine)
     except Exception as exc:
@@ -1622,6 +1726,24 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
         return
     table = pd.concat([frame[[c for c in frame.columns if c in spec_map(mill)]].reset_index(drop=True),
                        scored.add_prefix("pred_").reset_index(drop=True)], axis=1)
+    for key in scored.columns:
+        half = get_target_interval_half(mill, key)
+        table[f"pred_{key}_lo"] = (table[f"pred_{key}"] - half).round(2)
+        table[f"pred_{key}_hi"] = (table[f"pred_{key}"] + half).round(2)
+
+    domain = explainer.get_applicability_domain().get(mill, {})
+    if domain:
+        outside = pd.Series(0, index=frame.index)
+        for param, bounds in domain.items():
+            if param not in frame.columns:
+                continue
+            values = pd.to_numeric(frame[param], errors="coerce")
+            outside = outside + ((values < bounds["p01"]) | (values > bounds["p99"])).fillna(False).astype(int)
+        ood_rows = int((outside > 0).sum())
+        if ood_rows:
+            st.warning(f"{ood_rows:,} of {len(frame):,} rows sit outside the historical "
+                       f"P01–P99 envelope on at least one input — those predictions are "
+                       f"extrapolation and should be read as such.")
     st.dataframe(table.head(200), use_container_width=True, height=320)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -1669,6 +1791,8 @@ def log_table(rows, key):
     st.dataframe(frame.iloc[::-1], use_container_width=True, hide_index=True)
     st.download_button("Download training log (CSV)", frame.to_csv(index=False).encode(),
                        file_name="training_log.csv", key=f"logdl_{key}")
+    st.caption("The log file lives beside the app, which is read-only on Streamlit Cloud — "
+               "there the history is session-only. Download the CSV to keep it.")
 
 
 def view_retrain(mill):
@@ -1689,6 +1813,17 @@ def view_retrain(mill):
         log_table(st.session_state.get("train_log") or read_log(), mill)
         return
     frame = pd.read_excel(up) if up.name.lower().endswith("xlsx") else pd.read_csv(up)
+    missing_inputs = [row[1] for row in SPECS[mill] if row[1] not in frame.columns]
+    if missing_inputs:
+        st.error("These input columns are missing from the sheet: "
+                 + ", ".join(missing_inputs)
+                 + ". Download the template for the exact headers, or the refit would train "
+                   "on substituted defaults.")
+        return
+    if len(frame) > 50000:
+        st.error(f"{len(frame):,} rows is above the 50,000-row limit for an in-browser refit; "
+                 "train on Modal instead.")
+        return
     candidates = [c for c in frame.columns if c not in spec_map(mill)]
     c1, c2, c3 = st.columns(3, vertical_alignment="bottom")
     target = c1.selectbox("Measured column", candidates, key=f"rt_col_{mill}")
@@ -1716,7 +1851,7 @@ def view_retrain(mill):
     if ok.sum() < 120:
         st.error(f"Only {int(ok.sum())} usable measured rows — too few to hold anything out.")
         return
-    X = feature_matrix(mill, frame.loc[ok]).fillna(0.0)
+    X = feature_matrix(mill, prepare_frame(mill, frame.loc[ok])).fillna(0.0)
     y = y[ok]
     groups = frame.loc[ok, "Heat_ID"] if "Heat_ID" in frame else pd.Series(np.arange(ok.sum()))
 
@@ -1750,10 +1885,18 @@ def view_retrain(mill):
     m1.metric("holdout R²", f"{r2:.3f}")
     m2.metric("holdout RMSE", f"{rmse:.2f}")
     m3.metric("rows", f"{len(y):,}", delta=split_note, delta_color="off")
-    st.markdown(f'<div class="note">Compared against the shipped model for this route: '
-                f'R² {bundles(mill).get(list(TARGET_LABEL[mill])[0], {}).get("val_r2", 0):.3f} '
-                f'on the campaign holdout — different data, so read the pair as a sanity check, '
-                f'not a contest.</div>', unsafe_allow_html=True)
+    lb = ml.get_leaderboard_data(mill)
+    first_key = list(TARGET_LABEL[mill])[0]
+    ref_r2 = None
+    if not lb.empty and "Target" in lb.columns:
+        ref_row = lb[lb["Target"] == first_key]
+        if not ref_row.empty and "Final_Val_R2" in ref_row.columns and pd.notna(ref_row["Final_Val_R2"].values[0]):
+            ref_r2 = float(ref_row["Final_Val_R2"].values[0])
+    if ref_r2 is not None:
+        st.markdown(f'<div class="note">Compared against the shipped model for this route: '
+                    f'R² {ref_r2:.3f} '
+                    f'on the campaign holdout — different data, so read the pair as a sanity check, '
+                    f'not a contest.</div>', unsafe_allow_html=True)
 
     import joblib
     buf = io.BytesIO()
@@ -1792,7 +1935,9 @@ are lower than a naive fit would show.
   No raw log dump: every input has a metallurgical definition.
 - **Models** — nine families fitted per target (OLS, metallurgical NLR, Ridge, XGBoost, LightGBM,
   CatBoost, stacking and bagged ensembles), selected by melt-held-out leaderboard rather than
-  assumption.
+  assumption. One caveat to keep visible: the NLR constitutive fit carries five terms (gauge,
+  solid solution, CE, header cooling, total strain) and **no finishing-temperature term**, so
+  read it for chemistry and gauge effects, not for how the exit temperature moves properties.
 - **Uncertainty** — 95 % intervals from melt-grouped bootstrap resampling, stored beside every
   score.
 - **Stack** — Python, pandas, scikit-learn, XGBoost, LightGBM, CatBoost, Plotly, Streamlit.
@@ -1909,9 +2054,10 @@ def view_diagnostics(mill):
             unit = r.get("Unit", "")
 
             # Champion GBDT info
-            champ_cfg = plan.get(target_key, {})
-            fam_key = champ_cfg.get("family", "ensemble")
-            fam_name = {"cat": "CatBoost", "xgb": "XGBoost", "lgbm": "LightGBM", "ensemble": "Stacking"}.get(fam_key, fam_key)
+            champ_cfg = plan.get(target_key) or {}
+            fam_key = champ_cfg.get("family")
+            fam_name = {"cat": "CatBoost", "xgb": "XGBoost", "lgbm": "LightGBM",
+                        "ensemble": "Stacking"}.get(fam_key, fam_key or "not shipped")
             champ_r2 = champ_cfg.get("r2")
             champ_badge_cls = "ok" if fam_key in ("cat", "xgb", "lgbm") else "warn"
             champ_cell = (f'<span class="pill {champ_badge_cls}">{fam_name}</span> '
@@ -1954,6 +2100,29 @@ def view_diagnostics(mill):
             '</tbody></table><div class="foot"><b>Model Selector</b>: Operators can toggle between Champion GBDT, CatBoost, XGBoost, LightGBM, Stacking Ensemble, and OLS/Linear in the sidebar dropdown.</div></div>',
             unsafe_allow_html=True,
         )
+
+        # Artifact registry: shipped weights, hashes and the metrics they were fitted with
+        registry_path = os.path.join(os.path.dirname(APP_DIR), "models", "registry.json")
+        try:
+            with open(registry_path, "r", encoding="utf-8") as fh:
+                registry = json.load(fh)
+        except (OSError, ValueError):
+            registry = {}
+        reg_models = [m for m in registry.get("models", []) if m.get("mill") == mill]
+        if reg_models:
+            reg_frame = pd.DataFrame([{
+                "target": m.get("target"), "family": m.get("family"),
+                "artifact": m.get("model_id"), "sha256": (m.get("sha256") or "")[:10],
+                "val_r2": m.get("val_r2"), "val_rmse": m.get("val_rmse"),
+                "conformal ±95": m.get("conformal_half_width_95"), "status": m.get("status"),
+            } for m in reg_models]).sort_values(["target", "family"])
+            with st.expander(f"Artifact registry — v{registry.get('registry_version')}, "
+                             f"{registry.get('total_models')} artifacts shipped, "
+                             f"updated {str(registry.get('updated_at'))[:10]}", expanded=False):
+                st.caption("Every shipped artifact carries the SHA-256 recorded at build time. "
+                           "A hash that no longer matches the weights means the metrics and the "
+                           "model no longer belong together.")
+                st.dataframe(reg_frame, hide_index=True, use_container_width=True)
 
     # 4. Interactive Engineering & Technology Deep-Dive Tabs
     st.markdown('<div style="height:1.8rem"></div>', unsafe_allow_html=True)

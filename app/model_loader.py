@@ -188,6 +188,30 @@ def compute_physical_indicators(raw_dict: dict, mill_type: str) -> dict:
 
 
 
+def plate_softening_deltas_frame(frame):
+    """Vectorised softening deltas for batch scoring; the single source for the physics.
+
+    Normalizing at ~920 C erases TMCP dislocation density and fast-cooling grain
+    refinement, so the after-normalising targets are bounded by these deltas.
+    """
+    plate_t = pd.to_numeric(frame.get("Plate_T_mm"), errors="coerce").fillna(16.0).clip(lower=1.0)
+    tb_t = pd.to_numeric(frame.get("TB_Thickness_mm"), errors="coerce").fillna(plate_t * 2.0)
+    eps_fm = np.maximum(0.0, np.log(np.maximum(tb_t, plate_t * 1.01) / plate_t))
+
+    frt = pd.to_numeric(frame.get("FM_Finish_Temp"), errors="coerce").fillna(830.0)
+    t_post = pd.to_numeric(frame.get("ACC_Temp_Post_Laminar"), errors="coerce").fillna(600.0)
+    headers = pd.to_numeric(frame.get("ACC_Laminar_Header"), errors="coerce")
+    if "ACC_Headers_n" in frame:
+        headers = headers.fillna(pd.to_numeric(frame["ACC_Headers_n"], errors="coerce"))
+    headers = headers.fillna(0.0)
+    cr_acc = np.maximum(0.0, (frt - t_post) / plate_t * (headers + 0.5))
+
+    delta_ts = 12.0 + (8.5 * eps_fm) + (0.35 * cr_acc)
+    delta_ys = 15.0 + (10.0 * eps_fm) + (0.45 * cr_acc)
+    delta_el = 1.5 + (0.03 * cr_acc)
+    return delta_ts, delta_ys, delta_el
+
+
 def compute_plate_normalizing_deltas(raw_inputs: dict):
     """
     Computes dynamic physical softening deltas for furnace-normalized Heavy Plate:
@@ -195,21 +219,9 @@ def compute_plate_normalizing_deltas(raw_inputs: dict):
     Delta YS = 15.0 + 10.0 * eps_FM + 0.45 * CR_ACC
     Delta EL = 1.5 + 0.03 * CR_ACC
     """
-    plate_t = max(float(raw_inputs.get("Plate_T_mm", 16.0)), 1.0)
-    tb_t = float(raw_inputs.get("TB_Thickness_mm", plate_t * 2.0))
-    eps_fm = max(0.0, float(np.log(max(tb_t, plate_t * 1.01) / plate_t)))
-
-    frt = float(raw_inputs.get("FM_Finish_Temp", 830.0))
-    t_post = float(raw_inputs.get("ACC_Temp_Post_Laminar", 600.0))
-    headers = float(raw_inputs.get("ACC_Laminar_Header", raw_inputs.get("ACC_Headers_n", 0.0)))
-
-    cr_acc = max(0.0, float((frt - t_post) / plate_t * (headers + 0.5)))
-
-    delta_ts = 12.0 + (8.5 * eps_fm) + (0.35 * cr_acc)
-    delta_ys = 15.0 + (10.0 * eps_fm) + (0.45 * cr_acc)
-    delta_el = 1.5 + (0.03 * cr_acc)
-
-    return delta_ts, delta_ys, delta_el
+    frame = pd.DataFrame([raw_inputs])
+    delta_ts, delta_ys, delta_el = plate_softening_deltas_frame(frame)
+    return float(delta_ts.iloc[0]), float(delta_ys.iloc[0]), float(delta_el.iloc[0])
 
 
 def apply_plate_normalizing_coupling(raw_inputs: dict, results: dict) -> dict:

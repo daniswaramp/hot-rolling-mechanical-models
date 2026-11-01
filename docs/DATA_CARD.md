@@ -20,6 +20,7 @@ The data platform integrates two distinct industrial production lines:
 | :--- | :--- | :--- |
 | **Source Log File** | `PLATE SEQUENTIAL ROLLING RESULT - 2026.xlsx` | `STECKEL_MILL_REPORT.xlsx` |
 | **Total Ingested Records** | **23,845 plates** | **20,298 coils** |
+| **Usable After Sanitising** | 23,845 plates (534 cells repaired, 0 duplicate rows) | **19,116 coils** (1,182 duplicate records removed, 7,515 cells repaired) |
 | **Raw Column Count** | 84 process & test variables | 35 process & test variables |
 | **Unique Melts (Ladle Heats)** | 1,765 heats | 4,595 heats |
 | **Gauge Range** | $6.0\text{ mm} - 205.0\text{ mm}$ (99% $\le 70.0\text{ mm}$) | $2.5\text{ mm} - 16.0\text{ mm}$ |
