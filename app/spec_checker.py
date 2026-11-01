@@ -282,6 +282,7 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
     pass_count = 0
     risk_count = 0
     fail_count = 0
+    unverifiable_count = 0
 
     supply_cond = str(row.get("SUPPLY CONDITION", "AR")).strip().upper()
     is_normalised = (rolling_type == "N") or ("N" in supply_cond and "AR" not in supply_cond and "TMCP" not in supply_cond)
@@ -295,7 +296,23 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
     ys_dir = "TR" if ys_min_tr is not None else ("LG" if ys_min_lg is not None else "")
     ys_note = ys_note_tr if ys_min_tr is not None else ys_note_lg
 
-    if ys_min is not None and ys_pred_obj and np.isfinite(ys_pred_obj.get("pred", np.nan)):
+    if ys_min is not None and not (ys_pred_obj and np.isfinite(ys_pred_obj.get("pred", np.nan))):
+        unverifiable_count += 1
+        checks.append({
+            "property": f"Yield strength ({'normalised' if is_normalised else 'as rolled'})",
+            "key": ys_target,
+            "unit": "MPa",
+            "req_label": f"≥ {ys_min:.0f} MPa ({ys_dir})",
+            "limit_min": ys_min,
+            "limit_max": None,
+            "pred": None,
+            "ci_low": None,
+            "ci_high": None,
+            "margin": None,
+            "verdict": "NOT_VERIFIABLE",
+            "note": "prediction unavailable for this target",
+        })
+    elif ys_min is not None:
         pred = ys_pred_obj["pred"]
         ci_low = ys_pred_obj.get("ci_low", pred)
         ci_high = ys_pred_obj.get("ci_high", pred)
@@ -338,7 +355,26 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
     ts_max = ts_max_tr if ts_max_tr is not None else ts_max_lg
     ts_note = ts_note_min or ts_note_max
 
-    if (ts_min is not None or ts_max is not None) and ts_pred_obj and np.isfinite(ts_pred_obj.get("pred", np.nan)):
+    if (ts_min is not None or ts_max is not None) and not (
+            ts_pred_obj and np.isfinite(ts_pred_obj.get("pred", np.nan))):
+        unverifiable_count += 1
+        checks.append({
+            "property": f"Tensile strength ({'normalised' if is_normalised else 'as rolled'})",
+            "key": ts_target,
+            "unit": "MPa",
+            "req_label": (f"≥ {ts_min:.0f}" if ts_min is not None else "")
+                         + (" & " if ts_min is not None and ts_max is not None else "")
+                         + (f"≤ {ts_max:.0f}" if ts_max is not None else "") + " MPa",
+            "limit_min": ts_min,
+            "limit_max": ts_max,
+            "pred": None,
+            "ci_low": None,
+            "ci_high": None,
+            "margin": None,
+            "verdict": "NOT_VERIFIABLE",
+            "note": "prediction unavailable for this target",
+        })
+    elif (ts_min is not None or ts_max is not None):
         pred = ts_pred_obj["pred"]
         ci_low = ts_pred_obj.get("ci_low", pred)
         ci_high = ts_pred_obj.get("ci_high", pred)
@@ -355,7 +391,6 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
         violates_max = (ts_max is not None) and (pred > ts_max)
         risk_min = (ts_min is not None) and (ci_low < ts_min)
         risk_max = (ts_max is not None) and (ci_high > ts_max)
-
         if violates_min or violates_max:
             verdict = "NON_COMPLIANT"
             fail_count += 1
@@ -409,7 +444,23 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
             el_note = note
             break
 
-    if el_min is not None and el_pred_obj and np.isfinite(el_pred_obj.get("pred", np.nan)):
+    if el_min is not None and not (el_pred_obj and np.isfinite(el_pred_obj.get("pred", np.nan))):
+        unverifiable_count += 1
+        checks.append({
+            "property": f"Elongation ({el_gauge_type})",
+            "key": el_target,
+            "unit": "%",
+            "req_label": f"≥ {el_min:.1f} %",
+            "limit_min": el_min,
+            "limit_max": None,
+            "pred": None,
+            "ci_low": None,
+            "ci_high": None,
+            "margin": None,
+            "verdict": "NOT_VERIFIABLE",
+            "note": "prediction unavailable for this target",
+        })
+    elif el_min is not None:
         pred = el_pred_obj["pred"]
         ci_low = el_pred_obj.get("ci_low", pred)
         ci_high = el_pred_obj.get("ci_high", pred)
@@ -443,7 +494,6 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
     # 4. Impact toughness (Plate route only). The workbook states limits at eleven
     # temperatures; the models cover 0, -20 and -40 C. Everything else is reported
     # as NOT_VERIFIABLE rather than silently passing.
-    unverifiable_count = 0
     if mill == "Plate":
         impact_models = {0: "Impact_0C", -20: "Impact_m20C", -40: "Impact_m40C"}
         pattern = re.compile(r"^Impact ([+-]?\d+) \((TR|LG)\) \[J\]$")
@@ -483,7 +533,23 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
                 continue
 
             imp_pred_obj = predictions.get(imp_key, {})
-            if imp_pred_obj and np.isfinite(imp_pred_obj.get("pred", np.nan)):
+            if not (imp_pred_obj and np.isfinite(imp_pred_obj.get("pred", np.nan))):
+                unverifiable_count += 1
+                checks.append({
+                    "property": imp_label,
+                    "key": imp_key,
+                    "unit": "J",
+                    "req_label": f"≥ {imp_min:.0f} J",
+                    "limit_min": imp_min,
+                    "limit_max": None,
+                    "pred": None,
+                    "ci_low": None,
+                    "ci_high": None,
+                    "margin": None,
+                    "verdict": "NOT_VERIFIABLE",
+                    "note": "prediction unavailable for this target",
+                })
+            else:
                 pred = imp_pred_obj["pred"]
                 ci_low = imp_pred_obj.get("ci_low", pred)
                 ci_high = imp_pred_obj.get("ci_high", pred)
@@ -526,7 +592,6 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
         overall_status = "COMPLIANT"
     else:
         overall_status = "NO_REQUIREMENTS_SPECIFIED"
-
     return {
         "status": overall_status,
         "is_normalised": is_normalised,

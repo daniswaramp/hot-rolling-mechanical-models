@@ -348,16 +348,27 @@ def prepared(raw, mill):
 def prepare_frame(mill, frame):
     frame = frame.copy()
     if mill == "Plate":
-        plate_t = pd.to_numeric(frame.get("Plate_T_mm"), errors="coerce").fillna(16.0).clip(lower=1.0)
+        if "Plate_T_mm" not in frame.columns:
+            frame["Plate_T_mm"] = 16.0
+        plate_t = pd.to_numeric(frame["Plate_T_mm"], errors="coerce").fillna(16.0).clip(lower=1.0)
         if "TB_Ratio" not in frame:
-            tb = pd.to_numeric(frame.get("TB_Thickness_mm"), errors="coerce").fillna(plate_t * 2)
+            if "TB_Thickness_mm" in frame.columns:
+                tb = pd.to_numeric(frame["TB_Thickness_mm"], errors="coerce").fillna(plate_t * 2)
+            else:
+                tb = plate_t * 2
             frame["TB_Ratio"] = tb / plate_t
         if "FM_Last_Pass_Drafting" not in frame:
-            last = pd.to_numeric(frame.get("FM_Last_Pass_Thick"), errors="coerce").fillna(plate_t * 1.15)
+            if "FM_Last_Pass_Thick" in frame.columns:
+                last = pd.to_numeric(frame["FM_Last_Pass_Thick"], errors="coerce").fillna(plate_t * 1.15)
+            else:
+                last = plate_t * 1.15
             frame["FM_Last_Pass_Drafting"] = last - plate_t
         if "ACC_Headers_n" not in frame:
-            frame["ACC_Headers_n"] = pd.to_numeric(frame.get("ACC_Laminar_Header"),
-                                                   errors="coerce").fillna(0.0)
+            if "ACC_Laminar_Header" in frame.columns:
+                frame["ACC_Headers_n"] = pd.to_numeric(frame["ACC_Laminar_Header"],
+                                                       errors="coerce").fillna(0.0)
+            else:
+                frame["ACC_Headers_n"] = 0.0
         if "ACC_Active" not in frame:
             frame["ACC_Active"] = (frame["ACC_Headers_n"] > 0).astype(float)
         if "Rolling_Type" not in frame:
@@ -558,11 +569,9 @@ def get_target_interval_half(mill, key, default_rmse=None):
         return 15.0
 
 def predict_one(mill, raw):
-    """One schedule, every target, with the interval the shipped bootstrap report implies."""
+    """One schedule, every target, with the split-conformal interval the shipped report implies."""
     frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
     X = feature_matrix(mill, frame)
-    ci = ml.get_ci_data(mill)
-    lb = ml.get_leaderboard_data(mill)
     out, last_error = {}, {}
     for key, bundle in bundles(mill).items():
         if bundle is None:
@@ -576,16 +585,7 @@ def predict_one(mill, raw):
             except Exception as exc:
                 last_error[key] = f"{type(exc).__name__}: {exc}"
         half = get_target_interval_half(mill, key)
-        r2_val = 0.60
-        if not ci.empty and "Target" in ci.columns:
-            row = ci[ci["Target"] == key]
-            if not row.empty:
-                if "Val_R2" in row.columns and pd.notna(row["Val_R2"].values[0]):
-                    r2_val = float(row["Val_R2"].values[0])
-        elif not lb.empty and "Target" in lb.columns:
-            row = lb[lb["Target"] == key]
-            if not row.empty and "Final_Val_R2" in row.columns and pd.notna(row["Final_Val_R2"].values[0]):
-                r2_val = float(row["Final_Val_R2"].values[0])
+        r2_val = _holdout_r2(mill, key)
         label, unit = TARGET_LABEL[mill].get(key, (key, ""))
         out[key] = {"name": label, "pred": round(value, 2) if np.isfinite(value) else float("nan"),
                     "unit": unit, "ci_low": round(value - half, 2) if np.isfinite(value) else float("nan"),
@@ -635,6 +635,43 @@ def predict_nlr(mill, raw):
         if key in scores and np.isfinite(scores[key].iloc[0]):
             out[key] = {"pred": float(scores[key].iloc[0]), "r2": float(model.get("r2", 0.0))}
     return out
+
+
+NLR_TERM_NAMES = {"t": "t", "sigma_ss": "σ<sub>ss</sub>", "CE": "CE",
+                  "CoolingRate": "CR", "eps_total": "ε<sub>total</sub>"}
+
+
+def _nlr_card(label, model):
+    """One constitutive-equation card, built only from what the shipped JSON states."""
+    parts = [f"{model['intercept']:.4g}"]
+    for term in model["terms"]:
+        name = NLR_TERM_NAMES.get(term["var"], term["var"])
+        piece = f"{term['coef']:+.4g} · {name}"
+        if term["power"] not in (1, 1.0):
+            piece += f"<sup>{term['power']:g}</sup>"
+        parts.append(piece)
+    r2 = model.get("r2")
+    metrics = f"holdout R² = {r2:.3f}" if r2 is not None else "holdout R² not recorded"
+    return ('<div class="card" style="padding:1rem;">'
+            f'<span class="pill ok">{label}</span>'
+            '<div style="font-family:monospace; font-size:12.5px; color:#0b0d10; '
+            'margin-top:.6rem; line-height:1.6;">' + " ".join(parts) +
+            f'</div><div class="note" style="margin-top:.5rem; font-size:11.5px;">{metrics} · '
+            'no finishing-temperature term by construction</div></div>')
+
+
+def _render_nlr_cards(mill):
+    nlrs = nlr_models(mill)
+    if not nlrs:
+        st.info("No constitutive fit is shipped for this route — the NLR engine scores no "
+                "target here, and no equations are shown rather than invented.")
+        return
+    items = list(nlrs.items())
+    cols = st.columns(min(3, len(items)))
+    for col, (key, model) in zip(cols, items):
+        label = TARGET_LABEL[mill].get(key, (key, ""))[0]
+        with col:
+            st.markdown(_nlr_card(label, model))
 
 
 @st.cache_resource(show_spinner=False)
@@ -1268,7 +1305,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
             verdict = chk["verdict"]
             if verdict == "NOT_VERIFIABLE":
                 m_rows.append(f"""<tr>
-                  <td class="name">{chk['property']} <span class="sub" style="margin-left:.4rem;">no model at this temperature</span></td>
+                  <td class="name">{chk['property']} <span class="sub" style="margin-left:.4rem;">{chk.get('note', 'cannot be verified')}</span></td>
                   <td class="sub" style="font-weight:600; color:#374151;">{chk['req_label']}</td>
                   <td class="val" style="color:#9ca3af;">—</td>
                   <td class="rng">—</td>
@@ -1618,7 +1655,12 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
     for key, band in bands.items():
         centre = float(raw[key])
         frame[key] = rng.uniform(centre - band, centre + band, samples)
-    scored_all = score_frame(mill, frame, engine=engine)[target].values
+    scored_frame = score_frame(mill, frame, engine=engine)
+    if target not in scored_frame.columns:
+        st.error(f"{TARGET_LABEL[mill][target][0]} cannot be scored with the {engine} engine "
+                 "(no linear fit clears the R² floor for it). Switch engine or property.")
+        return
+    scored_all = scored_frame[target].values
     keep = np.isfinite(scored_all)
     frame = frame.loc[keep].reset_index(drop=True)
     scored = scored_all[keep]
@@ -1744,6 +1786,14 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
             st.warning(f"{ood_rows:,} of {len(frame):,} rows sit outside the historical "
                        f"P01–P99 envelope on at least one input — those predictions are "
                        f"extrapolation and should be read as such.")
+
+    chem_cols = [c for c in frame.columns if c.startswith("Chem_")]
+    if chem_cols:
+        blank_chem = int(frame[chem_cols].isna().all(axis=1).sum())
+        if blank_chem:
+            st.warning(f"{blank_chem:,} row(s) carry no chemistry at all — every element was "
+                       f"imputed, so those predictions describe a hypothetical heat, not one "
+                       f"you measured. Fill the chemistry columns before certifying anything.")
     st.dataframe(table.head(200), use_container_width=True, height=320)
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -1922,8 +1972,8 @@ laminar accelerated cooling, and Steckel mill coil off the reversing mill and ru
 answers one operational question — what will this heat certify — from chemistry, drafting and
 cooling alone.
 
-Predictions come with the interval their bootstrap report implies, not a bare number, and the
-scores behind them use `GroupShuffleSplit` on the melt so sister plates from one heat never
+Predictions come with the interval their split-conformal calibration implies, not a bare number,
+and the scores behind them use `GroupShuffleSplit` on the melt so sister plates from one heat never
 straddle the train/test boundary. That is stricter than a row split and it is why the numbers here
 are lower than a naive fit would show.
 """)
@@ -1938,8 +1988,8 @@ are lower than a naive fit would show.
   assumption. One caveat to keep visible: the NLR constitutive fit carries five terms (gauge,
   solid solution, CE, header cooling, total strain) and **no finishing-temperature term**, so
   read it for chemistry and gauge effects, not for how the exit temperature moves properties.
-- **Uncertainty** — 95 % intervals from melt-grouped bootstrap resampling, stored beside every
-  score.
+- **Uncertainty** — 95 % intervals from split-conformal calibration on held-out melts, checked
+  against melt-grouped bootstrap resampling; both reports ship beside every score.
 - **Stack** — Python, pandas, scikit-learn, XGBoost, LightGBM, CatBoost, Plotly, Streamlit.
 """)
 
@@ -2599,27 +2649,7 @@ fitted via Levenberg-Marquardt / Trust Region Reflective non-linear optimization
 """, unsafe_allow_html=True)
 
         st.markdown("##### Calibrated Constitutive Equations (Heavy Plate)")
-        p1, p2 = st.columns(2)
-        with p1:
-            st.markdown("""
-<div class="card" style="padding:1rem;">
-  <span class="pill ok">Yield Strength (YS Before Normalizing)</span>
-  <div style="font-family:monospace; font-size:13px; color:#0b0d10; margin-top:.6rem; line-height:1.6;">
-    <b>YS</b> = 96.51 + 300.00 · <i>t</i><sup>-0.5</sup> + 2.732 · σ<sub>ss</sub> + 0.72 · <i>CR</i> + 5.33 · ε<sub>total</sub>
-  </div>
-  <div class="note" style="margin-top:.5rem; font-size:11.5px;">Holdout R² = 0.920 · RMSE = 16.97 MPa · ±20 MPa Hit Rate = 81.5%</div>
-</div>
-""", unsafe_allow_html=True)
-        with p2:
-            st.markdown("""
-<div class="card" style="padding:1rem;">
-  <span class="pill ok">Tensile Strength (TS Before Normalizing)</span>
-  <div style="font-family:monospace; font-size:13px; color:#0b0d10; margin-top:.6rem; line-height:1.6;">
-    <b>TS</b> = 310.62 + 300.00 · <i>t</i><sup>-0.5</sup> + 1.451 · σ<sub>ss</sub> + 560.87 · <i>CE</i><sup>2</sup> + 0.35 · <i>CR</i> - 18.77 · ε<sub>total</sub>
-  </div>
-  <div class="note" style="margin-top:.5rem; font-size:11.5px;">Holdout R² = 0.943 · RMSE = 13.50 MPa · ±20 MPa Hit Rate = 89.6%</div>
-</div>
-""", unsafe_allow_html=True)
+        _render_nlr_cards(mill)
 
     else:
         st.markdown("#### Steckel Mill HRC Constitutive Formulation")
@@ -2640,37 +2670,7 @@ fitted via Levenberg-Marquardt / Trust Region Reflective non-linear optimization
 """, unsafe_allow_html=True)
 
         st.markdown("##### Calibrated Constitutive Equations (Steckel HRC)")
-        h1, h2, h3 = st.columns(3)
-        with h1:
-            st.markdown("""
-<div class="card" style="padding:1rem;">
-  <span class="pill ok">Yield Strength (YS_BN)</span>
-  <div style="font-family:monospace; font-size:12px; color:#0b0d10; margin-top:.6rem; line-height:1.6;">
-    <b>YS</b> = 308.35 + 0.164 · σ<sub>ss</sub> + 117.33 · <i>t</i><sup>-0.5</sup> - 0.024 · (<i>CT</i> - 500)
-  </div>
-  <div class="note" style="margin-top:.5rem; font-size:11px;">Holdout R² = 0.615 · RMSE = 26.86 MPa</div>
-</div>
-""", unsafe_allow_html=True)
-        with h2:
-            st.markdown("""
-<div class="card" style="padding:1rem;">
-  <span class="pill ok">Tensile Strength (TS_BN)</span>
-  <div style="font-family:monospace; font-size:12px; color:#0b0d10; margin-top:.6rem; line-height:1.6;">
-    <b>TS</b> = 461.25 + 0.197 · σ<sub>ss</sub> + 10.00 · <i>t</i><sup>-0.5</sup> - 0.004 · (<i>CT</i> - 500)
-  </div>
-  <div class="note" style="margin-top:.5rem; font-size:11px;">Holdout R² = 0.795 · RMSE = 18.73 MPa</div>
-</div>
-""", unsafe_allow_html=True)
-        with h3:
-            st.markdown("""
-<div class="card" style="padding:1rem;">
-  <span class="pill ok">Elongation (EL_BN)</span>
-  <div style="font-family:monospace; font-size:12px; color:#0b0d10; margin-top:.6rem; line-height:1.6;">
-    <b>EL</b> = 16.85 + 0.100 · σ<sub>ss</sub> + 16.77 · <i>t</i><sup>-0.5</sup>
-  </div>
-  <div class="note" style="margin-top:.5rem; font-size:11px;">Holdout R² = 0.636 · RMSE = 2.73 %</div>
-</div>
-""", unsafe_allow_html=True)
+        _render_nlr_cards(mill)
 
     # 6. Linear Whitebox Coefficients Inspector
     st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)

@@ -406,6 +406,24 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
     if not selected:
         selected = ["max_margin"] if objective_mode == "max_margin" else ["min_ce"]
 
+    # chemistry caps that exclude the whole grid must stop the solve here: returning the
+    # "nearest" schedule would recommend a chemistry that breaks the user's hard cap
+    caps_active = chem_caps.get("ceq") is not None or chem_caps.get("pcm") is not None
+    if caps_active and not cap_mask.any():
+        return {
+            "best_schedule": None,
+            "is_compliant": False,
+            "cap_infeasible": True,
+            "n_evaluated": int(len(cand_df)),
+            "n_compliant": 0,
+            "chem_caps": dict(chem_caps),
+            "objectives": selected,
+            "message": ("Every candidate schedule violates the chemistry caps "
+                        f"(CE_IIW ≤ {chem_caps.get('ceq')}, P_cm ≤ {chem_caps.get('pcm')}). "
+                        "The caps exclude the whole grid before strength is even considered — "
+                        "relax a cap or widen the window."),
+        }
+
     # what the permitted window can actually reach, once the caps are applied
     window = {}
     if cap_mask.any():
@@ -539,6 +557,9 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         if not res:
             st.error("Failed to run optimization solver.")
             return
+        if res.get("cap_infeasible"):
+            st.error(res.get("message", "Every candidate violated the chemistry caps."))
+            return
 
         best = res["best_schedule"]
         is_comp = res["is_compliant"]
@@ -578,6 +599,9 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
 
         if res.get("clamped"):
             st.warning("Schedule clamped into the permitted window: " + "; ".join(res.get("violations", [])))
+            st.caption("The strength figures above were computed on the recommended setpoints "
+                       "before this clamp; run the simulator on the clamped values for the "
+                       "numbers to certify against.")
 
         window = res.get("window") or {}
         if window:
