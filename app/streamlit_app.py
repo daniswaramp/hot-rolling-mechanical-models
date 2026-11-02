@@ -2025,63 +2025,105 @@ def load_val_predictions(mill):
 
 def view_diagnostics(mill):
     section("model governance & audit dashboard")
-    
+
+    # Governance numbers come from the generated manifest, never from constants in
+    # this file: models/data_audit.json separates what the artifacts were trained on
+    # from what the cleaned tables contain today.
+    audit_path = os.path.join(os.path.dirname(APP_DIR), "models", "data_audit.json")
+    try:
+        with open(audit_path, "r", encoding="utf-8") as fh:
+            audit = json.load(fh).get(mill, {})
+    except (OSError, ValueError):
+        audit = {}
+    trained = audit.get("as_trained") or {}
+    current = audit.get("current") or {}
+    targets_trained = trained.get("targets") or {}
+    targets_current = current.get("targets") or {}
+
+    if not targets_trained:
+        st.warning("models/data_audit.json is missing for this route — run "
+                   "`python app\\build_data_audit.py` and redeploy. The split audit below "
+                   "cannot be shown without it, and no numbers are invented in its place.")
+
     # 1. High-Level Campaign Audit Cards
-    total_records = 23845 if mill == "Plate" else 20298
-    total_heats = 1765 if mill == "Plate" else 4595
-    train_heats = 1412 if mill == "Plate" else 3676
-    holdout_heats = 353 if mill == "Plate" else 919
+    total_records = current.get("ingested_rows")
+    usable_rows = current.get("usable_rows")
+    total_heats = trained.get("heats_total")
+    current_heats = current.get("unique_heats")
+    train_heats = trained.get("heats_train")
+    holdout_heats = trained.get("heats_holdout")
+
+    def _fmt(value):
+        return f"{value:,}" if isinstance(value, (int, float)) else "—"
 
     st.markdown(f"""
 <div class="facts" style="margin: 0.8rem 0 1.2rem;">
-  <div><span>Production Campaign Records</span><b>{total_records:,}</b><em>{mill} products</em></div>
-  <div><span>Melt Heats Evaluated</span><b>{total_heats:,}</b><em>casts</em></div>
-  <div><span>Zero-Leakage Split Protocol</span><b>80% Train : 20% Holdout</b><em>GroupSplit Heat_ID</em></div>
-  <div><span>Melt Isolation &amp; Leakage</span><b>0.0% Leakage</b><em>{holdout_heats:,} held-out heats</em></div>
+  <div><span>Records Ingested (as trained)</span><b>{_fmt(total_records)}</b><em>{mill} products</em></div>
+  <div><span>Usable Rows (cleaned today)</span><b>{_fmt(usable_rows)}</b><em>after sanitising</em></div>
+  <div><span>Heats — Training Campaign</span><b>{_fmt(total_heats)}</b><em>{_fmt(train_heats)} train · {_fmt(holdout_heats)} holdout</em></div>
+  <div><span>Distinct Melts (cleaned today)</span><b>{_fmt(current_heats)}</b><em>current cleaned tables</em></div>
 </div>""", unsafe_allow_html=True)
 
     # 2. Dataset & Training Split Audit Table
     st.markdown("#### 1. Dataset & Training Split Audit")
-    st.caption("Exact sample breakdown across training and held-out folds. Every melt heat (ladle cast) is assigned exclusively to Train or Holdout.")
-    
-    audit_data = [
-        ("Yield Strength (Before Normalizing)", "YS_BN", "MPa", 6302, 1632, 7934, 353, "GroupShuffleSplit (Heat_ID)", "84 decimal shift/outliers corrected"),
-        ("Tensile Strength (Before Normalizing)", "TS_BN", "MPa", 6302, 1631, 7933, 353, "GroupShuffleSplit (Heat_ID)", "84 decimal shift/outliers corrected"),
-        ("Elongation (Before Normalizing)", "EL_BN", "%", 6284, 1627, 7911, 353, "GroupShuffleSplit (Heat_ID)", "Physically bounded 0-70%"),
-        ("Yield Strength (After Normalizing)", "YS_AN", "MPa", 578, 145, 723, 118, "GroupShuffleSplit (Heat_ID)", "Normalizing furnace campaign"),
-        ("Tensile Strength (After Normalizing)", "TS_AN", "MPa", 577, 145, 722, 118, "GroupShuffleSplit (Heat_ID)", "Normalizing furnace campaign"),
-        ("Elongation (After Normalizing)", "EL_AN", "%", 577, 145, 722, 118, "GroupShuffleSplit (Heat_ID)", "Normalizing furnace campaign"),
-        ("Charpy Impact @ 0 °C", "Impact_0C", "J", 933, 234, 1167, 212, "GroupShuffleSplit (Heat_ID)", "Physically bounded 0-500 J"),
-        ("Charpy Impact @ -20 °C", "Impact_m20C", "J", 372, 94, 466, 86, "GroupShuffleSplit (Heat_ID)", "Physically bounded 0-500 J"),
-        ("Charpy Impact @ -40 °C", "Impact_m40C", "J", 156, 39, 195, 34, "GroupShuffleSplit (Heat_ID)", "Physically bounded 0-500 J"),
-        ("Through-Thickness Reduction (Z-Test)", "Z_Test", "%", 314, 79, 393, 72, "GroupShuffleSplit (Heat_ID)", "Offshore specification plates"),
-    ] if mill == "Plate" else [
-        ("Yield Strength (Before Normalizing)", "YS_BN", "MPa", 8884, 2221, 11105, 919, "GroupShuffleSplit (Heat_ID)", "7 decimal shift typos corrected"),
-        ("Tensile Strength (Before Normalizing)", "TS_BN", "MPa", 8884, 2221, 11105, 919, "GroupShuffleSplit (Heat_ID)", "7 decimal shift typos corrected"),
-        ("Elongation (Before Normalizing)", "EL_BN", "%", 8884, 2221, 11105, 919, "GroupShuffleSplit (Heat_ID)", "Physically bounded 0-70%"),
-    ]
-    
-    audit_rows = []
-    for item in audit_data:
-        audit_rows.append(f"""<tr>
-          <td class="name">{item[0]} <span class="unit">[{item[2]}]</span></td>
-          <td class="val">{item[3]:,}</td>
-          <td class="val" style="color:#1746c8;">{item[4]:,}</td>
-          <td class="val">{item[5]:,}</td>
-          <td class="sub" style="font-family:monospace; text-align:right;">{item[6]:,}</td>
-          <td class="sub" style="text-align:right;"><span class="pill ok">{item[7].split()[0]}</span></td>
-          <td class="sub" style="text-align:left; font-size:11.5px;">{item[8]}</td>
-        </tr>""")
-        
-    st.markdown(
-        '<div class="card"><table class="ut">'
-        '<thead><tr><th>Target Property</th><th>Trained (80% Heats)</th><th>Holdout (20% Heats)</th>'
-        '<th>Total Usable</th><th>Holdout Melts</th><th>Validation Folds</th><th>Outlier / Cleaning Rule</th></tr></thead><tbody>'
-        + "".join(audit_rows) +
-        '</tbody></table><div class="foot"><b>Zero Data Leakage Invariant</b>: Multiple sister plates or coils cut from the same melt heat (cast) stay exclusively in Train or Holdout. Folds generated via <code>GroupShuffleSplit(n_splits=1, test_size=0.20, random_state=42)</code> + 100 heat-level bootstrap resampling splits.</div></div>',
-        unsafe_allow_html=True
-    )
-    
+    st.caption("Every melt heat (ladle cast) is assigned exclusively to Train or Holdout. "
+               "The first table is the split the shipped artifacts were fitted with, recorded "
+               "at training time; the second is what the cleaned tables contain today — the two "
+               "differ because the sanitising pass repaired cells and removed duplicate rows "
+               "after the campaign.")
+
+    if targets_trained:
+        audit_rows = []
+        for key, split in targets_trained.items():
+            label, unit = TARGET_LABEL[mill].get(key, (key, ""))
+            score = split.get("val_r2")
+            audit_rows.append(f"""<tr>
+              <td class="name">{label} <span class="unit">[{unit}]</span></td>
+              <td class="val">{split.get('train_rows', 0):,}</td>
+              <td class="val" style="color:#1746c8;">{split.get('holdout_rows', 0):,}</td>
+              <td class="sub" style="font-family:monospace; text-align:right;">{split.get('holdout_heats', 0):,}</td>
+              <td class="sub" style="font-family:monospace; text-align:right;">{split.get('report_samples', 0):,.0f}</td>
+              <td class="sub" style="text-align:right;"><span class="pill ok">GroupSplit</span></td>
+              <td class="sub" style="text-align:left; font-size:11.5px;">{'holdout R² ' + format(score, '.3f') if score is not None else '—'}</td>
+            </tr>""")
+        st.markdown(
+            '<div class="card"><table class="ut">'
+            '<thead><tr><th>Target Property</th><th>Trained Rows</th><th>Holdout Rows</th>'
+            '<th>Holdout Melts</th><th>Report Samples</th><th>Split</th><th>As-Trained Score</th></tr></thead><tbody>'
+            + "".join(audit_rows) +
+            f'</tbody></table><div class="foot"><b>Zero Data Leakage Invariant</b>: sister plates or coils from one melt stay exclusively in Train or Holdout — '
+            f'<code>{audit.get("split_method", "GroupShuffleSplit on Heat_ID")}</code>, plus 100 heat-level bootstrap resamples. '
+            f'Recorded at training time; report samples on this route = {audit.get("samples_semantics", "see campaign report")}.</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    if current:
+        duplicates = current.get("duplicate_rows_removed", 0)
+        st.markdown("##### Cleaned tables — current state")
+        st.markdown(f"""
+<div class="facts">
+  <div><span>Rows removed as duplicates</span><b>{duplicates:,}</b><em>exact records</em></div>
+  <div><span>Cells rescaled</span><b>{current.get('cells_rescaled', 0):,}</b><em>decimal-shift repair</em></div>
+  <div><span>Cells blanked</span><b>{current.get('cells_blanked', 0):,}</b><em>beyond physical bounds</em></div>
+  <div><span>Sanitising audit</span><b>{'on file' if current.get('sanitise_log_found') else 'not shipped'}</b><em>reports/sanitise_log.csv</em></div>
+</div>""", unsafe_allow_html=True)
+        current_rows = []
+        for key, stats in targets_current.items():
+            label, unit = TARGET_LABEL[mill].get(key, (key, ""))
+            current_rows.append(f"""<tr>
+              <td class="name">{label} <span class="unit">[{unit}]</span></td>
+              <td class="val">{stats.get('usable_rows', 0):,}</td>
+              <td class="sub" style="font-family:monospace; text-align:right;">{stats.get('unique_heats', 0):,}</td>
+            </tr>""")
+        st.markdown(
+            '<div class="card"><table class="ut">'
+            '<thead><tr><th>Target Property</th><th>Usable Rows (today)</th><th>Distinct Melts</th></tr></thead><tbody>'
+            + "".join(current_rows) +
+            '</tbody></table><div class="foot">Refreshed by <code>app\\build_data_audit.py</code> from the cleaned '
+            'tables and the sanitising audit trail; ship the regenerated JSON with the deployment.</div></div>',
+            unsafe_allow_html=True,
+        )
+
     st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
     
     # 3. Model Architecture Comparison Scorecard

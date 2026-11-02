@@ -61,9 +61,10 @@ Whenever modifying or extending this codebase, maintain these design constraints
    - Known exception: the in-app refit (`app\streamlit_app.py`, `view_retrain`) falls back to a random row
      split when the uploaded sheet carries 50 or fewer distinct `Heat_ID` values. Treat those R² figures
      as optimistic, and prefer a sheet with real heat identifiers.
-6. **Automatic Preflight Data Sync**:
+6. **Automatic Preflight Data Sync & Table Sanitising**:
    - Batch files and Python runners verify the modification timestamp of raw Excel files (`raw\*.xlsx`) against cleaned CSVs (`csv\*.csv`).
    - If raw Excel has changed, fast ETL automatically executes to refresh the CSV before cloud upload.
+   - `run_plate_etl.bat` and `run_hrc_etl.bat` end with `app\sanitise_training_tables.py`, which rewrites the CSV in place: decimal-shift typos are rescaled by 10/100/1000 when the result lands inside `PHYSICAL_BOUNDS` (otherwise blanked), exact duplicate rows are dropped, and every change is written to `<route>\reports\sanitise_log.csv` (kept out of this mirror — it carries batch identifiers). Training applies the same rule internally. Re-run `app\build_stats_bundle.py`, `app\build_trend_bundle.py` and `app\build_data_audit.py` after it — the last one regenerates the governance manifest (`models/data_audit.json`) that the Diagnostics tab reads.
 7. **Dual-Directory Workspace & GitHub Subfolder Isolation (`push-to-GH/`)**:
    - The root workspace maintains local batch runners, raw campaign Excels, cleaned datasets, and Modal Cloud scripts.
    - The `push-to-GH/` subfolder is the clean public mirror targeting `https://github.com/daniswaramp/hot-rolling-mechanical-models.git` and Streamlit Community Cloud.
