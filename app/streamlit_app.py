@@ -645,8 +645,11 @@ def _nlr_card(label, model):
     """One constitutive-equation card, built only from what the shipped JSON states."""
     parts = [f"{model['intercept']:.4g}"]
     for term in model["terms"]:
+        coef = float(term["coef"])
+        if coef == 0.0:
+            continue          # a zero coefficient is not a mechanism, drop it from the card
         name = NLR_TERM_NAMES.get(term["var"], term["var"])
-        piece = f"{term['coef']:+.4g} · {name}"
+        piece = f"{coef:+.4g} · {name}"
         if term["power"] not in (1, 1.0):
             piece += f"<sup>{term['power']:g}</sup>"
         parts.append(piece)
@@ -671,7 +674,7 @@ def _render_nlr_cards(mill):
     for col, (key, model) in zip(cols, items):
         label = TARGET_LABEL[mill].get(key, (key, ""))[0]
         with col:
-            st.markdown(_nlr_card(label, model))
+            st.markdown(_nlr_card(label, model), unsafe_allow_html=True)
 
 
 @st.cache_resource(show_spinner=False)
