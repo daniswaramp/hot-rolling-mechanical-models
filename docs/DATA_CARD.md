@@ -22,7 +22,7 @@ The data platform integrates two distinct industrial production lines:
 | **Total Ingested Records** | **23,845 plates** | **20,298 coils** |
 | **Usable After Sanitising** | 23,845 plates (534 cells repaired, 0 duplicate rows) | **19,116 coils** (1,182 duplicate records removed, 7,515 cells repaired) |
 | **Raw Column Count** | 84 process & test variables | 35 process & test variables |
-| **Unique Melts (Ladle Heats)** | 1,765 heats | 4,595 heats |
+| **Unique Melts (Ladle Heats)** | 1,860 heats (current cleaned tables; 1,765 recorded at training time) | 6,148 heats (current cleaned tables; 4,595 recorded at training time) |
 | **Gauge Range** | $6.0\text{ mm} - 205.0\text{ mm}$ (99% $\le 70.0\text{ mm}$) | $2.5\text{ mm} - 16.0\text{ mm}$ |
 | **Width Range** | $1,240\text{ mm} - 3,160\text{ mm}$ | $900\text{ mm} - 1,880\text{ mm}$ |
 | **Primary Steel Grades** | SS400, ASTM A 36, SM490B, ASME SA 516 Gr 70 | SPHC, SS400, SM490A, ASTM A 1011 |
