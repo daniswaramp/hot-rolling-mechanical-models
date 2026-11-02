@@ -265,6 +265,8 @@ table.ut td.flag { width: 110px; text-align: center; }
               color: #6b7280; margin-bottom: .25rem; font-weight: 500; }
 .facts b { font-family: 'JetBrains Mono', monospace; font-size: 15.5px; font-weight: 600; color: #0b0d10; }
 .facts em { font-style: normal; font-size: 11px; color: #6b7280; margin-left: .25rem; }
+.facts.facts-text b { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                      font-size: 13.5px; font-weight: 600; letter-spacing: 0; }
 
 .note { font-size: 12.5px; color: #4b5563; line-height: 1.5; border-left: 2px solid #e5e7eb;
         padding-left: .7rem; margin-top: .6rem; }
@@ -1272,10 +1274,10 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
 
     st.markdown('<div style="height:0.8rem"></div>', unsafe_allow_html=True)
     st.markdown(f"""
-<div class="facts">
+<div class="facts facts-text">
   <div>
     <span>Specification &amp; Type</span>
-    <b>{chosen_spec}</b><em>Gr {chosen_grade} · {eval_res['spec_type']}</em>
+    <b>{chosen_spec} · Gr {chosen_grade} · {eval_res['spec_type']}</b>
   </div>
   <div>
     <span>Standard Gauge &amp; GRP Limit</span>
@@ -1283,11 +1285,11 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
   </div>
   <div>
     <span>Chemical Composition</span>
-    <b>{chem_info['pass_count']} / {len(chem_info['active_checks'])}</b><em><span class="pill {c_pill_cls}">{c_pill_text}</span></em>
+    <b>{chem_info['pass_count']} / {len(chem_info['active_checks'])} elements in spec</b><em><span class="pill {c_pill_cls}">{c_pill_text}</span></em>
   </div>
   <div>
     <span>Mechanical Decency</span>
-    <b>{mech_info['pass_count']} passed</b><em><span class="pill {m_pill_cls}">{m_pill_text}</span></em>
+    <b>{mech_info['pass_count']} requirements passed</b><em><span class="pill {m_pill_cls}">{m_pill_text}</span></em>
   </div>
 </div>""", unsafe_allow_html=True)
 
