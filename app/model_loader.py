@@ -131,50 +131,55 @@ def get_nlr_formulas(mill_type: str) -> str:
 def compute_physical_indicators(raw_dict: dict, mill_type: str) -> dict:
     """
     Computes real-time physical metallurgy indicators for user feedback.
+
+    Reads the shared formulas from app/physics.py and clips the inputs to the same bounds the
+    mill's feature module applies, so the card agrees with what a model actually sees.
     """
-    c = float(raw_dict.get("Chem_C", 0.15))
-    mn = float(raw_dict.get("Chem_Mn", 0.90))
-    si = float(raw_dict.get("Chem_Si", 0.20))
-    p = float(raw_dict.get("Chem_P", 0.015))
-    s = float(raw_dict.get("Chem_S", 0.005))
-    cu = float(raw_dict.get("Chem_Cu", 0.02))
-    ni = float(raw_dict.get("Chem_Ni", 0.02))
-    cr = float(raw_dict.get("Chem_Cr", 0.02))
-    mo = float(raw_dict.get("Chem_Mo", 0.005))
-    v = float(raw_dict.get("Chem_V", 0.005))
-    nb = float(raw_dict.get("Chem_Nb", 0.002))
-    ti = float(raw_dict.get("Chem_Ti", 0.002))
-    n = float(raw_dict.get("Chem_N", 0.003))
-    b = float(raw_dict.get("Chem_B", 0.0))
-    al = float(raw_dict.get("Chem_Al", 0.025))
+    import physics as ph
 
-    # Pickering solid solution strengthening
-    sigma_ss = (32.0 * mn) + (84.0 * si) + (43.0 * ni) - (30.0 * cr) + (38.0 * cu) + (80.0 * ti) + (11.0 * mo) + (354.0 * n)
+    def num(key, default):
+        try:
+            value = float(raw_dict.get(key, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        lo, hi = (ph.PLATE_BOUNDS if mill_type == "Plate" else ph.HRC_BOUNDS).get(key, (None, None))
+        value = max(value, lo) if lo is not None else value
+        value = min(value, hi) if hi is not None else value
+        return value
 
-    # Carbon equivalents
-    ce_iiw = c + (mn / 6.0) + ((cr + mo + v) / 5.0) + ((ni + cu) / 15.0)
-    pcm = c + (si / 30.0) + ((mn + cu + cr) / 20.0) + (ni / 60.0) + (mo / 15.0) + (v / 10.0) + (5.0 * b)
+    c = num("Chem_C", 0.15)
+    mn = num("Chem_Mn", 0.90)
+    si = num("Chem_Si", 0.20)
+    cu = num("Chem_Cu", 0.02)
+    ni = num("Chem_Ni", 0.02)
+    cr = num("Chem_Cr", 0.02)
+    mo = num("Chem_Mo", 0.005)
+    v = num("Chem_V", 0.005)
+    ti = num("Chem_Ti", 0.002)
+    n = num("Chem_N", 0.003)
+    b = num("Chem_B", 0.0)
 
-    # Critical transformation temperatures
-    ar3 = 910.0 - (310.0 * c) - (80.0 * mn) - (20.0 * cu) - (15.0 * cr) - (55.0 * ni) - (80.0 * mo)
-    ar1 = 723.0 - (10.7 * mn) - (16.9 * ni) + (29.1 * si) + (16.9 * cr)
+    sigma_ss = ph.sigma_ss(mn, si, ni, cr, cu, ti, mo, n)
+    ce_iiw = ph.ce_iiw(c, mn, cr, mo, v, ni, cu)
+    pcm = ph.pcm(c, si, mn, cu, cr, ni, mo, v, b)
+    ar3 = ph.ar3(c, mn, cu, cr, ni, mo)
+    ar1 = ph.ar1(mn, ni, si, cr)
 
     if mill_type == "Plate":
-        frt = float(raw_dict.get("FM_Finish_Temp", 820.0))
-        t_post = float(raw_dict.get("ACC_Temp_Post_Laminar", 580.0))
-        plate_t = float(raw_dict.get("Plate_T_mm", 20.0))
-        headers = float(raw_dict.get("ACC_Headers_n", 6.0))
-        cooling_rate = ((frt - t_post) * (headers + 0.5)) / max(plate_t, 1.0)
-        true_strain = np.log(float(raw_dict.get("Slab_T_mm", 200.0)) / max(plate_t, 1.0))
+        frt = num("FM_Finish_Temp", 820.0)
+        t_post = num("ACC_Temp_Post_Laminar", frt)
+        plate_t = num("Plate_T_mm", 20.0)
+        headers = num("ACC_Headers_n", 0.0)
+        cooling_rate = ph.plate_cooling_rate(frt, t_post, plate_t, headers)
+        true_strain = ph.true_strain(num("Slab_T_mm", 200.0), plate_t)
     else:
-        ft = float(raw_dict.get("Temp_FT_Avg_C", 850.0))
-        ct_top = float(raw_dict.get("Temp_CT_Top_C", 580.0))
-        ct_bot = float(raw_dict.get("Temp_CT_Bot_C", 580.0))
-        ct = (ct_top + ct_bot) / 2.0
-        coil_t = float(raw_dict.get("Coil_T_mm", 6.0))
-        tb_t = float(raw_dict.get("TB_Thick_mm", 32.0))
-        cooling_rate = max(0.0, ft - ct) / max(coil_t, 1.0)
-        true_strain = np.log(max(tb_t, coil_t * 1.05) / max(coil_t, 1.0))
+        ft = num("Temp_FT_Avg_C", 850.0)
+        ct_top = num("Temp_CT_Top_C", 580.0)
+        ct_bot = num("Temp_CT_Bot_C", 580.0)
+        coil_t = num("Coil_T_mm", 6.0)
+        tb_t = num("TB_Thick_mm", 32.0)
+        cooling_rate = ph.hrc_cooling_rate(ft, ct_top, ct_bot, coil_t)
+        true_strain = ph.true_strain(tb_t, coil_t)
 
     return {
         "sigma_ss": sigma_ss,
@@ -248,7 +253,7 @@ def apply_plate_normalizing_coupling(raw_inputs: dict, results: dict) -> dict:
     # 1. Tensile Strength Coupling
     ts_ceiling = round(ts_bn - delta_ts, 2)
     raw_ts_an = results["TS_AN"].get("pred", np.nan)
-    if not np.isfinite(raw_ts_an) or raw_ts_an > ts_ceiling:
+    if np.isfinite(raw_ts_an) and raw_ts_an > ts_ceiling:
         diff_an = (
             results["TS_AN"]["ci_high"] - results["TS_AN"]["pred"]
             if np.isfinite(results["TS_AN"].get("ci_high", np.nan))
@@ -258,12 +263,15 @@ def apply_plate_normalizing_coupling(raw_inputs: dict, results: dict) -> dict:
         results["TS_AN"]["ci_low"] = round(ts_ceiling - diff_an, 2)
         results["TS_AN"]["ci_high"] = round(ts_ceiling + diff_an, 2)
         results["TS_AN"]["note"] = f"Physically coupled to blackplate (-{delta_ts:.1f} MPa softening)"
+    elif not np.isfinite(raw_ts_an):
+        results["TS_AN"]["error"] = results["TS_AN"].get(
+            "error") or "after-normalising model refused the feature frame; left unscored rather than substituted"
 
     # 2. Yield Strength Coupling
     if np.isfinite(ys_bn) and "YS_AN" in results:
         ys_ceiling = round(ys_bn - delta_ys, 2)
         raw_ys_an = results["YS_AN"].get("pred", np.nan)
-        if not np.isfinite(raw_ys_an) or raw_ys_an > ys_ceiling:
+        if np.isfinite(raw_ys_an) and raw_ys_an > ys_ceiling:
             diff_an = (
                 results["YS_AN"]["ci_high"] - results["YS_AN"]["pred"]
                 if np.isfinite(results["YS_AN"].get("ci_high", np.nan))
@@ -273,12 +281,15 @@ def apply_plate_normalizing_coupling(raw_inputs: dict, results: dict) -> dict:
             results["YS_AN"]["ci_low"] = round(ys_ceiling - diff_an, 2)
             results["YS_AN"]["ci_high"] = round(ys_ceiling + diff_an, 2)
             results["YS_AN"]["note"] = f"Physically coupled to blackplate (-{delta_ys:.1f} MPa softening)"
+        elif not np.isfinite(raw_ys_an):
+            results["YS_AN"]["error"] = results["YS_AN"].get(
+                "error") or "after-normalising model refused the feature frame; left unscored rather than substituted"
 
     # 3. Elongation Coupling
     if np.isfinite(el_bn) and "EL_AN" in results:
         el_floor = round(el_bn + delta_el, 2)
         raw_el_an = results["EL_AN"].get("pred", np.nan)
-        if not np.isfinite(raw_el_an) or raw_el_an < el_floor:
+        if np.isfinite(raw_el_an) and raw_el_an < el_floor:
             diff_an = (
                 results["EL_AN"]["ci_high"] - results["EL_AN"]["pred"]
                 if np.isfinite(results["EL_AN"].get("ci_high", np.nan))
@@ -288,8 +299,27 @@ def apply_plate_normalizing_coupling(raw_inputs: dict, results: dict) -> dict:
             results["EL_AN"]["ci_low"] = round(max(0.0, el_floor - diff_an), 2)
             results["EL_AN"]["ci_high"] = round(el_floor + diff_an, 2)
             results["EL_AN"]["note"] = f"Physically coupled to blackplate (+{delta_el:.1f}% ductility gain)"
+        elif not np.isfinite(raw_el_an):
+            results["EL_AN"]["error"] = results["EL_AN"].get(
+                "error") or "after-normalising model refused the feature frame; left unscored rather than substituted"
 
     return results
+
+
+def bundle_feature_columns(bundle, X):
+    """Ordered best guess at the feature list a shipped estimator expects.
+
+    The normalised Plate targets were fitted on per-target subsets, and the bundled name list does
+    not always match the fitted one, so the estimator's own record comes first. Plate bundles carry
+    "features"; HRC bundles carry "feature_names"; older pickles expose neither.
+    """
+    model = bundle.get("model")
+    for cols in (getattr(model, "feature_names_in_", None),
+                 bundle.get("feature_names"), bundle.get("features")):
+        # feature_names_in_ is a numpy array, so a bare `if cols` is ambiguous
+        if cols is not None and len(cols):
+            return list(cols)
+    return list(X.columns)
 
 
 def predict_single_sample(mill_type: str, raw_inputs: dict) -> dict:
@@ -318,17 +348,18 @@ def predict_single_sample(mill_type: str, raw_inputs: dict) -> dict:
             continue
             
         model = bundle["model"]
-        feature_cols = bundle.get("feature_names", X.columns.tolist())
-        
+        feature_cols = bundle_feature_columns(bundle, X)
+
         # Align features safely
         X_aligned = pd.DataFrame(index=X.index)
         for col in feature_cols:
             X_aligned[col] = X[col] if col in X.columns else 0.0
-            
+
+        err = ""
         try:
             pred_val = float(model.predict(X_aligned)[0])
         except Exception as e:
-            pred_val = np.nan
+            pred_val, err = np.nan, f"{type(e).__name__}: {e}"
 
         # Extract 95% Conformal Prediction Interval (finite-sample valid >= 95% coverage)
         ci_half = tgt_meta["tol"] * 0.5  # default fall-back
@@ -350,7 +381,8 @@ def predict_single_sample(mill_type: str, raw_inputs: dict) -> dict:
             "ci_high": round(pred_val + ci_half, 2),
             "unit": tgt_meta["unit"],
             "model_name": bundle.get("model_name", "Ensemble"),
-            "val_r2": bundle.get("val_r2", None)
+            "val_r2": bundle.get("val_r2", None),
+            "error": err
         }
 
     if mill_type == "Plate":

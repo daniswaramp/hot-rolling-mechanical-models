@@ -19,13 +19,13 @@
       "max": 3160.0
     },
     "Slab_T_mm": {
-      "min": 14.0,
+      "min": 199.0,
       "p01": 199.0,
       "p05": 199.0,
       "p50": 218.0,
       "p95": 245.0,
       "p99": 248.0,
-      "max": 250.0
+      "max": 248.0
     },
     "Chem_C": {
       "min": 0.0,
@@ -154,31 +154,22 @@
       "max": 0.03
     },
     "FM_Finish_Temp": {
-      "min": 8.41,
+      "min": 716.0,
       "p01": 716.0,
       "p05": 752.0,
       "p50": 832.0,
       "p95": 920.0,
       "p99": 945.0,
-      "max": 893897.0
+      "max": 945.0
     },
     "ACC_Temp_Post_Laminar": {
-      "min": 0.0,
+      "min": 593.43,
       "p01": 593.43,
       "p05": 647.0,
       "p50": 744.0,
       "p95": 826.0,
       "p99": 851.0,
-      "max": 8111.0
-    },
-    "ACC_Laminar_Header": {
-      "min": 3.0,
-      "p01": 671.67,
-      "p05": 729.3,
-      "p50": 795.0,
-      "p95": 831.35,
-      "p99": 1469.53,
-      "max": 9820.0
+      "max": 851.0
     }
   },
   "HRC": {
@@ -225,7 +216,7 @@
       "p50": 0.581,
       "p95": 1.256,
       "p99": 1.406,
-      "max": 117.452
+      "max": 1.406
     },
     "Chem_Si": {
       "min": 0.002,
@@ -360,7 +351,7 @@
       "p50": 594.0,
       "p95": 673.0,
       "p99": 696.0,
-      "max": 6621.0
+      "max": 696.0
     },
     "Temp_CT_Bot_C": {
       "min": 0.0,
@@ -369,7 +360,7 @@
       "p50": 557.0,
       "p95": 648.0,
       "p99": 670.0,
-      "max": 6933.0
+      "max": 670.0
     }
   },
   "Normalizing_Domain": {
@@ -377,5 +368,21 @@
       "min_CE_for_normalizing": 0.38,
       "description": "Furnace Normalizing in heavy plate mill practice is strictly applied to pressure vessel and boiler steels (e.g., SA 516 Gr 70, CE >= 0.38). Commodity mild steels (SS400/A36, CE ~ 0.25-0.35) are delivered As-Rolled / TMCP."
     }
+  },
+  "_caveats": {
+    "note": "This envelope was computed from the raw logged columns before the sanitising pass. Entries below document the known contamination; app/build_applicability_domain.py rebuilds the whole file from the cleaned tables when the campaign sheets are available locally.",
+    "dropped": {
+      "Plate.ACC_Laminar_Header": "This column is a laminar header COUNT (0-20 in the app). The logged percentiles (p01 671.67, max 9820) are temperatures from the documented column-swap entry error, so keeping the entry flagged every Plate schedule as extrapolation. Re-add it once rebuilt from the cleaned tables."
+    },
+    "not_monitored_low_side": {
+      "HRC.Temp_CT_Top_C": "p01 and p05 are 0.0 because blank coiling-temperature cells were logged as zero, so no input can fall below the envelope. Same for Temp_CT_Bot_C.",
+      "HRC.Temp_CT_Bot_C": "See Temp_CT_Top_C."
+    },
+    "absent": {
+      "HRC.Temp_Transfer_Bar_C": "No cleaned percentile is available for the Steckel transfer-bar temperature, and constraints.training_bounds falls back to the mill envelope for it. Add the entry here once rebuilt so the optimizer window opens from the trained band.",
+      "Plate.FM_Temp_Before_Rolling": "No cleaned percentile is available for the plate entry temperature either; constraints.training_bounds falls back to the mill envelope for it, same as HRC.Temp_Transfer_Bar_C.",
+      "note": "The min/max keys of several entries were clamped to their p01/p99 for the same reason: the logged extremes are decimal-shift or column-swap typos, and the OOD check only reads p01/p99."
+    },
+    "gauge_note": "HRC Coil_T_mm is capped at 16.0 mm in the app input (the mill product range) while the fitted feature clip runs to 25.0 mm and this envelope says p99 19.0. The clip is the trained bound and is left alone; the input cap and the envelope should converge when this file is rebuilt."
   }
 }

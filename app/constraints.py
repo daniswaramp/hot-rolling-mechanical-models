@@ -44,6 +44,15 @@ CHEM_CAPS = [
 CHEM_DEFAULTS = {"ceq": 0.42, "pcm": 0.24}
 
 
+def spec_float(row, index, fallback=0.0):
+    """A spec cell may arrive as text, None or '-'; never let that take the page down."""
+    try:
+        value = float(row[index])
+        return value if math.isfinite(value) else fallback
+    except (TypeError, ValueError, IndexError):
+        return fallback
+
+
 def _index(spec_rows):
     return {row[1]: row for row in spec_rows}
 
@@ -87,7 +96,9 @@ def defaults_from_spec(mill, spec_rows):
     for _role, key, _label in WINDOW_KEYS.get(mill, []):
         row = idx.get(key)
         if row is not None:
-            out[key] = (float(row[4]), float(row[5]))
+            lo, hi = spec_float(row, 4), spec_float(row, 5)
+            if hi > lo:
+                out[key] = (lo, hi)
     return out
 
 
@@ -152,7 +163,17 @@ def outside_training(mill, limits):
 
 def get_chem_caps(mill):
     saved = st.session_state.get(f"chemcaps_{mill}") or {}
-    return {k: (float(saved[k]) if saved.get(k) is not None else None) for k, _l, _h in CHEM_CAPS}
+    out = {}
+    for key, _label, _help in CHEM_CAPS:
+        value = saved.get(key)
+        if value is None:
+            out[key] = None
+            continue
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            out[key] = None
+    return out
 
 
 def set_chem_caps(mill, caps):
@@ -236,7 +257,9 @@ def render_editor(mill, spec_rows, container=None):
             row = idx.get(key)
             if row is None:
                 continue
-            hw_lo, hw_hi = float(row[4]), float(row[5])
+            hw_lo, hw_hi = spec_float(row, 4), spec_float(row, 5)
+            if not hw_hi > hw_lo or key not in current:
+                continue
             lo_now, hi_now = current[key]
             tail = "trained" if sources.get(key) == "trained" else "mill envelope"
             cols = st.columns(2)

@@ -204,7 +204,7 @@ def score_candidates(mill: str, X_all):
                 if bundle is None:
                     continue
                 try:
-                    cols = bundle.get("feature_names", list(X_all.columns))
+                    cols = ml.bundle_feature_columns(bundle, X_all)
                     X = pd.DataFrame({c: (X_all[c] if c in X_all.columns else 0.0) for c in cols},
                                      index=X_all.index)
                     preds[target] = np.asarray(bundle["model"].predict(X)).ravel()
@@ -224,6 +224,21 @@ def score_candidates(mill: str, X_all):
         if result is not None:
             return result
     return None
+
+
+def _raw_ce_iiw(raw):
+    """The full IIW carbon equivalent of the current simulator inputs.
+
+    The comparison table and the ΔCE metric must use the same formula as the optimized column
+    (cons.ce_iiw); a C + Mn/6 stand-in understates the current CE and makes every delta look
+    like the solver added alloy.
+    """
+    return cons.ce_iiw(
+        float(raw.get("Chem_C", 0.16)), float(raw.get("Chem_Mn", 0.90)),
+        float(raw.get("Chem_Cr", 0.02)), float(raw.get("Chem_Mo", 0.005)),
+        float(raw.get("Chem_V", 0.005)), float(raw.get("Chem_Ni", 0.02)),
+        float(raw.get("Chem_Cu", 0.02)),
+    )
 
 
 def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, base_inputs: dict,
@@ -512,8 +527,17 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     spec_cfg = presets[chosen_spec]
 
     t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+    # gauge bounds come from the mill's own spec table; a hardcoded window rejected the Steckel
+    # coil range (1.8-16 mm) and crashed the tab with a StreamlitAPIException
+    spec_row = {row[1]: row for row in (spec_rows or [])}.get(t_key)
+    gauge_lo = cons.spec_float(spec_row, 4, 6.0 if mill == "Plate" else 1.8)
+    gauge_hi = cons.spec_float(spec_row, 5, 120.0 if mill == "Plate" else 16.0)
+    if not gauge_hi > gauge_lo:
+        gauge_lo, gauge_hi = (6.0, 120.0) if mill == "Plate" else (1.8, 16.0)
     cur_t = float(raw.get(t_key, 20.0 if mill == "Plate" else 6.0))
-    target_gauge = col2.number_input(f"Target Gauge ({t_key})", min_value=3.0, max_value=120.0, value=cur_t, step=1.0)
+    cur_t = min(max(cur_t, gauge_lo), gauge_hi)
+    target_gauge = col2.number_input(f"Target Gauge ({t_key})", min_value=gauge_lo,
+                                     max_value=gauge_hi, value=cur_t, step=1.0)
 
     start_choices = [gt.SIMULATOR] + gt.names()
     starting = col3.selectbox(
@@ -579,7 +603,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
             {"Parameter": "Carbon (C)", "Current": f"{raw.get('Chem_C', 0.16):.3f} %", "Optimized": f"{best.get('Chem_C'):.3f} %", "Unit": "wt%"},
             {"Parameter": "Manganese (Mn)", "Current": f"{raw.get('Chem_Mn', 1.20):.3f} %", "Optimized": f"{best.get('Chem_Mn'):.3f} %", "Unit": "wt%"},
             {"Parameter": "Niobium (Nb)", "Current": f"{raw.get('Chem_Nb', 0.015):.4f} %", "Optimized": f"{best.get('Chem_Nb'):.4f} %", "Unit": "wt%"},
-            {"Parameter": "Carbon Equivalent (CE_IIW)", "Current": f"{raw.get('Chem_C', 0.16) + raw.get('Chem_Mn', 1.20)/6.0:.3f}", "Optimized": f"{best.get('ce_iiw'):.3f}", "Unit": ""},
+            {"Parameter": "Carbon Equivalent (CE_IIW)", "Current": f"{_raw_ce_iiw(raw):.3f}", "Optimized": f"{best.get('ce_iiw'):.3f}", "Unit": ""},
         ]
         if mill == "Plate":
             comp_rows.extend([
@@ -642,7 +666,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
             value=f"{ts_val:.1f} MPa",
             delta=f"95% lower: {ts_low:.1f} MPa (req ≥ {spec_cfg['ts_min']:.0f})"
         )
-        ce_delta = round(best.get("ce_iiw") - (raw.get('Chem_C', 0.16) + raw.get('Chem_Mn', 1.20)/6.0), 3)
+        ce_delta = round(best.get("ce_iiw") - _raw_ce_iiw(raw), 3)
         m3.metric(
             label="Carbon Equivalent Change (ΔCE)",
             value=f"{best.get('ce_iiw'):.3f}",

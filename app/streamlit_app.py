@@ -77,7 +77,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BUILD = "2026-10-28 · champion GBDT engine · fast cold-start · engine selector"
+BUILD = "2026-11-13 · HRC route hardening · shared physics + bundle resolver · rebuilt OOD envelope"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -138,7 +138,42 @@ HRC_SPEC = [
     ("Chemistry", "Chem_N", "N", "wt%", 0.001, 0.02, 0.004, 0.0005),
     ("Chemistry", "Chem_B", "B", "wt%", 0.0, 0.005, 0.0, 0.0002),
 ]
-SPECS = {"Plate": PLATE_SPEC, "HRC": HRC_SPEC}
+
+
+def _validated_specs(rows, mill):
+    """Coerce every spec row once at import: 8 fields, numeric bounds, sane defaults.
+
+    A malformed row would otherwise raise inside schedule_inputs' tuple unpacking and take
+    both routes down with it, so repair here and say what moved.
+    """
+    out, repaired = [], []
+    for row in rows:
+        key = row[1] if len(row) > 1 else repr(row)
+        if len(row) != 8:
+            repaired.append(f"{key}: {len(row)} fields")
+            row = tuple(row[:8]) + (0.0,) * max(0, 8 - len(row))
+        group, key, label, unit, lo, hi, default, step = row
+        try:
+            lo, hi, default, step = float(lo), float(hi), float(default), float(step)
+        except (TypeError, ValueError):
+            repaired.append(f"{key}: non-numeric bounds")
+            lo, hi, default, step = 0.0, 1.0, 0.0, 0.1
+        if hi <= lo:
+            repaired.append(f"{key}: max <= min")
+            hi = lo + 1.0
+        if not lo <= default <= hi:
+            repaired.append(f"{key}: default outside range")
+            default = min(max(default, lo), hi)
+        if step <= 0:
+            repaired.append(f"{key}: step <= 0")
+            step = (hi - lo) / 100.0
+        out.append((str(group), str(key), str(label), str(unit), lo, hi, default, step))
+    if repaired:
+        print(f"[{mill}] repaired specification rows: " + "; ".join(repaired), file=sys.stderr)
+    return out
+
+
+SPECS = {"Plate": _validated_specs(PLATE_SPEC, "Plate"), "HRC": _validated_specs(HRC_SPEC, "HRC")}
 
 SURFACE = {
     "Plate": ["FM_Finish_Temp", "ACC_Laminar_Header", "ACC_Temp_Post_Laminar", "Plate_T_mm",
@@ -297,6 +332,17 @@ def hair():
 
 
 # ----------------------------------------------------------------------------- data helpers
+def spec_float(row, index, fallback=0.0):
+    """A spec cell may arrive as text, None or '-'; never let that take the page down."""
+    return cons.spec_float(row, index, fallback)
+
+
+def prune_stale_widget_key(key, options):
+    """A selectbox whose options shrink would otherwise raise on its persisted value."""
+    if key in st.session_state and st.session_state[key] not in options:
+        del st.session_state[key]
+
+
 def spec_map(mill):
     return {row[1]: row for row in SPECS[mill]}
 
@@ -311,17 +357,17 @@ def surface_keys(mill):
 def axis_range(mill, key, limits):
     """Sweep range for an axis: mill envelope intersected with the house limits."""
     row = spec_map(mill)[key]
-    lo, hi = float(row[4]), float(row[5])
+    lo, hi = spec_float(row, 4), spec_float(row, 5)
     if limits and key in limits:
         lo = max(lo, float(limits[key][0]))
         hi = min(hi, float(limits[key][1]))
     if hi <= lo:
-        lo, hi = float(row[4]), float(row[5])
+        lo, hi = spec_float(row, 4), spec_float(row, 5)
     return lo, hi
 
 
 def defaults(mill):
-    return {row[1]: float(row[6]) for row in SPECS[mill]}
+    return {row[1]: spec_float(row, 6) for row in SPECS[mill]}
 
 
 @st.cache_resource(show_spinner=False)
@@ -436,6 +482,11 @@ def _nlr_scores(mill, frame):
     def num(col, default):
         return pd.to_numeric(frame.get(col), errors="coerce").fillna(default)
 
+    # NLR term definitions — FROZEN. These are NOT the Pickering sigma_ss or the ACC cooling rate
+    # the models and the derived-metrics card use: the NLR coefficients in models/nlr_models.json
+    # were fitted on exactly these narrower definitions (scripts/parse_nlr.py::term_values), so
+    # changing them here would invalidate the fit. The keys must keep matching the "var" names in
+    # that JSON. HRC has no NLR fit, so this path only runs for Plate.
     terms = {
         "t": thick,
         "sigma_ss": (32 * num("Chem_Mn", .9) + 84 * num("Chem_Si", .2)
@@ -527,13 +578,18 @@ def score_frame(mill, frame, engine="Champion GBDT (Recommended)"):
     else:
         raise ValueError(f"Unsupported scoring engine: {engine!r}")
     if mill == "Plate" and "TS_BN" in out.columns and "TS_AN" in out.columns:
+        # frame-path twin of ml.apply_plate_normalizing_coupling, which handles the one-row dict.
+        # .mask rather than .loc so a float32 model column can take a float64 replacement.
         delta_ts, delta_ys, delta_el = ml.plate_softening_deltas_frame(frame)
 
-        out["TS_AN"] = np.minimum(out["TS_AN"], out["TS_BN"] - delta_ts)
+        ts_cap = out["TS_BN"] - delta_ts
+        out["TS_AN"] = out["TS_AN"].mask(out["TS_AN"].notna() & (out["TS_AN"] > ts_cap), ts_cap)
         if "YS_BN" in out.columns and "YS_AN" in out.columns:
-            out["YS_AN"] = np.minimum(out["YS_AN"], out["YS_BN"] - delta_ys)
+            ys_cap = out["YS_BN"] - delta_ys
+            out["YS_AN"] = out["YS_AN"].mask(out["YS_AN"].notna() & (out["YS_AN"] > ys_cap), ys_cap)
         if "EL_BN" in out.columns and "EL_AN" in out.columns:
-            out["EL_AN"] = np.maximum(out["EL_AN"], out["EL_BN"] + delta_el)
+            el_floor = out["EL_BN"] + delta_el
+            out["EL_AN"] = out["EL_AN"].mask(out["EL_AN"].notna() & (out["EL_AN"] < el_floor), el_floor)
     return out
 
 
@@ -594,8 +650,7 @@ def predict_one(mill, raw):
                     "ci_high": round(value + half, 2) if np.isfinite(value) else float("nan"),
                     "r2": r2_val,
                     "error": last_error.get(key, "")}
-    if mill == "Plate":
-        out = ml.apply_plate_normalizing_coupling(raw, out)
+    # coupling is applied once, in predict_selected_engine
     return out
 
 
@@ -853,8 +908,7 @@ def predict_champion(mill, raw):
             "r2": cfg.get("r2", _holdout_r2(mill, key)),
             "error": err
         }
-    if mill == "Plate":
-        out = ml.apply_plate_normalizing_coupling(raw, out)
+    # coupling is applied once, in predict_selected_engine
     return out
 
 
@@ -910,6 +964,7 @@ def predict_selected_engine(mill, raw, engine):
                     "error": "" if np.isfinite(value) else f"Not available in {engine}"
                 }
     elif engine == "OLS / Linear":
+        lin_table = linear_families(mill)
         lin = predict_linear(mill, raw, "OLS")
         champ = predict_champion(mill, raw)
         out = {}
@@ -931,7 +986,8 @@ def predict_selected_engine(mill, raw, engine):
                 }
             else:
                 item = dict(champ[key])
-                item["error"] = "Linear R2 < 0.15 (showing Champion GBDT)"
+                item["error"] = ("no linear family is shipped for this route"
+                                 if not lin_table else "Linear R2 < 0.15 (showing Champion GBDT)")
                 out[key] = item
     else:
         out = predict_champion(mill, raw)
@@ -939,6 +995,21 @@ def predict_selected_engine(mill, raw, engine):
     if mill == "Plate":
         out = ml.apply_plate_normalizing_coupling(raw, out)
     return out
+
+
+def single_target(mill, raw, engine, key):
+    """One target from the chosen engine, without letting a missing key kill the page."""
+    try:
+        preds = predict_selected_engine(mill, raw, engine)
+    except Exception as exc:  # noqa: BLE001
+        return np.nan, f"{type(exc).__name__}: {exc}"
+    res = preds.get(key)
+    if not res:
+        return np.nan, f"{engine} returned no result for {key}"
+    value = res.get("pred", np.nan)
+    if not np.isfinite(value):
+        return np.nan, res.get("error") or f"{engine} could not score {key}"
+    return float(value), ""
 
 
 def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
@@ -1035,7 +1106,7 @@ def chemistry_template(mill):
     st.sidebar.caption(caption)
     st.sidebar.caption("band midpoint, not a mill aim — edit any element below before calculating")
 
-    ranges = {row[1]: (float(row[4]), float(row[5])) for row in SPECS[mill]}
+    ranges = {row[1]: (spec_float(row, 4), spec_float(row, 5)) for row in SPECS[mill]}
     applied, held = {}, []
     for key, value in gt.chemistry(choice).items():
         if key not in ranges:
@@ -1075,10 +1146,14 @@ def schedule_inputs(mill):
                 shown_unit = "°C" if unit == "C" else unit
                 widget_key = f"{mill}_{key}"
                 seeded = st.session_state.get(widget_key)
+                try:
+                    value = float(default if seeded is None else seeded)
+                except (TypeError, ValueError):
+                    value = float(default)
+                value = min(max(value, float(lo)), float(hi))
                 values[key] = st.number_input(f"{label} [{shown_unit}]", min_value=float(lo),
                                               max_value=float(hi), step=float(step), format=fmt,
-                                              key=widget_key,
-                                              value=float(default if seeded is None else seeded))
+                                              key=widget_key, value=value)
     if mill == "Plate":
         st.markdown('<div class="note">Delivery route</div>', unsafe_allow_html=True)
         values["Rolling_Type"] = st.selectbox(
@@ -1092,6 +1167,8 @@ def schedule_inputs(mill):
                    "near the gauge and width above.")
         picks = [row for row in SPECS[mill] if row[0] != "Geometry"]
         unit_of = lambda row: "°C" if row[3] == "C" else row[3]
+        # a spec-table edit can shrink this list while the widget key persists an old index
+        prune_stale_widget_key(f"stat_var_{mill}", list(range(len(picks))))
         choice = st.selectbox("Input", range(len(picks)),
                               format_func=lambda i: f"{picks[i][2]}  [{unit_of(picks[i])}]",
                               key=f"stat_var_{mill}")
@@ -1131,7 +1208,11 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
 
     section("predicted properties")
     preds = predict_selected_engine(mill, raw, engine)
-    options = ["OLS", "Ridge", "NLR"]
+    options = []
+    if linear_families(mill):
+        options += ["OLS", "Ridge"]
+    if nlr_models(mill):
+        options.append("NLR")
     if "Ensemble" not in engine:
         options.append("Ensemble (.joblib)")
     for family in ("xgb", "lgbm", "cat"):
@@ -1199,7 +1280,8 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
         frame = prepare_frame(mill, pd.DataFrame([prepared(raw, mill)]))
         X_explain = feature_matrix(mill, frame)
         unit = TARGET_LABEL[mill][chosen_tgt][1]
-        explainer.render_feature_contributions_ui(mill, chosen_tgt, X_explain, unit=unit)
+        explainer.render_feature_contributions_ui(mill, chosen_tgt, X_explain, unit=unit,
+                                                  family=(champion_plan(mill).get(chosen_tgt) or {}).get("family"))
 
 
 def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
@@ -1218,6 +1300,10 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     chosen_spec = c1.selectbox("Specification Standard", specs, index=spec_idx, key=f"sc_spec_{mill}")
 
     grades = sc.get_available_grades(chosen_spec)
+    if not grades:
+        grades = ["-"]
+        st.caption(f"{chosen_spec} carries no grade rows in the shipped specification workbook, "
+                   "so no tier can be matched for it.")
     default_grade = "50" if "50" in grades else (grades[0] if grades else "-")
     grade_idx = grades.index(default_grade) if default_grade in grades else 0
     chosen_grade = c2.selectbox("Grade", grades, index=grade_idx, key=f"sc_gr_{mill}")
@@ -1415,10 +1501,15 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
         _surface_slice(mill, raw, engine, keys, labels, limits, axes)
         return
 
+    if not keys:
+        st.error("This route ships no sweepable inputs, so there is nothing to plot.")
+        return
     left, mid, right = st.columns([1.2, 1.2, 1.6], vertical_alignment="bottom")
     x_key = left.selectbox("Horizontal axis", keys, index=0, key=f"x_{mill}",
                            format_func=lambda k: labels.get(k, k))
-    y_key = mid.selectbox("Vertical axis", [k for k in keys if k != x_key], index=1, key=f"y_{mill}",
+    y_opts = [k for k in keys if k != x_key]
+    prune_stale_widget_key(f"y_{mill}", y_opts)
+    y_key = mid.selectbox("Vertical axis", y_opts, index=min(1, len(y_opts) - 1), key=f"y_{mill}",
                           format_func=lambda k: labels.get(k, k))
     target = right.selectbox("Property", list(TARGET_LABEL[mill]),
                              format_func=lambda k: TARGET_LABEL[mill][k][0], key=f"t_{mill}")
@@ -1439,7 +1530,10 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
 
     label, unit = TARGET_LABEL[mill][target]
     point = cons.clamp_raw(mill, raw, limits)[0]
-    here = predict_selected_engine(mill, point, engine)[target]["pred"]
+    here, here_err = single_target(mill, point, engine, target)
+    if not np.isfinite(here):
+        st.error(f"The current schedule could not be scored for {label} with {engine}: {here_err}")
+        return
 
     if view == "2D contour":
         fig = go.Figure()
@@ -1624,7 +1718,10 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
                           key=f"cp_t_{mill}")
     unit = TARGET_LABEL[mill][target][1]
     tolerance = ml.TARGET_CONFIG[mill][target]["tol"]
-    base = predict_selected_engine(mill, raw, engine)[target]["pred"]
+    base, base_err = single_target(mill, raw, engine, target)
+    if not np.isfinite(base):
+        st.error(f"Could not score {TARGET_LABEL[mill][target][0]} with {engine}: {base_err}")
+        return
 
     c3, c4, c5 = st.columns([1, 1, 1], vertical_alignment="bottom")
     lsl = c3.number_input(f"LSL [{unit}]", value=float(round(base - tolerance, 1)), step=1.0,
@@ -1784,8 +1881,11 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
         for param, bounds in domain.items():
             if param not in frame.columns:
                 continue
+            p01, p99 = bounds.get("p01"), bounds.get("p99")
+            if p01 is None or p99 is None:
+                continue
             values = pd.to_numeric(frame[param], errors="coerce")
-            outside = outside + ((values < bounds["p01"]) | (values > bounds["p99"])).fillna(False).astype(int)
+            outside = outside + ((values < p01) | (values > p99)).fillna(False).astype(int)
         ood_rows = int((outside > 0).sum())
         if ood_rows:
             st.warning(f"{ood_rows:,} of {len(frame):,} rows sit outside the historical "
@@ -2760,12 +2860,18 @@ def main():
         raw = schedule_inputs(mill)
         st.markdown("---")
         st.markdown("### Model Engine")
+        engine_opts = ["Champion GBDT (Recommended)", "CatBoost", "XGBoost", "LightGBM",
+                       "Ensemble (.joblib)"]
+        if linear_families(mill):
+            engine_opts.append("OLS / Linear")
+        prune_stale_widget_key(f"engine_{mill}", engine_opts)
         engine = st.selectbox(
             "Scoring engine",
-            ["Champion GBDT (Recommended)", "CatBoost", "XGBoost", "LightGBM", "Ensemble (.joblib)", "OLS / Linear"],
+            engine_opts,
             index=0,
             key=f"engine_{mill}",
-            help="Champion GBDT selects the highest R² tree architecture per target, providing instant cold-start and highest accuracy."
+            help="Champion GBDT selects the highest R² tree architecture per target. "
+                 "OLS / Linear is only offered where a linear family was actually fitted."
         )
         st.markdown("---")
         st.caption("Data: Gunung Raja Paksi production logs. Models private; app public.")

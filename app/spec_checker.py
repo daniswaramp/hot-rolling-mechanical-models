@@ -7,6 +7,7 @@ limits and ML-predicted mechanical properties (Yield, Tensile, Elongation, Impac
 
 import os
 import re
+import sys
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -61,11 +62,27 @@ def parse_limit(val):
 
 @st.cache_data(show_spinner=False)
 def load_specifications():
-    """Load and clean the Specification sheet from SPECIFICATION LIST.xlsx."""
+    """Load and clean the Specification sheet from SPECIFICATION LIST.xlsx.
+
+    A missing sheet, shifted header row or missing column degrades to an empty frame so the
+    Specification check tab can say so instead of taking the page down.
+    """
     if not os.path.exists(SPEC_FILE_PATH):
         return pd.DataFrame()
+    try:
+        df = pd.read_excel(SPEC_FILE_PATH, sheet_name="Specification", header=1)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[spec_checker] could not read the specification workbook: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return pd.DataFrame()
 
-    df = pd.read_excel(SPEC_FILE_PATH, sheet_name="Specification", header=1)
+    required = ("SPEC", "GRADE", "THICK MIN (mm)", "THICK MAX (mm)")
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"[spec_checker] specification workbook is missing columns: {missing}",
+              file=sys.stderr)
+        return pd.DataFrame()
+
     df["SPEC"] = df["SPEC"].astype(str).str.strip()
     df["GRADE"] = df["GRADE"].fillna("-").astype(str).str.strip()
     df["THICK MIN (mm)"] = pd.to_numeric(df["THICK MIN (mm)"], errors="coerce").fillna(0.0)

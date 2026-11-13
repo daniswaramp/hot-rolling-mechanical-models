@@ -53,8 +53,10 @@ def check_applicability_domain(mill: str, raw_inputs: dict) -> tuple[list[dict],
         if param in raw_inputs:
             try:
                 val = float(raw_inputs[param])
-                p01 = bounds["p01"]
-                p99 = bounds["p99"]
+                p01 = bounds.get("p01")
+                p99 = bounds.get("p99")
+                if p01 is None or p99 is None or not (np.isfinite(p01) and np.isfinite(p99)):
+                    continue
                 if val < p01:
                     warnings.append({
                         "param": param,
@@ -95,20 +97,31 @@ def check_applicability_domain(mill: str, raw_inputs: dict) -> tuple[list[dict],
     return warnings, notices
 
 
-def compute_tree_shap_attribution(mill: str, target_key: str, X_row: pd.DataFrame) -> dict:
+def compute_tree_shap_attribution(mill: str, target_key: str, X_row: pd.DataFrame, family: str = None) -> dict:
     """
     Computes exact TreeSHAP additive feature attributions:
     Prediction = Base_Value + Sum(SHAP_values)
+
+    Pass the family the active engine actually scored with (streamlit_app.champion_plan); when it
+    is omitted the lowest-RMSE family is used, which is a different definition of "champion" than
+    the app's highest-R2 pick and can describe a different model than the number on screen.
     """
     metrics = get_boosted_metrics()
-    
+
     # Identify champion family
     best_fam = None
     best_rmse = 999999.0
     best_feats = None
     for fam in ["xgb", "lgbm", "cat"]:
         k = f"{mill}|{target_key}|{fam}"
-        if k in metrics and metrics[k]["rmse"] < best_rmse:
+        if k not in metrics:
+            continue
+        if family is not None:
+            if fam == family:
+                best_fam, best_feats = fam, metrics[k].get("features", [])
+                break
+            continue
+        if metrics[k]["rmse"] < best_rmse:
             best_rmse = metrics[k]["rmse"]
             best_fam = fam
             best_feats = metrics[k].get("features", [])
@@ -182,11 +195,12 @@ def compute_tree_shap_attribution(mill: str, target_key: str, X_row: pd.DataFram
         return {"error": str(e)}
 
 
-def render_feature_contributions_ui(mill: str, target_key: str, X_row: pd.DataFrame, unit: str = "MPa"):
+def render_feature_contributions_ui(mill: str, target_key: str, X_row: pd.DataFrame,
+                                    unit: str = "MPa", family: str = None):
     """
     Renders an interactive feature attribution breakdown card in Streamlit.
     """
-    attr = compute_tree_shap_attribution(mill, target_key, X_row)
+    attr = compute_tree_shap_attribution(mill, target_key, X_row, family=family)
     if not attr or "error" in attr:
         st.info("Feature attribution unavailable for this configuration.")
         return
