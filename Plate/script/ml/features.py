@@ -73,6 +73,10 @@ def compute_metallurgical_features(df):
     X["P_cm"] = c + (si / 30.0) + ((mn + cu + cr) / 20.0) + (ni / 60.0) + (mo / 15.0) + (v / 10.0)
 
     # Pickering solid solution strengthening model (MPa contribution)
+    # FROZEN: the shipped Plate models were fitted with exactly these coefficients — 354 P
+    # (not 354 N), 33 Ni and no Ti term. They differ from the published Pickering form quoted in
+    # MODEL_CARD and from HRC/script/ml/features.py. Do not "correct" them here; editing this line
+    # silently shifts every Plate prediction. The derived-metrics card uses app/physics.py instead.
     X["sigma_ss"] = (32.3 * mn) + (83.2 * si) + (354.0 * p) + (38.0 * cu) + (33.0 * ni) + (11.0 * mo) - (30.0 * cr)
 
     # Microalloying precipitation potentials
@@ -101,6 +105,8 @@ def compute_metallurgical_features(df):
 
     # 5. Metallurgical Critical Transformation Temperatures
     # Ouchi Ar3 model (°C)
+    # FROZEN: unlike the bare Ouchi form elsewhere, this fit carries a gauge term. Keep it; the
+    # Plate models were trained with it. The bare form lives in app/physics.py for the card.
     X["Ar3"] = (910.0 - (310.0 * c) - (80.0 * mn) - (20.0 * cu) - (15.0 * cr)
                 - (55.0 * ni) - (80.0 * mo) + (0.35 * (plate_t - 8.0)))
 

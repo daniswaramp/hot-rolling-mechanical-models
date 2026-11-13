@@ -62,6 +62,9 @@ def engineer_hrc_features(df: pd.DataFrame, is_train: bool = True, spec_map: dic
 
     # 3. Solid Solution Strengthening (Pickering equation)
     # sigma_ss = 32*Mn + 84*Si + 43*Ni - 30*Cr + 38*Cu + 80*Ti + 11*Mo + 354*N (MPa)
+    # FROZEN: matches the published Pickering form and app/physics.py; the shipped HRC models
+    # were fitted with it. Note the fitted Plate model uses different coefficients — see
+    # Plate/script/ml/features.py.
     X["sigma_ss_MPa"] = 32.0 * mn + 84.0 * si + 43.0 * ni - 30.0 * cr + 38.0 * cu + 80.0 * ti + 11.0 * mo + 354.0 * n
 
     # 4. Carbon Equivalents
