@@ -35,6 +35,13 @@ All machine learning models ingest engineered metallurgical descriptors derived 
 
 1. **Pickering Solid Solution Strengthening ($\sigma_{ss}$)**:
    $$\sigma_{ss}\text{ (MPa)} = 32 [\%Mn] + 84 [\%Si] + 43 [\%Ni] - 30 [\%Cr] + 38 [\%Cu] + 80 [\%Ti] + 11 [\%Mo] + 354 [\%N]$$
+   > **Fitted-model caveat.** The form above is what the app's derived-metrics card and the Steckel
+   > feature module use. The *fitted* heavy-plate feature module (`Plate/script/ml/features.py`)
+   > was trained with $32.3Mn + 83.2Si + 354P + 38Cu + 33Ni + 11Mo - 30Cr$ (phosphorus in place of
+   > nitrogen, 33 rather than 43 Ni, no Ti term) and its Ar3 carries an extra gauge term. Those
+   > columns are frozen because the shipped Plate models were fitted on them; the divergence is
+   > recorded in `docs/HANDOFF.md` trap 7. The NLR constitutive fits use a third, narrower set of
+   > term definitions (`scripts/parse_nlr.py::term_values`) that their coefficients were fitted on.
 2. **Hall-Petch Grain Size Proxy ($d_\alpha^{-1/2}$)**:
    - For Heavy Plate: Structural proxy $1 / \sqrt{\text{Plate\_T\_mm}}$ and accelerated cooling proxy $CR = \frac{FRT - T_{post}}{\text{Plate\_T\_mm}} \times (N_{headers} + 0.5)$.
    - For Steckel Mill HRC: $1 / \sqrt{\text{Coil\_T\_mm}}$ and ROT cooling rate $CR_{ROT} = \frac{FT - CT_{avg}}{\text{Coil\_T\_mm}}$.

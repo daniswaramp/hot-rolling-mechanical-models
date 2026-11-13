@@ -92,6 +92,6 @@ Raw manufacturing logs contain known human data-entry artifacts and instrumentat
 
 ## 6. Subfolder Isolation & Privacy
 
-- Proprietary operational campaign workbooks reside strictly in local root workspace (`Plate/raw/`, `HRC/raw/`).
-- The public GitHub repository mirror (`push-to-GH/`) contains only sanitized features, pre-trained model binaries, documentation, and the interactive Streamlit application.
+- Proprietary operational campaign workbooks reside strictly in local root workspace (`Plate/raw/`, `HRC/raw/`); the cleaned per-heat tables (`Plate/csv/`, `HRC/csv/`) and their audit logs stay out of the public mirror with them.
+- The public GitHub repository contains the sanitized feature schemas, pre-trained model binaries, the mill specification list (`specification-list/`, published deliberately because the Specification check tab reads it at runtime), documentation, and the interactive Streamlit application. No per-heat record is published.
 - Syncing between workspace and GitHub is managed strictly through `run_github_sync.bat`.

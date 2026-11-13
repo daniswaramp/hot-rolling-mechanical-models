@@ -18,18 +18,28 @@ Split by melt, not by row. `GroupShuffleSplit` on the ladle heat identifier keep
 cast on the same side of the boundary, which is stricter than a random split and the reason these
 scores sit lower than a naive fit would show.
 
-| route | target | R2 | RMSE | inside tolerance | 95% Conformal Width |
-|---|---|---|---|---|---|
-| Plate | tensile, as rolled | 0.9435 | 13.50 MPa | 89.6 % (±20 MPa) | ±27.26 MPa (95.0% coverage) |
-| Plate | yield, as rolled | 0.9204 | 16.97 MPa | 81.5 % (±20 MPa) | ±33.96 MPa (95.0% coverage) |
-| Plate | elongation, as rolled | 0.6628 | 2.10 % | 100 % | ±4.46 % (95.0% coverage) |
-| Plate | tensile, normalised | 0.6331 | 16.36 MPa | 79.6 % | ±39.31 MPa (94.6% coverage) |
-| Plate | yield, normalised | 0.5810 | 20.45 MPa | 74.2 % | ±32.68 MPa (94.6% coverage) |
-| Plate | elongation, normalised | 0.6120 | 2.45 % | 98.2 % | ±5.04 % (94.6% coverage) |
-| Plate | Z-test | 0.6169 | 4.41 % | 98.8 % | ±9.95 % (94.2% coverage) |
-| Coil | tensile | 0.7954 | 18.73 MPa | 76.6 % (±20 MPa) | ±36.91 MPa (95.0% coverage) |
-| Coil | elongation | 0.6356 | 2.73 % | 65.4 % (±2.5 %) | ±5.43 % (95.0% coverage) |
-| Coil | yield | 0.6146 | 26.86 MPa | 60.7 % (±20 MPa) | ±53.25 MPa (95.0% coverage) |
+| route | target | R2 (stacked ensemble) | R2 (served Champion GBDT) | 95% Conformal Width |
+|---|---|---|---|---|
+| Plate | tensile, as rolled | 0.9435 | 0.9419 | ±27.26 MPa (95.0% coverage) |
+| Plate | yield, as rolled | 0.9204 | 0.9204 | ±33.96 MPa (95.0% coverage) |
+| Plate | elongation, as rolled | 0.6628 | 0.4986 | ±4.46 % (95.0% coverage) |
+| Plate | tensile, normalised | 0.6331 | 0.5695 | ±39.31 MPa (94.6% coverage) |
+| Plate | yield, normalised | 0.4926 | 0.4020 | ±32.68 MPa (94.6% coverage) |
+| Plate | elongation, normalised | 0.6533 | 0.5709 | ±5.04 % (94.6% coverage) |
+| Plate | Charpy 0 °C | 0.3799 | 0.3533 | ±99.4 J (94.7% coverage) |
+| Plate | Charpy −20 °C | 0.3033 | 0.2983 | ±121.36 J (94.8% coverage) |
+| Plate | Charpy −40 °C | 0.4266 | 0.3716 | ±118.77 J (92.9% coverage) |
+| Plate | Z-test | 0.6169 | 0.5667 | ±9.95 % (94.2% coverage) |
+| Coil | tensile | 0.7954 | 0.7922 | ±36.91 MPa (95.0% coverage) |
+| Coil | elongation | 0.6356 | 0.6306 | ±5.43 % (95.0% coverage) |
+| Coil | yield | 0.6146 | 0.6097 | ±53.25 MPa (95.0% coverage) |
+
+The app serves **Champion GBDT** by default (the best of CatBoost/XGBoost/LightGBM per target,
+from `models/boosted_out/`), so the "served" column is what a fresh simulation reports. The stacked
+`.joblib` ensembles score a point or two higher on several targets and stay selectable in the
+sidebar's engine dropdown; their numbers are the second column. Both are scored on the same
+held-out melts, and the conformal widths beside every prediction were calibrated on the champion
+residuals.
 
 Plate covers 353 held-out heats and 7,934 measured plates; coil covers 919 heats and 2,221 coils.
 Every score carries a 95 % bootstrap interval and a finite-sample calibrated split-conformal prediction interval.
@@ -66,11 +76,11 @@ A continuous envelope monitor checks input parameters against historical P01–P
 
 ## Artifacts & Verification
 
-- **Model Card**: [`docs/MODEL_CARD.md`](file:///C:/16.%20NOTEBOOK%20AND%20ANALYSIS/YS%20TS%20EL%20Train%20and%20Modelling/push-to-GH/docs/MODEL_CARD.md) (Mitchell et al. compliant specification)
-- **Data Card**: [`docs/DATA_CARD.md`](file:///C:/16.%20NOTEBOOK%20AND%20ANALYSIS/YS%20TS%20EL%20Train%20and%20Modelling/push-to-GH/docs/DATA_CARD.md) (Gebru et al. compliant dataset governance)
-- **Model Registry**: [`models/registry.json`](file:///C:/16.%20NOTEBOOK%20AND%20ANALYSIS/YS%20TS%20EL%20Train%20and%20Modelling/push-to-GH/models/registry.json) (Cryptographic SHA-256 hashes & conformal widths)
-- **Automated Test Suite**: 14 unit tests in `tests/` verifying schema contracts, physical invariants, conformal coverage, and zero heat leakage.
-- **Hostile QA Battery**: 34 adversarial test cases (boundary fuzzing, string types, cryogenic/extreme temperatures, and model engine parity) passing 100%.
+- **Model Card**: [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md) (Mitchell et al. compliant specification)
+- **Data Card**: [`docs/DATA_CARD.md`](docs/DATA_CARD.md) (Gebru et al. compliant dataset governance)
+- **Model Registry**: [`models/registry.json`](models/registry.json) (Cryptographic SHA-256 hashes & conformal widths)
+- **Automated Test Suite**: `tests/` verifying schema contracts, physical invariants, conformal coverage, zero heat leakage, and the HRC route regression harness. The two zero-leakage tests skip on a clone without the private cleaned tables; everything else runs in CI.
+- **Hostile QA Battery**: 34 adversarial test cases (boundary fuzzing, string types, cryogenic/extreme temperatures, and model engine parity) run locally against the deployed build; they are not shipped in this public mirror.
 
 ---
 
@@ -112,8 +122,9 @@ pip install -r requirements.txt
 streamlit run app/streamlit_app.py
 ```
 
-Deployed entry point is `app/streamlit_app.py`. The repository is public; the campaign sheets and the
-specification workbook are not.
+Deployed entry point is `app/streamlit_app.py`. The repository is public; the campaign sheets
+(`Plate/csv/`, `HRC/csv/`) are not. The specification workbook **is** published in
+`specification-list/` because the Specification check tab reads it at runtime.
 
 ---
 
