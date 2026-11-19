@@ -4,12 +4,21 @@ Deploy once from anywhere, with Modal credentials in the environment::
 
     modal deploy modal_app.py
 
-App name: ``hrcm-compute``. Three functions, each invoked only by an explicit user action
-in the Streamlit UI ("Calculate recipe", "Calculate scores", "Calculate capability"):
+App name: ``hrcm-compute``. Five functions, each invoked only by an explicit user action in
+the Streamlit UI ("Calculate", "Calculate scores", "Calculate capability"):
 
     recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
                   finish_range, cooling, headers_range, ct_range, k)
         -> the dict ``optimizer.run_recipe_search`` returns
+
+    pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range,
+                    finish_range, cooling, headers_range, ct_range, k, step, max_points)
+        -> the dict ``optimizer.pareto_frontier`` returns
+
+    robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range,
+                  finish_range, cooling, headers_range, ct_range, k, step, alpha,
+                  n_samples, seed, n_candidates)
+        -> the dict ``optimizer.robust_recipe`` returns
 
     score_batch(mill, payload, engine)
         -> scored frame as parquet bytes (payload is the uploaded frame as parquet bytes)
@@ -22,7 +31,7 @@ The image is the repository's own requirements.txt plus the repository itself, m
 /root/repo, so the remote code is byte-identical to the checkout that was deployed: the
 same feature modules, the same model artifacts and the same selection math. Nothing in
 this file runs at import time beyond declaring the app and the image; the containers only
-start when one of the three functions is called.
+start when one of the five functions is called.
 
 Do not put credentials in this file or anywhere in the repository. The Modal client reads
 MODAL_TOKEN_ID / MODAL_TOKEN_SECRET from the environment of the deploying machine, and the
@@ -92,6 +101,34 @@ def recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
     return optimizer.run_recipe_search(
         mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
         cooling=cooling, headers_range=headers_range, ct_range=ct_range, k=k)
+
+
+@app.function(image=image, cpu=2.0, memory=2048, timeout=600, scaledown_window=600)
+def pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range,
+                    finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                    k=1.0, step=10.0, max_points=40):
+    """The non-dominated recipe frontier, running the local frontier math verbatim."""
+    _enter_repo()
+    import optimizer  # noqa: PLC0415 - imported after sys.path is set up
+
+    return optimizer.pareto_frontier(
+        mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+        cooling=cooling, headers_range=headers_range, ct_range=ct_range, k=k, step=step,
+        max_points=max_points)
+
+
+@app.function(image=image, cpu=2.0, memory=2048, timeout=600, scaledown_window=600)
+def robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range,
+                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  k=1.0, step=10.0, alpha=0.10, n_samples=200, seed=42, n_candidates=40):
+    """The robust (Monte-Carlo CVaR) recipe, running the local study math verbatim."""
+    _enter_repo()
+    import optimizer  # noqa: PLC0415 - imported after sys.path is set up
+
+    return optimizer.robust_recipe(
+        mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+        cooling=cooling, headers_range=headers_range, ct_range=ct_range, k=k, step=step,
+        alpha=alpha, n_samples=n_samples, seed=seed, n_candidates=n_candidates)
 
 
 @app.function(image=image, cpu=2.0, memory=2048, timeout=600, scaledown_window=600)

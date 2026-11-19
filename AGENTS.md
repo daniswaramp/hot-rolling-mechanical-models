@@ -54,9 +54,10 @@ Whenever modifying or extending this codebase, maintain these design constraints
    - Heavy training, hyperparameter optimization, and 100-iteration bootstrapping must **NEVER run on the local machine**.
    - Cloud execution is handled via `python -m modal run <module>\script\ml\modal_runner.py` (spawning remote Debian containers with 4-8 vCPUs and up to 16 GB RAM).
    - Local fallback is disabled to protect local CPU/RAM.
-   - The **app's** heavy calculations (recipe search, batch scoring, capability study) take a second,
+   - The **app's** heavy calculations (recipe search, Pareto frontier, robust CVaR study, batch
+     scoring, capability study) take a second,
      separate Modal path: `modal_app.py` deploys the app `hrcm-compute`, `app\remote_compute.py`
-     dispatches to it. Those calls are spent only from an explicit button press ("Calculate recipe",
+     dispatches to it. Those calls are spent only from an explicit button press ("Calculate",
      "Calculate scores", "Calculate capability") — never on a rerun and never at boot — and they fall
      back to local compute whenever the package, the credentials or the deployed app is missing, so
      the public demo keeps working. Per-keystroke simulator predictions stay local.
@@ -112,8 +113,8 @@ Whenever modifying or extending this codebase, maintain these design constraints
 | `streamlit_app.py` | Every view: simulator, specification check, inverse optimizer tab, response surface (1D slice / 2D contour / 3D surface), capability, batch upload, refit, diagnostics. Also the scoring layer (`score_frame`, `predict_champion`, `predict_selected_engine`). |
 | `model_loader.py` | Loads the per-target joblib bundles, reads the conformal and bootstrap reports, computes the physical indicators, and applies the plate normalising coupling. |
 | `spec_checker.py` | Reads `specification-list\SPECIFICATION LIST.xlsx`, matches a spec/grade/thickness tier, and evaluates gauge, chemistry and mechanical compliance. |
-| `optimizer.py` | Inverse setpoint solver. Sweeps a discretised schedule inside the permitted window, keeps candidates that clear the spec at the 95 % conformal bound, and ranks the survivors with one or more objectives. |
-| `remote_compute.py` | Dispatches the three heavy calculations (recipe search, batch scoring, capability study) to the Modal app `hrcm-compute` when it is configured, and to this process otherwise. Imports `modal` lazily; every call returns `(result, source)` so the UI can caption where the numbers came from. Deployed by the root `modal_app.py`. |
+| `optimizer.py` | Inverse setpoint solver. Sweeps a discretised schedule inside the permitted window, keeps candidates that clear the spec at the 95 % conformal bound, and ranks the survivors with one or more objectives. One form drives three calculations behind one "Calculate" button: **best recipe** (`run_recipe_search`/`select_recipe`), the **Pareto frontier** (`pareto_frontier`/`pareto_rows`/`nondominated_mask`, non-dominated over CE_IIW, cooling intensity and comfort) and **robust (CVaR)** (`robust_recipe`, a Monte-Carlo re-rank of the shortlist over the historical aiming noise). All three share `_scored_candidates`, so they rank the same grid. |
+| `remote_compute.py` | Dispatches the five heavy calculations (recipe search, Pareto frontier, robust CVaR, batch scoring, capability study) to the Modal app `hrcm-compute` when it is configured, and to this process otherwise. Imports `modal` lazily; every call returns `(result, source)` so the UI can caption where the numbers came from. Deployed by the root `modal_app.py`. |
 | `constraints.py` | Permitted temperature window (seeded from the trained P01-P99 envelope) plus the CE_IIW and P_cm caps. Shared by the optimizer and the surface. |
 | `training_stats.py` | Sidebar statistics. Reads the cleaned CSV when it is on disk and `models\training_stats.json` when it is not. |
 | `build_stats_bundle.py` | Regenerates that bundle from both cleaned tables. Run it after any ETL refresh. |
@@ -124,6 +125,23 @@ The inverse optimizer exposes these objectives, filtered per route: minimum CE_I
 minimum alloy cost, maximum safety margin, minimum TS overshoot, maximise finish temperature,
 maximise entry temperature, maximise post-laminar temperature (plate), maximise coiling temperature
 (coil). Several can be selected at once; each is normalised across the compliant set and averaged.
+
+The Inverse Optimizer tab itself offers three calculations, all gated behind the one form submit
+and all replayed from `st.session_state["opt_result_<mill>"]` on later reruns:
+
+- **Best recipe** — `run_recipe_search` scores the entry × finish × cooling × chemistry grid and
+  `select_recipe` picks the hottest feasible schedule (margin ≥ k × 95 % interval, overpower
+  deprioritised), with a rejection ladder.
+- **Pareto frontier** — `pareto_frontier` keeps the same margin-feasible pool and returns the
+  non-dominated set over minimum CE_IIW, minimum cooling intensity (headers; air = 0) and maximum
+  comfort (the deepest margin in units of its conformal interval), as a table, a Plotly scatter and
+  a CSV. The filter is `nondominated_mask`, a sort-and-sweep that collapses the first two
+  objectives and prunes a 2-D staircase, so it stays fast on a 120k-row grid.
+- **Robust (CVaR)** — `robust_recipe` takes the top 40 ranked candidates, draws 200 Monte-Carlo
+  perturbations each (entry/finish ±20 °C, headers ±1, chemistry ±10 % of the grade band width or
+  ±5 % relative, gauge ±1 spec step) into one long frame, scores it in a single pass, and re-ranks
+  on the mean of the worst 10 % of the per-sample worst-property margin (CVaR), reporting
+  P(fail at k = 0) and the deterministic pick it beat.
 
 The Mermaid chart below visualizes the entire system topology, from raw Excel ingestion to cloud training and local report delivery:
 

@@ -6,6 +6,7 @@ at minimum alloy cost and Carbon Equivalent (CE_IIW), with split-conformal 95% s
 
 import os
 import json
+import sys
 import time
 import numpy as np
 import pandas as pd
@@ -551,6 +552,17 @@ ENTRY_COL = {"Plate": "FM_Temp_Before_Rolling", "HRC": "Temp_Transfer_Bar_C"}
 CT_COL = {"Plate": None, "HRC": "Temp_CT_Top_C"}
 FINISH_SHORT = {"Plate": "FRT", "HRC": "FT"}
 
+# The Inverse Optimizer's three calculations. One form, one submit button, three answers:
+# "best" keeps the hottest-feasible search, "pareto" returns the non-dominated trade-off
+# frontier, "robust" re-ranks a shortlist on a Monte-Carlo CVaR. The stored key is what a
+# session-state outcome carries so a rerun replays the renderer the result belongs to.
+BEST_MODE = "Best recipe"
+PARETO_MODE = "Pareto frontier"
+ROBUST_MODE = "Robust (CVaR)"
+CALCULATION_MODES = (BEST_MODE, PARETO_MODE, ROBUST_MODE)
+CALC_MODE_KEYS = {BEST_MODE: "best", PARETO_MODE: "pareto", ROBUST_MODE: "robust"}
+CVAR_ALPHA_DEFAULT = 0.10
+
 
 def interval_half_widths(mill, keys):
     """95% conformal interval half-width per target key.
@@ -715,21 +727,14 @@ def _temp_grid(lo, hi, step=10.0):
     return [round(v, 1) for v in np.arange(lo, hi + step / 2.0, step)]
 
 
-def run_recipe_search(mill, raw, thickness, requirements, chemistries,
-                      entry_range, finish_range, cooling="air", headers_range=(4, 12),
-                      ct_range=None, k=1.0, step=10.0):
-    """Hottest-feasible-first recipe search. Pure: no Streamlit calls, safe to drive from tests.
+def _schedule_grid(mill, raw, thickness, chemistries, entry_range, finish_range,
+                   cooling="air", headers_range=(4, 12), ct_range=None, step=10.0):
+    """Build the entry × finish × cooling × chemistry candidate grid, before any scoring.
 
-    Builds the vectorised candidate grid entry × finish × cooling × chemistry (temperature
-    step `step`, default 10 °C so ±20 °C aims stay representable), scores it through the
-    mill feature module and the shared scoring plumbing, then hands it to select_recipe.
+    Pure and model-free: every calculation mode sweeps this same grid, so the recipe search,
+    the Pareto frontier and the robust study describe one search space rather than three.
+    Returns (cand_df, error_message); cand_df is None when the bands leave nothing to sweep.
     """
-    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
-    mech_keys = sorted({r["key"] for r in requirements if r.get("kind") == "mech"})
-    if not mech_keys:
-        return {"error": "no verifiable mechanical requirements for this specification tier",
-                "chosen": None, "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
-
     base = dict(raw)
     if mill == "Plate":
         plate_t = max(float(base.get("Plate_T_mm", thickness)), 1.0)
@@ -741,8 +746,7 @@ def run_recipe_search(mill, raw, thickness, requirements, chemistries,
     entry_grid = _temp_grid(*entry_range, step)
     finish_grid = _temp_grid(*finish_range, step)
     if not entry_grid or not finish_grid:
-        return {"error": "empty temperature range", "chosen": None, "ladder": [],
-                "rejected": [], "candidates_df": pd.DataFrame()}
+        return None, "empty temperature range"
     ct_grid = _temp_grid(*ct_range, step) if (mill == "HRC" and ct_range) else [None]
 
     if mill == "Plate":
@@ -779,8 +783,22 @@ def run_recipe_search(mill, raw, thickness, requirements, chemistries,
                                 row["Temp_CT_Bot_C"] = ct
                         row["_chemistry"] = chem_label
                         rows.append(row)
-    cand_df = pd.DataFrame(rows)
+    return pd.DataFrame(rows), None
 
+
+def _score_schedule_frame(mill, cand_df, mech_keys):
+    """Score one frame of schedules: the shared tail every calculation mode runs through.
+
+    Fills the chemistry blanks the mill feature modules expect, engineers the features,
+    predicts every mechanical requirement, applies the Plate normalising coupling, then
+    appends the deterministic indicators (CE_IIW, P_cm, microalloy total) and the
+    applicability-domain flag. Decorates cand_df in place and returns it, so the candidate
+    frame a mode ranks is the very frame that was scored. Returns (None, message) when the
+    feature module or the models cannot deliver.
+
+    The Monte-Carlo passes reuse this unchanged: a frame of jittered schedules is scored by
+    exactly the plumbing a single deterministic schedule goes through.
+    """
     # The mill feature modules expect a complete chemistry row; fill the blanks rather
     # than letting the module decide what a missing element means.
     for el in ("C", "Si", "Mn", "P", "S", "Nb", "Cu", "Cr", "Ni", "Mo", "V", "Al", "Ti", "N", "B"):
@@ -795,22 +813,18 @@ def run_recipe_search(mill, raw, thickness, requirements, chemistries,
     try:
         if mill == "Plate":
             if ml.engineer_plate_features is None:
-                return {"error": "Plate feature module unavailable", "chosen": None,
-                        "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
+                return None, "Plate feature module unavailable"
             X_all = ml.engineer_plate_features(cand_df)
         else:
             if ml.engineer_hrc_features is None:
-                return {"error": "HRC feature module unavailable", "chosen": None,
-                        "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
+                return None, "HRC feature module unavailable"
             X_all, _ = ml.engineer_hrc_features(cand_df, is_train=False)
     except Exception as exc:  # noqa: BLE001
-        return {"error": f"feature engineering failed: {exc}", "chosen": None, "ladder": [],
-                "rejected": [], "candidates_df": pd.DataFrame()}
+        return None, f"feature engineering failed: {exc}"
 
     preds = score_targets(mill, X_all, mech_keys)
     if preds is None:
-        return {"error": "no model could score the candidate grid", "chosen": None,
-                "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
+        return None, "no model could score the candidate grid"
     for key in mech_keys:
         cand_df[f"pred_{key}"] = np.round(preds[key], 2)
 
@@ -839,12 +853,56 @@ def run_recipe_search(mill, raw, thickness, requirements, chemistries,
         cand_df["Chem_B"]), 4)
     cand_df["microalloy_total"] = (cand_df["Chem_Nb"] + cand_df["Chem_V"] + cand_df["Chem_Ti"]).round(4)
 
-    ood_keys = [entry_col, finish_col]
+    ood_keys = [ENTRY_COL[mill], FINISH_COL[mill]]
     if mill == "Plate":
         ood_keys += ["ACC_Laminar_Header", "ACC_Temp_Post_Laminar"]
     else:
         ood_keys += ["Temp_CT_Top_C", "Temp_CT_Bot_C"]
     cand_df["ood"] = ood_mask(mill, cand_df, ood_keys)
+    return cand_df, None
+
+
+def _scored_candidates(mill, raw, thickness, requirements, chemistries, entry_range,
+                       finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                       step=10.0):
+    """Grid + scoring builder shared by the recipe search, the Pareto frontier and the
+    robust study: the one place the search space and its predictions are defined.
+
+    Returns (cand_df, mech_keys, error_message). cand_df is None, and the message says why,
+    when the search space or the models are unusable; mech_keys lists the mechanical targets
+    that were scored (`pred_<key>` columns on the frame).
+    """
+    mech_keys = sorted({r["key"] for r in requirements if r.get("kind") == "mech"})
+    if not mech_keys:
+        return None, [], "no verifiable mechanical requirements for this specification tier"
+    cand_df, error = _schedule_grid(mill, raw, thickness, chemistries, entry_range,
+                                    finish_range, cooling=cooling,
+                                    headers_range=headers_range, ct_range=ct_range, step=step)
+    if cand_df is None:
+        return None, mech_keys, error
+    cand_df, error = _score_schedule_frame(mill, cand_df, mech_keys)
+    if cand_df is None:
+        return None, mech_keys, error
+    return cand_df, mech_keys, None
+
+
+def run_recipe_search(mill, raw, thickness, requirements, chemistries,
+                      entry_range, finish_range, cooling="air", headers_range=(4, 12),
+                      ct_range=None, k=1.0, step=10.0):
+    """Hottest-feasible-first recipe search. Pure: no Streamlit calls, safe to drive from tests.
+
+    Builds the vectorised candidate grid entry × finish × cooling × chemistry (temperature
+    step `step`, default 10 °C so ±20 °C aims stay representable), scores it through the
+    mill feature module and the shared scoring plumbing (_scored_candidates), then hands it
+    to select_recipe. The grid and its scoring live in that shared builder, so this search,
+    the Pareto frontier and the robust study all rank the same candidate pool.
+    """
+    cand_df, mech_keys, error = _scored_candidates(
+        mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+        cooling=cooling, headers_range=headers_range, ct_range=ct_range, step=step)
+    if cand_df is None:
+        return {"error": error, "chosen": None, "ladder": [], "rejected": [],
+                "candidates_df": pd.DataFrame()}
 
     chosen, ladder, rejected = select_recipe(cand_df, requirements, k=k, mill=mill)
     return {
@@ -858,6 +916,121 @@ def run_recipe_search(mill, raw, thickness, requirements, chemistries,
         "requirements": requirements,
         "half_widths": interval_half_widths(mill, mech_keys),
     }
+
+
+def requirement_margins(df, requirements, k=1.0):
+    """Add one margin_<key>|<direction> column per verifiable requirement; flag feasibility.
+
+    margin = pred - required for a min-type limit and required - pred for a max-type
+    ceiling. A candidate is feasible when every margin clears k × that requirement's 95 %
+    conformal half width (half width 0 for the deterministic chemistry ceilings), which is
+    the rule select_recipe, the Pareto frontier and the robust study all apply.
+
+    `df` is decorated in place. Returns (active, feasible): the (rid, req) pairs that could
+    be scored against the frame, and the boolean Series of the margin rule — ([] , None) when
+    not one requirement could be scored.
+    """
+    active = []
+    for req in requirements:
+        col = f"pred_{req['key']}" if req.get("kind") == "mech" else req["key"]
+        if col not in df.columns:
+            continue
+        rid = f"{req['key']}|{req['direction']}"
+        values = pd.to_numeric(df[col], errors="coerce")
+        if req["direction"] == "min":
+            df[f"margin_{rid}"] = values - float(req["required"])
+        else:
+            df[f"margin_{rid}"] = float(req["required"]) - values
+        active.append((rid, req))
+
+    if not active:
+        return [], None
+
+    feasible = pd.Series(True, index=df.index)
+    for rid, req in active:
+        need = float(k) * float(req.get("half", 0.0))
+        feasible &= df[f"margin_{rid}"] >= need - 1e-9
+    return active, feasible
+
+
+def comfort_margins(df, active):
+    """The deepest normalised margin each candidate keeps, in units of its 95 % interval.
+
+    Only requirements that carry a conformal half width are normalised. A deterministic
+    chemistry ceiling (CE_IIW, P_cm, S, P) has no interval to divide by, and its raw margin
+    is an order of magnitude smaller than an interval ratio, so folding the two together
+    would let the S/P ceiling alone decide a comfort objective. When no requirement carries
+    an interval the raw margins are used instead.
+
+    Returns (ratios, worst): ratios holds one column per normalised requirement, worst is
+    the row-wise minimum — the "thin end" of the margin the comfort objective reads.
+    """
+    parts = {}
+    for rid, req in active:
+        half = float(req.get("half", 0.0))
+        if req.get("kind") != "mech" or half <= 0.0:
+            continue
+        parts[rid] = df[f"margin_{rid}"] / half
+    if not parts:
+        parts = {rid: df[f"margin_{rid}"] for rid, _req in active}
+    ratios = pd.DataFrame(parts, index=df.index)
+    return ratios, ratios.min(axis=1)
+
+
+def _ranked_candidates(df, requirements, k=1.0, mill="Plate"):
+    """The margin-feasible candidates of a scored frame, in select_recipe's ranking order.
+
+    `df` is decorated in place with the margin, overpower and feasibility columns the
+    ranking reads. Returns (ranked, active, extrapolated): ranked is the ordered frame of
+    feasible candidates (empty when none is feasible), active the scored requirements, and
+    extrapolated says whether the ranking had to fall back on candidates outside the
+    historical envelope because no in-domain candidate was feasible.
+    """
+    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
+    active, feasible = requirement_margins(df, requirements, k)
+    if not active:
+        return df.iloc[0:0], [], False
+
+    for col in ("ce_iiw", "microalloy_total"):
+        if col not in df.columns:
+            df[col] = 0.0
+    if mill == "Plate" and "ACC_Headers_n" not in df.columns:
+        df["ACC_Headers_n"] = 0.0
+
+    over_parts = []
+    for rid, req in active:
+        half = float(req.get("half", 0.0))
+        if req.get("kind") != "mech" or half <= 0.0:
+            continue  # deterministic chemistry ceilings carry no interval and no overpower
+        cap = OVERPOWER_CAP_INTERVALS * half
+        over_parts.append(np.maximum(0.0, df[f"margin_{rid}"] - cap) / half)
+    df["overpower"] = (pd.concat(over_parts, axis=1).mean(axis=1) if over_parts
+                       else pd.Series(0.0, index=df.index))
+
+    ood = df["ood"].astype(bool) if "ood" in df.columns else pd.Series(False, index=df.index)
+
+    pool = df[feasible & ~ood]
+    extrapolated = False
+    if pool.empty:
+        pool = df[feasible]
+        extrapolated = not pool.empty
+    if pool.empty:
+        return df.iloc[0:0], active, False
+
+    sort_cols = ["overpower", finish_col, entry_col]
+    ascending = [True, False, False]
+    if mill == "Plate":
+        sort_cols.append("ACC_Headers_n")
+        ascending.append(True)
+    else:
+        ct_col = CT_COL[mill]
+        if ct_col and ct_col in pool.columns:
+            sort_cols.append(ct_col)
+            ascending.append(False)
+    sort_cols += ["ce_iiw", "microalloy_total"]
+    ascending += [True, True]
+
+    return pool.sort_values(sort_cols, ascending=ascending, kind="mergesort"), active, extrapolated
 
 
 def select_recipe(candidates_df, requirements, k=1.0, mill="Plate"):
@@ -882,74 +1055,22 @@ def select_recipe(candidates_df, requirements, k=1.0, mill="Plate"):
     selection unless nothing else is feasible; the chosen row then carries _extrapolated
     so the caller can warn.
 
+    The margin rule and the ranking itself live in requirement_margins and
+    _ranked_candidates, which the Pareto frontier and the robust study reuse.
+
     Returns (chosen_row_dict_or_None, ladder_rows, rejected_notes).
     """
-    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
+    finish_col = FINISH_COL[mill]
     df = candidates_df.copy()
     if df.empty:
         return None, [], ["no candidates were evaluated"]
 
-    active = []
-    for req in requirements:
-        col = f"pred_{req['key']}" if req.get("kind") == "mech" else req["key"]
-        if col not in df.columns:
-            continue
-        rid = f"{req['key']}|{req['direction']}"
-        values = pd.to_numeric(df[col], errors="coerce")
-        if req["direction"] == "min":
-            df[f"margin_{rid}"] = values - float(req["required"])
-        else:
-            df[f"margin_{rid}"] = float(req["required"]) - values
-        active.append((rid, req))
-
+    ranked, active, extrapolated = _ranked_candidates(df, requirements, k, mill)
     if not active:
         return None, [], ["no requirement could be scored against the candidates"]
-
-    for col in ("ce_iiw", "microalloy_total"):
-        if col not in df.columns:
-            df[col] = 0.0
-    if mill == "Plate" and "ACC_Headers_n" not in df.columns:
-        df["ACC_Headers_n"] = 0.0
-
-    feasible = pd.Series(True, index=df.index)
-    for rid, req in active:
-        need = float(k) * float(req.get("half", 0.0))
-        feasible &= df[f"margin_{rid}"] >= need - 1e-9
-
-    over_parts = []
-    for rid, req in active:
-        half = float(req.get("half", 0.0))
-        if req.get("kind") != "mech" or half <= 0.0:
-            continue  # deterministic chemistry ceilings carry no interval and no overpower
-        cap = OVERPOWER_CAP_INTERVALS * half
-        over_parts.append(np.maximum(0.0, df[f"margin_{rid}"] - cap) / half)
-    df["overpower"] = (pd.concat(over_parts, axis=1).mean(axis=1) if over_parts
-                       else pd.Series(0.0, index=df.index))
-
-    ood = df["ood"].astype(bool) if "ood" in df.columns else pd.Series(False, index=df.index)
-
-    pool = df[feasible & ~ood]
-    extrapolated = False
-    if pool.empty:
-        pool = df[feasible]
-        extrapolated = not pool.empty
-    if pool.empty:
+    if ranked.empty:
         return None, [], _rejected_band_notes(df, active, k, mill, finish_col)
 
-    sort_cols = ["overpower", finish_col, entry_col]
-    ascending = [True, False, False]
-    if mill == "Plate":
-        sort_cols.append("ACC_Headers_n")
-        ascending.append(True)
-    else:
-        ct_col = CT_COL[mill]
-        if ct_col and ct_col in pool.columns:
-            sort_cols.append(ct_col)
-            ascending.append(False)
-    sort_cols += ["ce_iiw", "microalloy_total"]
-    ascending += [True, True]
-
-    ranked = pool.sort_values(sort_cols, ascending=ascending, kind="mergesort")
     chosen = ranked.iloc[0].to_dict()
     chosen["_extrapolated"] = bool(extrapolated)
     chosen["_k"] = float(k)
@@ -999,58 +1120,498 @@ def _rejected_band_notes(df, active, k, mill, finish_col, max_bands=3):
     return notes
 
 
-def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elapsed,
-                             source: str = "local"):
+# ---------------------------------------------------------------------------
+# Pareto frontier: cheapest / least cooling / most comfortable, non-dominated
+# ---------------------------------------------------------------------------
+
+def nondominated_mask(f1, f2, f3):
+    """Boolean mask of the non-dominated rows of three objectives, all "smaller is better".
+
+    Vectorised sort-and-sweep, safe on a full candidate grid (~120k rows). Rows that share
+    the first two objectives are collapsed first, because the leanest third objective speaks
+    for the pair; what remains is grouped by the first objective and, inside a group, ordered
+    by the second, so a running minimum of the third decides dominance. Across groups only
+    the surviving 2-D staircase of the strictly leaner groups can dominate. Cost is the two
+    sorts plus a sweep whose width is the surviving staircase, not the row count.
     """
-    Renders one solved (or failed) optimizer outcome: the extrapolation warning, recipe
-    card, alternative-recipe ladder, rejection notes and the CSV download.
+    f1 = np.asarray(f1, dtype=float).ravel()
+    f2 = np.asarray(f2, dtype=float).ravel()
+    f3 = np.asarray(f3, dtype=float).ravel()
+    n = int(min(f1.size, f2.size, f3.size))
+    keep = np.zeros(n, dtype=bool)
+    if n == 0:
+        return keep
+    f1, f2, f3 = f1[:n], f2[:n], f3[:n]
+    # a non-finite objective can never win: push it to +inf so it dominates nothing
+    f1 = np.where(np.isfinite(f1), f1, np.inf)
+    f2 = np.where(np.isfinite(f2), f2, np.inf)
+    f3 = np.where(np.isfinite(f3), f3, np.inf)
 
-    It renders from the search result alone and never recomputes, so the submit path and a
-    plain rerun that replays st.session_state[f"opt_result_{mill}"] produce identical output.
-    The failure states (res["error"] and chosen is None) are handled here too, so a stored
-    failure replays exactly as it was reported.
+    order = np.lexsort((f3, f2, f1))  # objective 1, then 2, then 3
+    a1, a2, a3 = f1[order], f2[order], f3[order]
 
-    ``elapsed`` is the short elapsed string ("812 ms"); a float number of seconds is accepted.
-    The few scalars the card needs that are not part of the search result (spec name, grade,
-    thickness, rolling type) travel in res["_meta"], which keeps this signature free of the
-    widget state.
+    # collapse identical (objective 1, objective 2) pairs onto their best third objective
+    rep = np.ones(n, dtype=bool)
+    rep[1:] = ~((a1[1:] == a1[:-1]) & (a2[1:] == a2[:-1]))
+    u1, u2, u3 = a1[rep], a2[rep], a3[rep]
 
-    ``source`` is where the search actually ran ("modal" or "local"): it is captioned under
-    the recipe card so the operator can see whether those numbers came off Modal.
+    alive = np.zeros(u1.size, dtype=bool)
+    starts = np.flatnonzero(np.r_[True, u1[1:] != u1[:-1]])
+    ends = np.r_[starts[1:], u1.size]
+    stair2 = np.empty(0, dtype=float)
+    stair3 = np.empty(0, dtype=float)
+
+    def _running_min_exclusive(values):
+        out = np.full(values.size, np.inf, dtype=float)
+        if values.size > 1:
+            out[1:] = np.minimum.accumulate(values)[:-1]
+        return out
+
+    for start, end in zip(starts, ends):
+        g2, g3 = u2[start:end], u3[start:end]
+        # inside one first-objective group every earlier row has an equal or smaller second
+        # objective, so a row survives only if it beats the running third-objective minimum
+        idx = np.flatnonzero(g3 < _running_min_exclusive(g3))
+        if idx.size == 0:
+            continue
+        if stair2.size:
+            dominated = np.zeros(idx.size, dtype=bool)
+            chunk = max(1, int(1_000_000 // max(stair2.size, 1)))
+            for begin in range(0, idx.size, chunk):
+                block = idx[begin:begin + chunk]
+                dominated[begin:begin + block.size] = (
+                    (stair2[None, :] <= g2[block, None])
+                    & (stair3[None, :] <= g3[block, None])).any(axis=1)
+            idx = idx[~dominated]
+            if idx.size == 0:
+                continue
+        alive[start + idx] = True
+        # fold the survivors into the 2-D staircase and re-prune it
+        m2 = np.concatenate([stair2, g2[idx]])
+        m3 = np.concatenate([stair3, g3[idx]])
+        reorder = np.lexsort((m3, m2))
+        m2, m3 = m2[reorder], m3[reorder]
+        stair_alive = m3 < _running_min_exclusive(m3)
+        stair2, stair3 = m2[stair_alive], m3[stair_alive]
+
+    keep[order[rep][alive]] = True
+    return keep
+
+
+def pareto_rows(candidates_df, requirements, k=1.0, mill="Plate", max_points=40):
+    """Non-dominated frontier of an already scored candidate frame (pure, no Streamlit).
+
+    Three objectives, each read as "smaller is better" once its direction is applied:
+
+      1. CE_IIW             — the leanest weldable chemistry
+      2. cooling intensity  — laminar headers in play (air = 0; the Steckel table has none)
+      3. −minimum margin    — comfort, i.e. the deepest normalised margin the row keeps
+
+    Only candidates that clear the same margin rule as select_recipe take part (every
+    required property margin >= k × its 95 % conformal half width): a frontier over
+    infeasible schedules would be a menu of scrap. Rows come back lean-first, then
+    hotter-first, cut to max_points.
+
+    Returns {"frontier", "n_feasible", "n_evaluated", "n_frontier", "n_truncated"}.
+    """
+    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
+    df = candidates_df.copy()
+    n_evaluated = int(len(df))
+    empty = {"frontier": [], "n_feasible": 0, "n_evaluated": n_evaluated,
+             "n_frontier": 0, "n_truncated": False}
+    if df.empty:
+        return empty
+
+    active, feasible = requirement_margins(df, requirements, k)
+    if not active or feasible is None:
+        return empty
+    feasible = feasible.fillna(False)
+    if not bool(feasible.any()):
+        return empty
+
+    ratios, worst = comfort_margins(df, active)
+    headers = (pd.to_numeric(df["ACC_Headers_n"], errors="coerce").fillna(0.0)
+               if "ACC_Headers_n" in df.columns
+               else pd.Series(0.0, index=df.index))
+    ce = (pd.to_numeric(df["ce_iiw"], errors="coerce") if "ce_iiw" in df.columns
+          else pd.Series(0.0, index=df.index))
+
+    # the filter only ever sees the feasible subset, in (CE_IIW, headers, -comfort) space
+    subset = df[feasible]
+    mask = nondominated_mask(ce[feasible].to_numpy(dtype=float),
+                             headers[feasible].to_numpy(dtype=float),
+                             -worst[feasible].to_numpy(dtype=float))
+    picked = subset.loc[mask]
+    if picked.empty:
+        return empty
+
+    records = []
+    for idx, row in picked.iterrows():
+        margins = {rid: float(row[f"margin_{rid}"]) for rid, _req in active}
+        records.append({
+            "entry": float(row[entry_col]),
+            "finish": float(row[finish_col]),
+            "ct": (float(row[CT_COL[mill]])
+                   if CT_COL.get(mill) and CT_COL[mill] in df.columns else None),
+            "headers": float(headers.loc[idx]),
+            "chemistry": str(row.get("_chemistry", "")),
+            "ce_iiw": float(row.get("ce_iiw", 0.0) or 0.0),
+            "microalloy_total": float(row.get("microalloy_total", 0.0) or 0.0),
+            "min_margin_interval": float(worst.loc[idx]),
+            "min_margin_raw": float(min(margins.values())) if margins else float("nan"),
+            "margins": margins,
+            "margin_ratios": {rid: float(ratios.loc[idx, rid]) for rid in ratios.columns},
+            "chem_c": float(row.get("Chem_C", 0.0) or 0.0),
+            "chem_mn": float(row.get("Chem_Mn", 0.0) or 0.0),
+            "chem_nb": float(row.get("Chem_Nb", 0.0) or 0.0),
+            "ood": bool(row.get("ood", False)),
+        })
+
+    frontier = pd.DataFrame(records).sort_values(
+        ["ce_iiw", "finish", "entry"], ascending=[True, False, False], kind="mergesort")
+    n_frontier = int(len(frontier))
+    cut = max(1, int(max_points))
+    return {"frontier": frontier.head(cut).to_dict("records"),
+            "n_feasible": int(feasible.sum()),
+            "n_evaluated": n_evaluated,
+            "n_frontier": n_frontier,
+            "n_truncated": bool(n_frontier > cut)}
+
+
+def _mode_meta(mill, thickness, k, step, cooling, headers_range, entry_range, finish_range,
+               ct_range, chemistries):
+    """The scalars a Pareto or robust result carries so it can describe itself on replay."""
+    return {
+        "mill": mill,
+        "thickness": float(thickness),
+        "k": float(k),
+        "step": float(step),
+        "cooling": str(cooling),
+        "headers_range": (int(headers_range[0]), int(headers_range[1])),
+        "entry_range": (float(entry_range[0]), float(entry_range[1])),
+        "finish_range": (float(finish_range[0]), float(finish_range[1])),
+        "ct_range": (float(ct_range[0]), float(ct_range[1])) if ct_range else None,
+        "chemistries": [str(name) for name, _chem in (chemistries or [])],
+        "entry_col": ENTRY_COL[mill],
+        "finish_col": FINISH_COL[mill],
+    }
+
+
+def pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range,
+                    finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                    k=1.0, step=10.0, max_points=40):
+    """The non-dominated recipe frontier. Pure: no Streamlit calls, safe to drive from tests.
+
+    Scores the same candidate grid run_recipe_search scores (through the shared
+    _scored_candidates builder), keeps the candidates that clear the same margin rule, and
+    returns the Pareto set over minimum CE_IIW, minimum cooling intensity (laminar headers,
+    air = 0) and maximum comfort (the deepest margin kept, in units of the 95 % interval).
+
+    Each frontier row carries its entry and finish setpoints, header count, chemistry name,
+    CE_IIW, microalloy total, the comfort margin, the raw and normalised margin of every
+    required property and the applicability-domain flag, so the UI can tabulate, plot and
+    export it without another model call.
+    """
+    meta = _mode_meta(mill, thickness, k, step, cooling, headers_range, entry_range,
+                      finish_range, ct_range, chemistries)
+    cand_df, _mech_keys, error = _scored_candidates(
+        mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+        cooling=cooling, headers_range=headers_range, ct_range=ct_range, step=step)
+    if cand_df is None:
+        return {"error": error, "frontier": [], "n_feasible": 0, "n_evaluated": 0,
+                "n_frontier": 0, "n_truncated": False, "meta": meta}
+
+    rows = pareto_rows(cand_df, requirements, k=k, mill=mill, max_points=max_points)
+    meta.update({"objectives": ["min CE_IIW", "min cooling intensity (headers; air = 0)",
+                                "max min-margin (comfort, × 95% interval)"],
+                 "frontier_size": int(rows["n_frontier"]),
+                 "shown": int(len(rows["frontier"]))})
+    return {"error": None, **rows, "meta": meta}
+
+
+# ---------------------------------------------------------------------------
+# Robust recipe: deterministic ranking re-ranked on Monte-Carlo CVaR
+# ---------------------------------------------------------------------------
+
+# Monte-Carlo noise model. The temperature aims match the ±20 °C aiming band the recipe card
+# already quotes; the chemistry band is a fraction of the grade's own element band width.
+ENTRY_AIM_C = 20.0
+FINISH_AIM_C = 20.0
+CHEM_BAND_FRACTION = 0.10
+CHEM_RELATIVE_FRACTION = 0.05
+
+# Gauge row of the app's input spec table (lo, hi, step), used only for the Monte-Carlo gauge
+# band on the paths that run without streamlit_app loaded (tests, the Modal container).
+GAUGE_SPEC = {"Plate": (6.0, 120.0, 0.5), "HRC": (1.8, 16.0, 0.1)}
+
+
+def _gauge_spec(mill):
+    """(lo, hi, step) of the gauge row, taken from the app's own spec table when it is loaded.
+
+    streamlit_app imports this module, so its SPECS table is in sys.modules by the time the
+    UI gets here; reading the live row keeps the Monte-Carlo gauge band on the same step as
+    the number input. GAUGE_SPEC is the same row for every path that has no app to ask.
+    """
+    name = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+    module = sys.modules.get("streamlit_app")
+    rows = getattr(module, "SPECS", {}).get(mill, []) if module is not None else []
+    for row in rows:
+        if len(row) >= 8 and row[1] == name:
+            try:
+                return float(row[4]), float(row[5]), float(row[7])
+            except (TypeError, ValueError):
+                break
+    return GAUGE_SPEC[mill]
+
+
+def cvar_worst_mean(values, alpha=0.10):
+    """Mean of the worst alpha fraction of a sample: the empirical lower-tail CVaR.
+
+    ceil(alpha × N) of the worst draws are averaged, at least one, so a small ensemble still
+    answers instead of dividing by zero.
+    """
+    sample = np.asarray(values, dtype=float).ravel()
+    sample = sample[np.isfinite(sample)]
+    if sample.size == 0:
+        return float("nan")
+    sample.sort()
+    n_worst = max(1, int(np.ceil(float(alpha) * sample.size)))
+    return float(np.mean(sample[:n_worst]))
+
+
+def robust_metrics(margin_per_sample, fail_flags, candidate_ids, alpha=0.10):
+    """Per-candidate risk numbers from one long series of Monte-Carlo draws.
+
+    mean_margin : average of margin_per_sample over that candidate's draws
+    cvar_margin : mean of the worst alpha fraction of them (lower-tail CVaR)
+    p_fail      : fraction of draws where a required property fails at k = 0
+    n_samples   : number of draws behind the three numbers
+
+    Returns a DataFrame indexed by candidate id (empty when there are no draws).
+    """
+    values = np.asarray(margin_per_sample, dtype=float).ravel()
+    fails = np.asarray(fail_flags, dtype=bool).ravel()
+    ids = np.asarray(candidate_ids).ravel()
+    records = []
+    for cid in np.unique(ids):
+        pick = ids == cid
+        sample = values[pick]
+        records.append({
+            "candidate": int(cid),
+            "mean_margin": float(np.mean(sample)) if sample.size else float("nan"),
+            "cvar_margin": cvar_worst_mean(sample, alpha),
+            "p_fail": float(np.mean(fails[pick])) if sample.size else float("nan"),
+            "n_samples": int(sample.size),
+        })
+    frame = pd.DataFrame(records)
+    return frame.set_index("candidate") if not frame.empty else frame
+
+
+def _perturbation_draws(mill, pool, thickness, n_samples, seed, cooling, headers_range):
+    """One long frame of Monte-Carlo schedule draws around the ranked candidates.
+
+    Every draw is a complete mill input row, so the whole ensemble is scored in a single
+    vectorised pass instead of one model call per sample:
+
+      * entry and finish temperature : ±20 °C, uniform around the candidate setpoint
+      * laminar headers             : ±1, clamped to the swept header range (air stays 0)
+      * chemistry                   : ±10 % of each element's grade band width where the
+                                      chemistry is a grade template, ±5 % relative where it
+                                      is the simulator chemistry or the element has no band
+      * plate / coil gauge          : ±1 step of its mill spec row, clamped to that row
+
+    The plate post-laminar temperature is re-derived from each draw's own finish and headers,
+    so the joint physics the grid respects is not broken by the jitter.
+
+    Returns (frame, candidate_ids, noise_description).
+    """
+    rng = np.random.default_rng(int(seed))
+    reps = max(1, int(n_samples))
+    base = pool.reset_index(drop=True)
+    n_candidates = int(len(base))
+    frame = base.loc[base.index.repeat(reps)].reset_index(drop=True)
+    n = int(len(frame))
+    ids = np.repeat(np.arange(n_candidates), reps)
+
+    entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
+    entry = pd.to_numeric(frame[entry_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    finish = pd.to_numeric(frame[finish_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    entry = entry + rng.uniform(-ENTRY_AIM_C, ENTRY_AIM_C, n)
+    finish = finish + rng.uniform(-FINISH_AIM_C, FINISH_AIM_C, n)
+    frame[entry_col] = entry
+    frame[finish_col] = finish
+
+    gauge_lo, gauge_hi, gauge_step = _gauge_spec(mill)
+    gauge = np.clip(float(thickness) + rng.uniform(-gauge_step, gauge_step, n),
+                    gauge_lo, gauge_hi)
+    noise = [f"entry ±{ENTRY_AIM_C:.0f} °C", f"finish ±{FINISH_AIM_C:.0f} °C"]
+
+    if mill == "Plate":
+        allowed = ([0] if str(cooling) == "air"
+                   else list(range(int(headers_range[0]), int(headers_range[1]) + 1)))
+        headers = pd.to_numeric(frame.get("ACC_Headers_n", 0.0), errors="coerce").fillna(0.0)
+        headers = np.clip(headers.to_numpy(dtype=float) + np.rint(rng.uniform(-1.0, 1.0, n)),
+                          float(min(allowed)), float(max(allowed)))
+        if str(cooling) == "air":
+            headers = np.zeros(n, dtype=float)
+        frame["ACC_Headers_n"] = headers
+        frame["ACC_Laminar_Header"] = headers
+        frame["ACC_Active"] = (headers > 0).astype(float)
+        frame["Plate_T_mm"] = gauge
+        frame["ACC_Temp_Post_Laminar"] = ph.post_laminar_temp(finish, headers, gauge)
+        noise.append(f"headers ±1 inside {int(min(allowed))}–{int(max(allowed))}"
+                     + (" (air: no headers)" if str(cooling) == "air" else ""))
+    else:
+        frame["Coil_T_mm"] = gauge
+        noise.append("no header choice on the Steckel runout table")
+    noise.append(f"gauge {float(thickness):.2f} ± {gauge_step:g} mm")
+
+    # stale prediction/margin columns from the deterministic pass must not survive the jitter
+    stale = [c for c in frame.columns if str(c).startswith(("pred_", "margin_"))]
+    frame = frame.drop(columns=stale + [c for c in ("Chem_CE", "overpower", "shortfall", "ood")
+                                        if c in frame.columns], errors="ignore")
+
+    labels = (base["_chemistry"].astype(str).tolist() if "_chemistry" in base.columns
+              else [""] * n_candidates)
+    banded = 0
+    for col in [c for c in frame.columns if str(c).startswith("Chem_")]:
+        element = str(col)[len("Chem_"):]
+        sigma = np.zeros(n_candidates, dtype=float)
+        for i, name in enumerate(labels):
+            lows, highs = gt.band(name)
+            lo, hi = lows.get(element), highs.get(element)
+            if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and float(hi) > float(lo):
+                sigma[i] = CHEM_BAND_FRACTION * (float(hi) - float(lo))
+                banded += 1
+            else:
+                value = base.iloc[i].get(col, 0.0)
+                try:
+                    sigma[i] = CHEM_RELATIVE_FRACTION * abs(float(value))
+                except (TypeError, ValueError):
+                    sigma[i] = 0.0
+        values = pd.to_numeric(frame[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        frame[col] = np.maximum(0.0, values + rng.uniform(-1.0, 1.0, n) * np.repeat(sigma, reps))
+    noise.append(f"chemistry ±{CHEM_BAND_FRACTION:.0%} of each grade band width"
+                 + (f" ({banded} element bands)" if banded else "")
+                 + f", ±{CHEM_RELATIVE_FRACTION:.0%} relative where no band is defined")
+    noise.append(f"{reps} draws per candidate, seed {int(seed)}")
+    return frame, ids, " · ".join(noise)
+
+
+def robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+                  cooling="air", headers_range=(4, 12), ct_range=None, k=1.0, step=10.0,
+                  alpha=0.10, n_samples=200, seed=42, n_candidates=40):
+    """Robust recipe: the deterministic shortlist re-ranked on downside risk. Pure.
+
+    Scores the deterministic grid exactly as run_recipe_search scores it, takes the top
+    `n_candidates` margin-feasible schedules in select_recipe's order, and surrounds each
+    one with the Monte-Carlo band _perturbation_draws documents. Every draw is a row of one
+    long frame, so the ensemble goes through the same feature module and models in a single
+    vectorised pass.
+
+    Per candidate it reports the mean margin, the lower-tail CVaR at `alpha` and the fraction
+    of draws that fail a required property at k = 0, and selects the candidate with the best
+    CVaR — ties go to the hotter finish, then the leaner CE_IIW. The deterministic pick
+    travels along as "deterministic" so the UI can show what robustness cost.
+
+    margin_per_sample is the minimum normalised margin across the interval-backed required
+    properties (margin / its 95 % conformal half width). The deterministic chemistry ceilings
+    (CE_IIW, P_cm, S, P) carry no interval to normalise by, so they enter P(fail) but not the
+    comfort series: mixing them would let a 0.02 wt% S headroom outvote a 1.5 × YS margin.
+    """
+    cand_df, mech_keys, error = _scored_candidates(
+        mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+        cooling=cooling, headers_range=headers_range, ct_range=ct_range, step=step)
+    if cand_df is None:
+        return {"error": error, "chosen": None, "runners": [], "deterministic": None,
+                "noise_description": "", "n_evaluated": 0, "n_candidates": 0, "n_draws": 0,
+                "alpha": float(alpha), "n_samples": int(n_samples), "seed": int(seed)}
+
+    n_evaluated = int(len(cand_df))
+    ranked, active, extrapolated = _ranked_candidates(cand_df, requirements, k, mill)
+    if not active or ranked.empty:
+        return {"error": None, "chosen": None, "runners": [], "deterministic": None,
+                "noise_description": "", "n_evaluated": n_evaluated,
+                "n_candidates": 0, "n_draws": 0, "alpha": float(alpha),
+                "n_samples": int(n_samples), "seed": int(seed),
+                "message": (f"no candidate clears the margin rule at k = {k:.1f}× the 95% "
+                            "interval, so there is no shortlist to stress-test")}
+
+    pool = ranked.head(max(1, int(n_candidates))).reset_index(drop=True)
+    frame, candidate_ids, noise = _perturbation_draws(
+        mill, pool, thickness, n_samples, seed, cooling, headers_range)
+    n_draws = int(len(frame))
+    scored, error = _score_schedule_frame(mill, frame, mech_keys)
+    if scored is None:
+        return {"error": error, "chosen": None, "runners": [], "deterministic": None,
+                "noise_description": noise, "n_evaluated": n_evaluated,
+                "n_candidates": int(len(pool)), "n_draws": n_draws,
+                "alpha": float(alpha), "n_samples": int(n_samples), "seed": int(seed)}
+
+    metrics_active, pass_at_zero = requirement_margins(scored, requirements, 0.0)
+    _ratios, worst = comfort_margins(scored, metrics_active)
+    metrics = robust_metrics(worst.to_numpy(dtype=float),
+                             (~pass_at_zero).to_numpy(dtype=bool), candidate_ids, alpha=alpha)
+
+    finish_col = FINISH_COL[mill]
+
+    def _risk(i):
+        if metrics.empty or i not in metrics.index:
+            return {"mean_margin": float("nan"), "cvar_margin": float("nan"),
+                    "p_fail": float("nan"), "n_samples": 0}
+        row = metrics.loc[i]
+        return {"mean_margin": float(row["mean_margin"]),
+                "cvar_margin": float(row["cvar_margin"]),
+                "p_fail": float(row["p_fail"]),
+                "n_samples": int(row["n_samples"])}
+
+    def _row(i):
+        row = pool.iloc[i].to_dict()
+        row.update(_risk(i))
+        row["_extrapolated"] = bool(extrapolated)
+        row["_k"] = float(k)
+        return row
+
+    def _sort_key(i):
+        risk = _risk(i)
+        cvar = risk["cvar_margin"]
+        hot = float(pool.iloc[i].get(finish_col, 0.0) or 0.0)
+        ce = float(pool.iloc[i].get("ce_iiw", 0.0) or 0.0)
+        return (-cvar if np.isfinite(cvar) else np.inf, -hot, ce)
+
+    order = sorted(range(len(pool)), key=_sort_key)
+    return {
+        "error": None,
+        "chosen": _row(order[0]),
+        "runners": [_row(i) for i in order[1:6]],
+        "deterministic": _row(0),
+        "det_is_chosen": bool(order[0] == 0),
+        "noise_description": noise,
+        "n_evaluated": n_evaluated,
+        "n_candidates": int(len(pool)),
+        "n_draws": n_draws,
+        "alpha": float(alpha),
+        "k": float(k),
+        "n_samples": int(n_samples),
+        "seed": int(seed),
+        "requirements": requirements,
+    }
+
+
+def _render_recipe_card(mill, chosen, requirements, k, meta, elapsed_text, n_evaluated):
+    """The setpoint, chemistry and per-property card for one chosen recipe row.
+
+    Shared by the deterministic search and the robust study, which rank rows carrying the
+    same scored columns (pred_<key>, margin_<key>|<direction>, ce_iiw, microalloy_total), so
+    the two modes cannot drift apart in how they describe a recipe. ``meta`` carries the few
+    scalars that are not part of a row (spec, grade, thickness, rolling type).
     """
     entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
-
-    if res.get("error"):
-        st.error(res["error"])
-        st.caption(remote_compute.source_label(source))
-        return
-
-    meta = res.get("_meta") or {}
-    chosen_spec = meta.get("spec", "")
-    chosen_grade = meta.get("grade", "")
     thickness = float(meta.get("thickness", 0.0))
     rolling_type = meta.get("rolling_type", "AR")
-    elapsed_text = elapsed if isinstance(elapsed, str) else f"{float(elapsed) * 1000:.0f} ms"
 
-    chosen = res.get("chosen")
-    if chosen is None:
-        st.error(f"No feasible recipe in {res['n_evaluated']:,} evaluated candidates at "
-                 f"k = {k:.1f}× the 95% interval. Nothing is proposed: widen a temperature "
-                 "band, raise k's tolerance via a lower safety factor, pick a richer slab "
-                 "grade, or relax the specification.")
-        for note in res["rejected"]:
-            st.markdown(f"- {note}")
-        st.caption(remote_compute.source_label(source))
-        return
-
-    if chosen.get("_extrapolated"):
-        st.warning("The selected recipe sits outside the historical P01–P99 envelope on at "
-                   "least one parameter. Every in-domain candidate failed the margin rule, so "
-                   "an extrapolated candidate was used: treat the predictions as extrapolation.")
-
-    # ---- recipe card ---------------------------------------------------------------------
     st.markdown(f"#### Recipe card: solved in {elapsed_text} "
-                f"({res['n_evaluated']:,} candidates scored)")
+                f"({int(n_evaluated):,} candidates scored)")
     if mill == "Plate":
         entry, frt = float(chosen[entry_col]), float(chosen[finish_col])
         headers = float(chosen.get("ACC_Headers_n", 0.0))
@@ -1113,7 +1674,79 @@ def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elaps
                f"Overpower deprioritises (never hides) any candidate whose margin on a property "
                f"exceeds {OVERPOWER_CAP_INTERVALS:.0f} × its interval (cap = "
                f"{OVERPOWER_CAP_INTERVALS:.0f} × conformal half-width, fixed constant).")
-    st.caption(remote_compute.source_label(source))
+
+
+def _recipe_csv_row(mill, chosen, requirements, k):
+    """One recipe row reduced to the columns a CSV export should carry."""
+    entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
+    recipe_keys = (["_chemistry"] + [c for c in chosen if str(c).startswith("Chem_")]
+                   + [entry_col, finish_col]
+                   + (["ACC_Laminar_Header", "ACC_Headers_n", "ACC_Active",
+                       "ACC_Temp_Post_Laminar"] if mill == "Plate" else
+                      ["Temp_CT_Top_C", "Temp_CT_Bot_C"])
+                   + ["ce_iiw", "pcm", "microalloy_total",
+                      "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"]
+                   + (["route"] if mill == "Plate" else [])
+                   + [f"pred_{r['key']}" for r in requirements if r.get("kind") == "mech"]
+                   + [f"margin_{r['key']}|{r['direction']}" for r in requirements]
+                   + ["mean_margin", "cvar_margin", "p_fail", "n_samples"])
+    csv_row = {key: chosen.get(key) for key in dict.fromkeys(recipe_keys) if key in chosen}
+    csv_row["k"] = k
+    csv_row["ood"] = bool(chosen.get("ood", False))
+    return csv_row
+
+
+def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elapsed,
+                             source: str = "local"):
+    """
+    Renders one solved (or failed) best-recipe outcome: the extrapolation warning, recipe
+    card, alternative-recipe ladder, rejection notes and the CSV download.
+
+    It renders from the search result alone and never recomputes, so the submit path and a
+    plain rerun that replays st.session_state[f"opt_result_{mill}"] produce identical output.
+    The failure states (res["error"] and chosen is None) are handled here too, so a stored
+    failure replays exactly as it was reported.
+
+    ``elapsed`` is the short elapsed string ("812 ms"); a float number of seconds is accepted.
+    The few scalars the card needs that are not part of the search result (spec name, grade,
+    thickness, rolling type) travel in res["_meta"], which keeps this signature free of the
+    widget state.
+
+    ``source`` is where the search actually ran ("modal" or "local"): it is captioned under
+    the recipe card so the operator can see whether those numbers came off Modal.
+    """
+    entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
+
+    if res.get("error"):
+        st.error(res["error"])
+        st.caption(remote_compute.source_label(source, "recipe"))
+        return
+
+    meta = res.get("_meta") or {}
+    chosen_spec = meta.get("spec", "")
+    chosen_grade = meta.get("grade", "")
+    elapsed_text = elapsed if isinstance(elapsed, str) else f"{float(elapsed) * 1000:.0f} ms"
+
+    chosen = res.get("chosen")
+    if chosen is None:
+        st.error(f"No feasible recipe in {res['n_evaluated']:,} evaluated candidates at "
+                 f"k = {k:.1f}× the 95% interval. Nothing is proposed: widen a temperature "
+                 "band, raise k's tolerance via a lower safety factor, pick a richer slab "
+                 "grade, or relax the specification.")
+        for note in res["rejected"]:
+            st.markdown(f"- {note}")
+        st.caption(remote_compute.source_label(source, "recipe"))
+        return
+
+    if chosen.get("_extrapolated"):
+        st.warning("The selected recipe sits outside the historical P01–P99 envelope on at "
+                   "least one parameter. Every in-domain candidate failed the margin rule, so "
+                   "an extrapolated candidate was used: treat the predictions as extrapolation.")
+
+    # ---- recipe card ---------------------------------------------------------------------
+    _render_recipe_card(mill, chosen, requirements, k, meta, elapsed_text,
+                        res.get("n_evaluated", 0))
+    st.caption(remote_compute.source_label(source, "recipe"))
 
     # ---- rejection ladder -----------------------------------------------------------------
     st.markdown("#### Rejection ladder: next hottest feasible alternatives")
@@ -1153,24 +1786,257 @@ def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elaps
         st.caption("Nothing was rejected: every evaluated candidate cleared the margin rule.")
 
     # ---- CSV download -----------------------------------------------------------------------
-    recipe_keys = (["_chemistry"] + [c for c in chosen if str(c).startswith("Chem_")]
-                   + [entry_col, finish_col]
-                   + (["ACC_Laminar_Header", "ACC_Headers_n", "ACC_Active",
-                       "ACC_Temp_Post_Laminar"] if mill == "Plate" else
-                      ["Temp_CT_Top_C", "Temp_CT_Bot_C"])
-                   + ["ce_iiw", "pcm", "microalloy_total", "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"]
-                   + (["route"] if mill == "Plate" else [])
-                   + [f"pred_{r['key']}" for r in requirements if r.get("kind") == "mech"]
-                   + [f"margin_{r['key']}|{r['direction']}" for r in requirements])
-    csv_row = {key: chosen.get(key) for key in dict.fromkeys(recipe_keys) if key in chosen}
-    csv_row["k"] = k
-    csv_row["ood"] = bool(chosen.get("ood", False))
+    csv_row = _recipe_csv_row(mill, chosen, requirements, k)
     st.download_button(
         "Download recipe (CSV)",
         data=pd.DataFrame([csv_row]).to_csv(index=False).encode("utf-8"),
         file_name=f"recipe_{mill}_{chosen_spec.replace(' ', '_')}_{chosen_grade}.csv",
         mime="text/csv",
         use_container_width=True)
+
+
+def _hover_label(row):
+    """One hover line for a frontier point: the recipe it stands for."""
+    headers = f"{row['headers']:.0f} hdr" if row.get("headers") else "air"
+    return (f"{row.get('chemistry', '?')}<br>entry {row['entry']:.0f} °C · "
+            f"finish {row['finish']:.0f} °C · {headers}<br>"
+            f"CE_IIW {row['ce_iiw']:.3f} · min margin "
+            f"{row['min_margin_interval']:.2f}× interval")
+
+
+def _render_pareto_result(mill: str, res: dict, requirements, k: float, elapsed,
+                          source: str = "local"):
+    """Render one stored Pareto frontier: note, frontier table, scatter and CSV export.
+
+    Renders from the stored result alone and never recomputes, so the submit path and a plain
+    rerun that replays st.session_state[f"opt_result_{mill}"] produce identical output.
+    """
+    if res.get("error"):
+        st.error(res["error"])
+        st.caption(remote_compute.source_label(source, "pareto"))
+        return
+
+    meta = res.get("_meta") or {}
+    elapsed_text = elapsed if isinstance(elapsed, str) else f"{float(elapsed) * 1000:.0f} ms"
+    frontier = list(res.get("frontier") or [])
+    n_feasible = int(res.get("n_feasible") or 0)
+    n_evaluated = int(res.get("n_evaluated") or 0)
+
+    if not frontier:
+        st.error(f"No margin-feasible schedule in {n_evaluated:,} evaluated candidates at "
+                 f"k = {k:.1f}× the 95% interval, so there is no frontier to draw. Widen a "
+                 "temperature band, lower the margin factor, pick a richer slab grade or "
+                 "relax the specification.")
+        st.caption(remote_compute.source_label(source, "pareto"))
+        return
+
+    st.markdown(f"#### Pareto frontier: {len(frontier)} of {n_feasible:,} feasible schedules "
+                f"({n_evaluated:,} scored in {elapsed_text})")
+    st.markdown(
+        "Three objectives, all read as **smaller is better**: minimum CE_IIW, minimum cooling "
+        "intensity (laminar headers in play; air = 0) and maximum comfort (the deepest margin "
+        "kept, in units of the 95% interval). Every row below is non-dominated: no evaluated "
+        "schedule is at least as lean, at least as lightly cooled *and* at least as "
+        "comfortable at once. Read it as a price list — the frontier never hides a cheaper or "
+        "hotter option behind one blended score.")
+
+    tail = ""
+    if res.get("n_truncated"):
+        tail = (f" — the full frontier holds {int(res.get('n_frontier') or 0)} rows, "
+                f"the {len(frontier)} leanest are shown here and exported")
+    st.markdown(f"#### Frontier, leanest first{tail}")
+
+    table = []
+    for rank, row in enumerate(frontier[:15], start=1):
+        if mill == "Plate":
+            setpoints = (f"entry {row['entry']:.0f} °C · FRT {row['finish']:.0f} °C · "
+                         + ("air" if not row.get("headers")
+                            else f"{row['headers']:.0f} headers"))
+        else:
+            setpoints = f"entry {row['entry']:.0f} °C · FT {row['finish']:.0f} °C"
+        table.append({
+            "Rank": rank,
+            "Chemistry": row.get("chemistry", ""),
+            "Setpoints": setpoints,
+            "CE_IIW": f"{row['ce_iiw']:.3f}",
+            "Microalloys %": f"{row['microalloy_total']:.4f}",
+            "Min margin": f"{row['min_margin_interval']:.2f}×",
+            "Envelope": "extrapolated" if row.get("ood") else "in-domain",
+        })
+    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    st.caption("Min margin is the thinnest margin any interval-backed required property keeps, "
+               "in units of its own 95% conformal half width. 'extrapolated' marks a schedule "
+               "outside the historical P01–P99 envelope on at least one parameter.")
+
+    try:
+        import plotly.graph_objects as go
+
+        fig = go.Figure(go.Scatter(
+            x=[row["ce_iiw"] for row in frontier],
+            y=[row["finish"] for row in frontier],
+            mode="markers",
+            marker=dict(size=10,
+                        color=[row["min_margin_interval"] for row in frontier],
+                        colorscale="Viridis", showscale=True,
+                        colorbar=dict(title="min margin<br>(× interval)"),
+                        line=dict(color="white", width=0.8)),
+            text=[_hover_label(row) for row in frontier],
+            hoverinfo="text"))
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=24, b=10),
+                          plot_bgcolor="white", paper_bgcolor="white",
+                          xaxis=dict(title="CE_IIW", showline=True, linecolor="#d7dbe0",
+                                     gridcolor="#f4f5f7"),
+                          yaxis=dict(title=f"{FINISH_SHORT.get(mill, 'finish')} [°C]",
+                                     showline=False, gridcolor="#f4f5f7"))
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.caption("One point per non-dominated schedule: further left is leaner, higher is a "
+                   "hotter finish, brighter keeps more margin. Hover for the recipe.")
+    except Exception:  # noqa: BLE001 - a missing plotly must not cost the whole panel
+        st.caption("Chart unavailable: plotly is not importable in this environment.")
+
+    export = []
+    for row in frontier:
+        record = {"chemistry": row.get("chemistry", ""), "entry": row["entry"],
+                  "finish": row["finish"], "headers": row.get("headers"),
+                  "ce_iiw": row["ce_iiw"], "microalloy_total": row["microalloy_total"],
+                  "min_margin_interval": row["min_margin_interval"],
+                  "min_margin_raw": row.get("min_margin_raw"),
+                  "ood": bool(row.get("ood"))}
+        if row.get("ct") is not None:
+            record["ct"] = row["ct"]
+        for rid, value in (row.get("margins") or {}).items():
+            record[f"margin_{rid}"] = value
+        for rid, value in (row.get("margin_ratios") or {}).items():
+            record[f"margin_ratio_{rid}"] = value
+        export.append(record)
+    spec_name = str(meta.get("spec", "spec")).replace(" ", "_")
+    st.download_button(
+        "Download frontier (CSV)",
+        data=pd.DataFrame(export).to_csv(index=False).encode("utf-8"),
+        file_name=f"pareto_{mill}_{spec_name}.csv",
+        mime="text/csv",
+        use_container_width=True)
+    st.caption(remote_compute.source_label(source, "pareto"))
+
+
+def _render_robust_result(mill: str, res: dict, requirements, k: float, elapsed,
+                          source: str = "local"):
+    """Render one stored robust (CVaR) outcome: card, risk strip, runners and CSV export.
+
+    Renders from the stored result alone and never recomputes, exactly like the deterministic
+    renderer, so a rerun replays it without spending another Modal call.
+    """
+    if res.get("error"):
+        st.error(res["error"])
+        st.caption(remote_compute.source_label(source, "robust"))
+        return
+
+    meta = res.get("_meta") or {}
+    elapsed_text = elapsed if isinstance(elapsed, str) else f"{float(elapsed) * 1000:.0f} ms"
+    chosen = res.get("chosen")
+    if chosen is None:
+        st.error(f"No feasible candidate in {int(res.get('n_evaluated') or 0):,} evaluated "
+                 f"schedules at k = {k:.1f}× the 95% interval, so there is nothing to "
+                 f"stress-test. {res.get('message') or ''}".strip())
+        st.caption(remote_compute.source_label(source, "robust"))
+        return
+
+    if chosen.get("_extrapolated"):
+        st.warning("The selected recipe sits outside the historical P01–P99 envelope on at "
+                   "least one parameter. Every in-domain candidate failed the margin rule, so "
+                   "an extrapolated candidate was used: treat the predictions as extrapolation.")
+
+    _render_recipe_card(mill, chosen, requirements, k, meta, elapsed_text,
+                        res.get("n_evaluated", 0))
+
+    alpha = float(res.get("alpha", 0.10))
+    st.markdown(f"#### Downside risk: {alpha:.0%} CVaR over the noise band")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"CVaR {alpha:.0%}", f"{float(chosen.get('cvar_margin', float('nan'))):.2f}×")
+    c2.metric("P(fail)", f"{float(chosen.get('p_fail', float('nan'))) * 100:.1f} %")
+    c3.metric("Mean margin", f"{float(chosen.get('mean_margin', float('nan'))):.2f}×")
+    c4.metric("Draws / candidate", f"{int(res.get('n_samples') or chosen.get('n_samples') or 0)}")
+    st.caption(f"{int(res.get('n_candidates') or 0)} shortlisted candidates × "
+               f"{int(res.get('n_samples') or 0)} draws = "
+               f"{int(res.get('n_draws') or 0):,} scored schedules (seed {res.get('seed', '?')}).")
+    st.caption(f"Noise model: {res.get('noise_description', '')}")
+
+    det = res.get("deterministic") or {}
+    if res.get("det_is_chosen"):
+        st.caption("The deterministic winner and the robust winner are the same point: the "
+                   "stress test did not buy anything here, and the plain recipe stands.")
+    elif det:
+        finish_col = FINISH_COL[mill]
+        d_cvar = float(det.get("cvar_margin", float("nan")))
+        c_cvar = float(chosen.get("cvar_margin", float("nan")))
+        d_pf = float(det.get("p_fail", float("nan")))
+        c_pf = float(chosen.get("p_fail", float("nan")))
+        st.caption(
+            f"Deterministic pick ({det.get('_chemistry', '?')} · "
+            f"{FINISH_SHORT.get(mill, 'finish')} {float(det.get(finish_col, 0.0) or 0.0):.0f} °C)"
+            f" keeps CVaR {d_cvar:.2f}× and P(fail) {d_pf * 100:.1f} %; the robust pick keeps "
+            f"CVaR {c_cvar:.2f}× and P(fail) {c_pf * 100:.1f} % — that difference is what the "
+            f"stress test traded for.")
+
+    st.markdown("#### Runners: the same shortlist, ranked by CVaR")
+    runners = list(res.get("runners") or [])
+    if runners:
+        finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
+        rows = []
+        for rank, alt in enumerate(runners, start=2):
+            setpoints = (f"entry {float(alt.get(entry_col, 0.0) or 0.0):.0f} °C · "
+                         f"{FINISH_SHORT.get(mill, 'finish')} "
+                         f"{float(alt.get(finish_col, 0.0) or 0.0):.0f} °C")
+            if mill == "Plate":
+                headers = float(alt.get("ACC_Headers_n", 0.0) or 0.0)
+                setpoints += " · " + ("air" if headers <= 0 else f"{headers:.0f} headers")
+            rows.append({
+                "Rank": rank,
+                "Chemistry": alt.get("_chemistry", "?"),
+                "Setpoints": setpoints,
+                f"CVaR {alpha:.0%}": f"{float(alt.get('cvar_margin', float('nan'))):.2f}×",
+                "P(fail)": f"{float(alt.get('p_fail', float('nan'))) * 100:.1f} %",
+                "Mean margin": f"{float(alt.get('mean_margin', float('nan'))):.2f}×",
+                "CE_IIW": f"{float(alt.get('ce_iiw', 0.0) or 0.0):.3f}",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    else:
+        st.caption("The shortlist held a single feasible candidate, so there are no runners.")
+
+    export = [_recipe_csv_row(mill, chosen, requirements, k)]
+    for alt in runners:
+        export.append(_recipe_csv_row(mill, alt, requirements, k))
+    for position, record in enumerate(export):
+        record["role"] = "chosen" if position == 0 else "runner"
+    spec_name = str(meta.get("spec", "spec")).replace(" ", "_")
+    st.download_button(
+        "Download robust recipe (CSV)",
+        data=pd.DataFrame(export).to_csv(index=False).encode("utf-8"),
+        file_name=f"robust_{mill}_{spec_name}.csv",
+        mime="text/csv",
+        use_container_width=True)
+    st.caption(remote_compute.source_label(source, "robust"))
+
+
+def _render_stored_result(mill, stored):
+    """Dispatch one stored optimizer outcome to the renderer its mode belongs to.
+
+    Nothing here recomputes: every mode keeps what it needs in
+    st.session_state[f"opt_result_{mill}"] (a "mode" marker plus the result, requirements,
+    k, elapsed and source), so a rerun replays the last calculation verbatim.
+    """
+    mode = stored.get("mode", "best")
+    res = stored.get("res") or {}
+    requirements = stored.get("requirements") or []
+    k = float(stored.get("k", 1.0))
+    elapsed = stored.get("elapsed", "")
+    source = stored.get("source", "local")
+    if mode == "pareto":
+        _render_pareto_result(mill, res, requirements, k, elapsed, source=source)
+    elif mode == "robust":
+        _render_robust_result(mill, res, requirements, k, elapsed, source=source)
+    else:
+        _render_optimizer_result(mill, res, requirements, k, elapsed, source=source)
 
 
 def _slab_band_text(name):
@@ -1194,25 +2060,34 @@ def _slab_band_text(name):
 def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)",
                    spec_rows=None):
     """
-    Renders the redesigned Inverse Optimizer: a hottest-feasible-first recipe search.
+    Renders the redesigned Inverse Optimizer: one form, one submit, three calculations.
 
     The user picks the end specification, target thickness and rolling process, then
     constrains the slab grade, entry/finish temperature bands and cooling; the app searches
-    the constraint space and proposes the hottest recipe that keeps every spec-required
-    property non-marginal (margin >= k × 95% conformal interval), with a rejection ladder.
+    the constraint space and answers whichever question the "Calculation" radio asks:
+
+      * **Best recipe** — the hottest recipe that keeps every spec-required property
+        non-marginal (margin >= k × 95% conformal interval), with a rejection ladder.
+      * **Pareto frontier** — the non-dominated trade-off between minimum CE_IIW, minimum
+        cooling intensity and maximum comfort, as a table, a scatter and a CSV.
+      * **Robust (CVaR)** — the deterministic shortlist stress-tested over a Monte-Carlo
+        noise band, re-ranked on lower-tail CVaR, with P(fail) and the runners.
 
     Every input lives inside one st.form, so touching a widget never reruns the script and
-    nothing is scored until "Calculate recipe" is submitted. The submitted outcome (with the
-    source it came from - Modal or this process) is kept in
+    nothing is scored until "Calculate" is submitted. The submitted outcome (with the mode it
+    belongs to and the source it came from - Modal or this process) is kept in
     st.session_state[f"opt_result_{mill}"] and simply re-rendered on later reruns, so a
-    rerun never spends another Modal call.
+    rerun never spends another Modal call and never recomputes.
     """
     raw = dict(raw)
     st.markdown('<div class="section"><span>inverse setpoint search</span><i></i></div>',
                 unsafe_allow_html=True)
-    st.markdown('<div class="note">Hottest feasible recipe search against the spec at the 95% '
-                'conformal bound: the hottest entry and finish temperatures that keep every '
-                'spec-required property non-marginal, with the leanest chemistry that gets there.</div>',
+    st.markdown('<div class="note">Recipe search against the spec at the 95% conformal bound. '
+                '<b>Best recipe</b> returns the hottest entry and finish that keep every '
+                'spec-required property non-marginal, with the leanest chemistry that gets '
+                'there. <b>Pareto frontier</b> returns the non-dominated CE_IIW / cooling / '
+                'margin trade-off instead of one blended winner. <b>Robust (CVaR)</b> re-ranks '
+                'the shortlist on its worst-case margin over a Monte-Carlo noise band.</div>',
                 unsafe_allow_html=True)
 
     result_key = f"opt_result_{mill}"
@@ -1220,6 +2095,24 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     # Every input sits inside one st.form: widget changes stay client-side (no rerun, no
     # mid-search interaction) and nothing is scored until the operator submits the form.
     with st.form(key=f"opt_form_{mill}"):
+        # ---- 0. which calculation -------------------------------------------------------
+        # One submit button drives all three modes, so the choice is part of the form: the
+        # mode is read on submit and stored with the result, never inferred on a rerun.
+        calc_mode = st.radio("Calculation", CALCULATION_MODES, index=0, horizontal=True,
+                             key=f"opt_calc_{mill}",
+                             help="Best recipe returns the single hottest feasible schedule. "
+                                  "Pareto frontier returns the non-dominated trade-off between "
+                                  "CE_IIW, cooling and margin. Robust (CVaR) stress-tests the "
+                                  "shortlist over a Monte-Carlo noise band and picks the "
+                                  "schedule whose worst cases hold up.")
+        alpha = CVAR_ALPHA_DEFAULT
+        if calc_mode == ROBUST_MODE:
+            alpha = st.slider("CVaR level α (Robust only)", min_value=0.05, max_value=0.50,
+                              value=CVAR_ALPHA_DEFAULT, step=0.05, key=f"opt_alpha_{mill}",
+                              help="Fraction of the worst Monte-Carlo draws averaged into the "
+                                   "risk number. α = 0.10 means 'the average of the worst 10 % "
+                                   "of outcomes'.")
+
         # ---- 1. end specification -------------------------------------------------------
         specs = sc.get_available_specs()
         use_workbook = bool(specs)
@@ -1318,20 +2211,18 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                        "carries the cooling, applied symmetrically to top and bottom.")
 
         st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
-        submitted = st.form_submit_button("Calculate recipe", type="primary",
+        submitted = st.form_submit_button("Calculate", type="primary",
                                           use_container_width=True)
 
     # ---- idle path: replay the last submitted outcome, or do nothing ---------------------
     if not submitted:
         stored = st.session_state.get(result_key)
         if not stored:
-            st.caption("Set the constraints, then press Calculate recipe.")
+            st.caption("Set the constraints, then press Calculate.")
             return
-        st.caption("Shown from your last calculation. Press Calculate recipe to run again with "
+        st.caption("Shown from your last calculation. Press Calculate to run again with "
                    "the current inputs.")
-        _render_optimizer_result(mill, stored["res"], stored["requirements"],
-                                 stored["k"], stored["elapsed"],
-                                 source=stored.get("source", "local"))
+        _render_stored_result(mill, stored)
         return
 
     if slab_choice == AUTO_CHEMISTRY:
@@ -1362,34 +2253,87 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     search_raw = dict(raw)
     search_raw["Rolling_Type"] = rolling_type
 
-    # The submit above is the only gate: this search runs on Modal when it is configured and
-    # falls back to this process when it is not, and remote_compute reports which one answered.
+    # The submit above is the only gate for all three modes: each calculation runs on Modal
+    # when it is configured and falls back to this process when it is not, and
+    # remote_compute reports which one answered.
     where = " on Modal" if remote_compute.remote_ready() else ""
-    with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid against the "
-                    f"specification at the conformal bound{where}..."):
-        t0 = time.time()
-        res, source = remote_compute.recipe_search(
-            mill, search_raw, thickness, requirements, chemistries,
-            entry_range, finish_range, cooling=cooling, headers_range=headers_range,
-            ct_range=ct_range, k=k)
-        elapsed = time.time() - t0
+    mode_meta = {"spec": chosen_spec, "grade": chosen_grade, "thickness": float(thickness),
+                 "rolling_type": rolling_type}
 
-    elapsed_text = f"{elapsed * 1000:.0f} ms"
+    if calc_mode == PARETO_MODE:
+        with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid and building "
+                        f"the Pareto frontier against the specification at the conformal "
+                        f"bound{where}..."):
+            t0 = time.time()
+            res, source = remote_compute.pareto_search(
+                mill, search_raw, thickness, requirements, chemistries,
+                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+                ct_range=ct_range, k=k)
+            elapsed = time.time() - t0
+        elapsed_text = f"{elapsed * 1000:.0f} ms"
+        # The frontier rows are small dicts, so the whole frontier fits in session state:
+        # the replay needs no candidate frame and no second model call.
+        stored_res = {
+            "error": res.get("error"),
+            "frontier": list(res.get("frontier") or []),
+            "n_feasible": int(res.get("n_feasible") or 0),
+            "n_evaluated": int(res.get("n_evaluated") or 0),
+            "n_frontier": int(res.get("n_frontier") or 0),
+            "n_truncated": bool(res.get("n_truncated")),
+            "meta": res.get("meta") or {},
+            "_meta": mode_meta,
+        }
+    elif calc_mode == ROBUST_MODE:
+        with st.spinner(f"Scoring the deterministic grid{where}, then stress-testing the "
+                        f"shortlist over the Monte-Carlo noise band..."):
+            t0 = time.time()
+            res, source = remote_compute.robust_recipe(
+                mill, search_raw, thickness, requirements, chemistries,
+                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+                ct_range=ct_range, k=k, alpha=float(alpha))
+            elapsed = time.time() - t0
+        elapsed_text = f"{elapsed * 1000:.0f} ms"
+        stored_res = {
+            "error": res.get("error"),
+            "message": res.get("message"),
+            "chosen": res.get("chosen"),
+            "runners": list(res.get("runners") or []),
+            "deterministic": res.get("deterministic"),
+            "det_is_chosen": bool(res.get("det_is_chosen")),
+            "noise_description": res.get("noise_description", ""),
+            "n_evaluated": int(res.get("n_evaluated") or 0),
+            "n_candidates": int(res.get("n_candidates") or 0),
+            "n_draws": int(res.get("n_draws") or 0),
+            "alpha": float(res.get("alpha", alpha)),
+            "n_samples": int(res.get("n_samples") or 0),
+            "seed": res.get("seed"),
+            "_meta": mode_meta,
+        }
+    else:
+        with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid against the "
+                        f"specification at the conformal bound{where}..."):
+            t0 = time.time()
+            res, source = remote_compute.recipe_search(
+                mill, search_raw, thickness, requirements, chemistries,
+                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+                ct_range=ct_range, k=k)
+            elapsed = time.time() - t0
+        elapsed_text = f"{elapsed * 1000:.0f} ms"
 
-    # Keep only what the card renders: the scored candidate frame and the chemistries are
-    # dropped, so a stored outcome stays small.
-    stored_res = {
-        "error": res.get("error"),
-        "chosen": res.get("chosen"),
-        "ladder": list(res.get("ladder") or []),
-        "rejected": list(res.get("rejected") or []),
-        "n_evaluated": int(res.get("n_evaluated") or 0),
-        "_meta": {"spec": chosen_spec, "grade": chosen_grade,
-                  "thickness": float(thickness), "rolling_type": rolling_type},
-    }
-    st.session_state[result_key] = {"res": stored_res, "requirements": requirements,
-                                    "k": float(k), "elapsed": elapsed_text, "source": source}
+        # Keep only what the card renders: the scored candidate frame and the chemistries are
+        # dropped, so a stored outcome stays small.
+        stored_res = {
+            "error": res.get("error"),
+            "chosen": res.get("chosen"),
+            "ladder": list(res.get("ladder") or []),
+            "rejected": list(res.get("rejected") or []),
+            "n_evaluated": int(res.get("n_evaluated") or 0),
+            "_meta": mode_meta,
+        }
+
+    st.session_state[result_key] = {"mode": CALC_MODE_KEYS[calc_mode], "res": stored_res,
+                                    "requirements": requirements, "k": float(k),
+                                    "elapsed": elapsed_text, "source": source}
 
     # the submit path and the replay path render through the same helper
-    _render_optimizer_result(mill, stored_res, requirements, float(k), elapsed_text,
-                             source=source)
+    _render_stored_result(mill, st.session_state[result_key])

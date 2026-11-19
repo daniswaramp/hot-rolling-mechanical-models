@@ -1,16 +1,18 @@
 """Heavy calculation dispatch: Modal when it is configured, the local process otherwise.
 
-Three calculations in this app are expensive enough to be worth moving off the Streamlit
+Five calculations in this app are expensive enough to be worth moving off the Streamlit
 process (and, on Streamlit Community Cloud, off the 1 GB RAM budget):
 
-  * the inverse-optimizer recipe search  (``optimizer.run_recipe_search``)
-  * batch scoring of an uploaded sheet   (``streamlit_app.score_frame``)
-  * the Monte-Carlo capability study     (``streamlit_app.capability_resample``)
+  * the inverse-optimizer recipe search     (``optimizer.run_recipe_search``)
+  * the non-dominated recipe frontier       (``optimizer.pareto_frontier``)
+  * the robust (Monte-Carlo CVaR) recipe    (``optimizer.robust_recipe``)
+  * batch scoring of an uploaded sheet      (``streamlit_app.score_frame``)
+  * the Monte-Carlo capability study        (``streamlit_app.capability_resample``)
 
-Each one is reached only from an explicit button press ("Calculate ..."), never from a
-widget change and never while the script boots, so a user's Modal credits are never spent
-on automatic recomputation. Per-keystroke simulator predictions stay local: they take
-milliseconds and must remain interactive.
+Each one is reached only from an explicit button press ("Calculate", "Calculate scores",
+"Calculate capability"), never from a widget change and never while the script boots, so a
+user's Modal credits are never spent on automatic recomputation. Per-keystroke simulator
+predictions stay local: they take milliseconds and must remain interactive.
 
 Design rules, all deliberate:
 
@@ -30,7 +32,7 @@ Design rules, all deliberate:
 
 Deployment of the remote side: see ``modal_app.py`` at the repository root
 (``modal deploy modal_app.py``). App name ``hrcm-compute``; functions ``recipe_search``,
-``score_batch`` and ``capability``.
+``pareto_frontier``, ``robust_recipe``, ``score_batch`` and ``capability``.
 """
 
 import io
@@ -41,8 +43,18 @@ import pandas as pd
 
 REMOTE_APP = "hrcm-compute"
 RECIPE_FN = "recipe_search"
+PARETO_FN = "pareto_frontier"
+ROBUST_FN = "robust_recipe"
 SCORE_FN = "score_batch"
 CAPABILITY_FN = "capability"
+
+# Calculation names for the source caption, keyed by the mode marker a stored optimizer
+# result carries. "recipe" is the deterministic hottest-feasible search.
+CALC_LABELS = {
+    "recipe": "best recipe",
+    "pareto": "Pareto frontier",
+    "robust": "robust (CVaR)",
+}
 
 TOKEN_KEYS = ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
 
@@ -118,11 +130,19 @@ def last_error():
     return _LAST_ERROR
 
 
-def source_label(source: str) -> str:
-    """One honest caption for the UI, given the source a calculation reported."""
+def source_label(source: str, mode: str = None) -> str:
+    """One honest caption for the UI, given the source a calculation reported.
+
+    ``mode`` names which calculation answered ("recipe", "pareto", "robust"; batch scoring
+    and the capability study pass nothing), so the caption says both where the numbers came
+    from and which calculation produced them. The wording for a bare source is unchanged.
+    """
     if source == "modal":
-        return "computed on Modal"
-    return "computed locally (Modal unavailable or failed)"
+        base = "computed on Modal"
+    else:
+        base = "computed locally (Modal unavailable or failed)"
+    label = CALC_LABELS.get(str(mode or ""))
+    return f"{base} · {label}" if label else base
 
 
 def _remote(fn_name, *args, **kwargs):
@@ -167,6 +187,55 @@ def recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
     return optimizer.run_recipe_search(
         mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
         cooling=cooling, headers_range=headers_range, ct_range=ct_range, k=k), "local"
+
+
+def pareto_search(mill, raw, thickness, requirements, chemistries, entry_range,
+                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  k=1.0, step=10.0, max_points=40):
+    """The non-dominated recipe frontier, remote when configured.
+
+    Returns ``(result, source)``; the result is exactly what
+    ``optimizer.pareto_frontier`` returns on both paths (frontier rows, the feasible and
+    evaluated counts, and the meta that describes the search space).
+    """
+    if remote_ready():
+        try:
+            return _remote(PARETO_FN, mill, raw, thickness, requirements, chemistries,
+                           entry_range, finish_range, cooling=cooling,
+                           headers_range=headers_range, ct_range=ct_range, k=k,
+                           step=step, max_points=max_points), "modal"
+        except Exception as exc:  # noqa: BLE001 - any remote failure falls back
+            _fallback(exc)
+    import optimizer
+    return optimizer.pareto_frontier(
+        mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+        cooling=cooling, headers_range=headers_range, ct_range=ct_range, k=k,
+        step=step, max_points=max_points), "local"
+
+
+def robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range,
+                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  k=1.0, step=10.0, alpha=0.10, n_samples=200, seed=42, n_candidates=40):
+    """The robust (Monte-Carlo CVaR) recipe, remote when configured.
+
+    Returns ``(result, source)``; the result is exactly what
+    ``optimizer.robust_recipe`` returns on both paths (the drawn-on-CVaR recipe, its risk
+    metrics, the runners and the deterministic pick it was measured against).
+    """
+    if remote_ready():
+        try:
+            return _remote(ROBUST_FN, mill, raw, thickness, requirements, chemistries,
+                           entry_range, finish_range, cooling=cooling,
+                           headers_range=headers_range, ct_range=ct_range, k=k, step=step,
+                           alpha=alpha, n_samples=n_samples, seed=seed,
+                           n_candidates=n_candidates), "modal"
+        except Exception as exc:  # noqa: BLE001
+            _fallback(exc)
+    import optimizer
+    return optimizer.robust_recipe(
+        mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
+        cooling=cooling, headers_range=headers_range, ct_range=ct_range, k=k, step=step,
+        alpha=alpha, n_samples=n_samples, seed=seed, n_candidates=n_candidates), "local"
 
 
 def score_batch(mill, frame, engine="Champion GBDT (Recommended)"):
