@@ -126,6 +126,32 @@ Deployed entry point is `app/streamlit_app.py`. The repository is public; the ca
 (`Plate/csv/`, `HRC/csv/`) are not. The specification workbook **is** published in
 `specification-list/` because the Specification check tab reads it at runtime.
 
+### Serverless compute (Modal)
+
+The three heavy calculations (recipe search, batch scoring, capability study) can run on Modal
+instead of the Streamlit container. They only ever run when the operator presses the matching
+button (`Calculate recipe`, `Calculate scores`, `Calculate capability`); nothing is computed on
+rerun, at boot, or while editing inputs. If Modal is not configured or a call fails, the app falls
+back to local execution and says so under the result.
+
+One-time setup:
+
+```cmd
+modal token new
+modal deploy modal_app.py
+```
+
+Then add the credentials to the deployment (Streamlit Cloud: Manage app > Settings > Secrets):
+
+```toml
+MODAL_TOKEN_ID = "ak-..."
+MODAL_TOKEN_SECRET = "as-..."
+```
+
+Locally, put the same two lines in `.streamlit/secrets.toml` (gitignored; never commit it). The
+app is viewer-gated, but treat those tokens as the spending key: any viewer's button press uses
+credits, so share the app only with people who should be able to run campaigns.
+
 ---
 
 ## Limits

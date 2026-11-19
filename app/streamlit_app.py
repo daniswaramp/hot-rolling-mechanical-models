@@ -105,6 +105,21 @@ try:
 except Exception:
     pass
 
+# What-if atlas (stored four-axis response grid) and digital shadow (bias against measured
+# results). Importing either is free: modal is only imported inside remote_jobs when a build
+# or a calibration is actually asked for, and both modules import this one lazily.
+import atlas  # noqa: E402
+try:
+    importlib.reload(atlas)
+except Exception:
+    pass
+
+import shadow  # noqa: E402
+try:
+    importlib.reload(shadow)
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -3336,7 +3351,7 @@ def main():
 
     tabs = st.tabs(["Simulator", "Specification check", "Inverse Optimizer", "Response surface",
                     "Precipitation & Solubility", "Capability",
-                    "Batch", "Retrain", "Diagnostics", "About"])
+                    "Batch", "Retrain", "Diagnostics", "Atlas", "Shadow", "About"])
     with tabs[0]:
         view_simulator(mill, raw, engine)
     with tabs[1]:
@@ -3356,6 +3371,10 @@ def main():
     with tabs[8]:
         view_diagnostics(mill)
     with tabs[9]:
+        atlas.view_atlas(mill, raw)
+    with tabs[10]:
+        shadow.view_shadow(mill, raw)
+    with tabs[11]:
         view_about()
 
 

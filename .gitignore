@@ -10,3 +10,6 @@ app/training_log.json
 .commandcode/
 0.26.0
 catboost_info/
+# never commit credentials; Streamlit Cloud secrets are configured in its dashboard
+.streamlit/secrets.toml
+.modal.toml
