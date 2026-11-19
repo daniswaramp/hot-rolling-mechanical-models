@@ -1,4 +1,4 @@
-"""Plate Mill & Steckel Mill Prediction Platform — fresh technical white UI.
+"""Plate Mill & Steckel Mill Prediction Platform: fresh technical white UI.
 
 Heavy plate and Steckel mill coil, one model layer. Sections: simulator, response surface, batch,
 retrain, diagnostics.
@@ -11,12 +11,26 @@ import os
 import sys
 from datetime import datetime
 
+# Cap the BLAS/OpenMP worker pools BEFORE numpy is imported: each OpenBLAS
+# worker thread commits ~28 MB of buffer memory on a many-core host, which by
+# itself blew past the Streamlit Community Cloud free-tier budget (measured:
+# numpy+pandas 271 MB uncapped vs 79 MB at 2 threads on 8 cores). This app's
+# linear algebra is trivial (tree-model prediction, isotonic PAV), so 2 worker
+# threads cost nothing in latency and leave the in-app refit some parallelism.
+# setdefault keeps an operator-chosen setting in the deployment env authoritative.
+for _thread_cap in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_thread_cap, "2")
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from scipy.optimize import isotonic_regression
 import streamlit as st
+
+# NOTE: scipy is intentionally NOT imported at module level — its committed
+# private memory is substantial and only monotone_guardrail (header-sweep
+# isotonic correction) needs it. Imported on first use; Python caches it.
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 if APP_DIR not in sys.path:
@@ -96,8 +110,43 @@ LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
 MUTED = "#6b7280"
 HAIR = "#e5e7eb"
-ACCENT = "#1746c8"
+ACCENT = "#1746c8"   # GRP brand blue, taken from the mill mark (assets/grp.png)
 PANEL = "#f7f8fa"
+
+
+def _shade(hex_color, factor):
+    """Lighter (factor > 0, toward white) or darker (factor < 0, toward black) step of a hex."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    if factor >= 0:
+        r, g, b = (round(c + (255 - c) * factor) for c in (r, g, b))
+    else:
+        r, g, b = (round(c * (1 + factor)) for c in (r, g, b))
+    return "#{:02x}{:02x}{:02x}".format(r, g, b)
+
+
+def _rgba(hex_color, alpha):
+    """Plotly-friendly rgba() string of a token hex, so chart fills stay on the palette."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+# Ordered chart ramp derived from the accent: darker -> base -> lighter.
+ACCENT_DARK = _shade(ACCENT, -0.45)
+ACCENT_RAMP = [ACCENT, _shade(ACCENT, 0.30), _shade(ACCENT, 0.55),
+               _shade(ACCENT, 0.75), _shade(ACCENT, 0.88)]
+
+# Semantic state tokens, matching the pill colours (#065f46 / #92400e / #991b1b family).
+SEMANTIC_OK = "#065f46"
+SEMANTIC_WARN = "#92400e"
+SEMANTIC_BAD = "#991b1b"
+WARN_LINE = "#b45309"    # limit / reference lines on charts
+WARN_STAR = "#f59e0b"    # optimal-setpoint marker
+BAD_LINE = "#f87171"     # failing-coverage bars on charts
+
+# Multi-series chart palette: neutral + accent ramp + the two semantic counter-hues.
+CHART_SERIES = [INK, ACCENT, ACCENT_RAMP[2], ACCENT_RAMP[3], WARN_LINE, SEMANTIC_OK]
 
 
 # ----------------------------------------------------------------------------- input specs
@@ -212,25 +261,74 @@ TARGET_LABEL = {
     "HRC": {"YS_BN": ("yield", "MPa"), "TS_BN": ("tensile", "MPa"), "EL_BN": ("elongation", "%")},
 }
 
+# Readable names for the feature columns the boosted artifacts carry, used by the
+# Diagnostics importance chart; unmapped names render as the raw column name.
+FEATURE_LABELS = {
+    "sigma_ss": "Pickering solid solution (sigma_ss)",
+    "inv_sqrt_t": "Hall-Petch gauge proxy (t^-0.5)",
+    "CE_IIW": "Carbon equivalent (CE_IIW)",
+    "Chem_CE": "Carbon equivalent (Chem_CE)",
+    "P_cm": "Cracking parameter (P_cm)",
+    "Microalloy_Total": "Microalloy total (Nb+V+Ti)",
+    "Nb_eff": "Effective niobium (Nb_eff)",
+    "Ti_to_N_ratio": "Ti/N ratio",
+    "W_over_T": "Width over gauge (W/t)",
+    "eps_total": "True strain, total",
+    "eps_STM": "True strain, Steckel mill",
+    "FM_Temp_Drop": "Entry-to-finish temperature drop",
+    "ACC_Temp_Drop": "ACC temperature drop (cooling severity)",
+    "Cooling_Rate_Proxy": "Cooling rate proxy (ACC laminar)",
+    "Ar3": "Ar3 transformation temperature",
+    "Tnr": "Recrystallisation stop temperature",
+    "FRT_minus_Ar3": "Finishing margin above Ar3",
+    "FRT_minus_Tnr": "FRT below recrystallisation stop",
+    "Tpost_minus_Ar3": "Post-laminar temperature above Ar3",
+    "FM_Temp_Before_Rolling": "Entry temperature",
+    "Temp_Transfer_Bar_C": "Transfer bar (entry) temperature",
+    "FM_Finish_Temp": "Finishing temperature",
+    "Temp_FT_Avg_C": "Finishing temperature",
+    "Temp_CT_Top_C": "Coiling temperature, top",
+    "Temp_CT_Bot_C": "Coiling temperature, bottom",
+    "ACC_Laminar_Header": "Laminar header count",
+    "ACC_Headers_n": "Laminar header count",
+    "ACC_Temp_Post_Laminar": "Post-laminar temperature",
+    "ACC_Active": "ACC active flag",
+    "Slab_T_mm": "Slab thickness",
+    "TB_Thickness_mm": "Transfer bar thickness",
+    "TB_Ratio": "Transfer bar / gauge ratio",
+    "FM_Last_Pass_Drafting": "Last pass drafting",
+    "Plate_T_mm": "Plate gauge",
+    "Coil_T_mm": "Coil gauge",
+    "Plate_W_mm": "Plate width",
+    "Coil_W_mm": "Coil width",
+    "Chem_C": "Carbon", "Chem_Mn": "Manganese", "Chem_Si": "Silicon", "Chem_P": "Phosphorus",
+    "Chem_S": "Sulphur", "Chem_Al": "Aluminium", "Chem_Nb": "Niobium", "Chem_V": "Vanadium",
+    "Chem_Ti": "Titanium", "Chem_Cu": "Copper", "Chem_Ni": "Nickel", "Chem_Cr": "Chromium",
+    "Chem_Mo": "Molybdenum", "Chem_N": "Nitrogen", "Chem_B": "Boron",
+}
+
 
 # ----------------------------------------------------------------------------- styling
 @st.cache_resource(show_spinner=False)
-def boot_check():
-    """Score both routes once at start-up using Champion GBDT (instant bootstrap)."""
-    report = {}
-    for mill in ("Plate", "HRC"):
-        try:
-            raw = defaults(mill)
-            if mill == "Plate":
-                raw["Rolling_Type"] = "AR"
-            out = predict_champion(mill, raw)
-            scored = {k: v["pred"] for k, v in out.items()}
-            good = sum(1 for v in scored.values() if np.isfinite(v))
-            first_error = next((v["error"] for v in out.values() if v.get("error")), "")
-            report[mill] = (good, len(scored), first_error)
-        except Exception as exc:
-            report[mill] = (0, 0, f"{type(exc).__name__}: {exc}")
-    return report
+def boot_check(mill):
+    """Score the active route once at start-up using Champion GBDT (instant bootstrap).
+
+    Scoped to one mill on purpose: a both-routes loop eagerly pulls every route's joblib
+    bundles (predict_champion's fallback included) into RAM at cold boot, which is what
+    pushed the free-tier Streamlit Cloud container over its memory cliff. The other route
+    loads lazily the first time an operator actually switches to it.
+    """
+    try:
+        raw = defaults(mill)
+        if mill == "Plate":
+            raw["Rolling_Type"] = "AR"
+        out = predict_champion(mill, raw)
+        scored = {k: v["pred"] for k, v in out.items()}
+        good = sum(1 for v in scored.values() if np.isfinite(v))
+        first_error = next((v["error"] for v in out.values() if v.get("error")), "")
+        return {mill: (good, len(scored), first_error)}
+    except Exception as exc:
+        return {mill: (0, 0, f"{type(exc).__name__}: {exc}")}
 
 
 def logo_uri():
@@ -244,7 +342,18 @@ def logo_uri():
 def inject_css():
     st.markdown("""
 <style>
+/* type: Inter for labels and JetBrains Mono for numbers, because the instrument's whole
+   value is tabular alignment of MPa/°C readouts; the scale is 11/13/15/22/30 px, 11 px floor */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+    --fs-11: 11px;
+    --fs-13: 13px;
+    --fs-15: 15px;
+    --fs-22: 22px;
+    --fs-30: 30px;
+    --accent: __ACCENT__;
+}
 
 html, body, [class*="css"] {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -260,41 +369,45 @@ code, pre, .mono, [data-testid="stMetricValue"] {
 
 h1, h2, h3, h4 { font-family: 'Inter', sans-serif; color: #0b0d10; letter-spacing: -.02em; }
 
-.kicker { font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; color: #1746c8; font-weight: 600; line-height: 1.6; }
-.title { font-size: 30px; line-height: 1.15; font-weight: 600; margin: .35rem 0 .5rem; letter-spacing: -.03em; color: #0b0d10; }
-.lede { font-size: 14.5px; color: #4b5563; max-width: none; line-height: 1.62; text-wrap: pretty; }
+.kicker { font-size: var(--fs-11); letter-spacing: .18em; text-transform: uppercase; color: var(--accent); font-weight: 600; line-height: 1.6; }
+.title { font-size: var(--fs-30); line-height: 1.15; font-weight: 600; margin: .35rem 0 .5rem; letter-spacing: -.03em; color: #0b0d10; }
+.lede { font-size: var(--fs-15); color: #4b5563; max-width: 72ch; line-height: 1.62; text-wrap: pretty; }
 .hair { height: 1px; background: #e5e7eb; margin: 1.4rem 0 1.2rem; border: 0; }
 
-.section { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #4b5563;
+/* named spacer tokens: .breath = intra-section gap, .break = gap between major sections */
+.breath { height: 1rem; }
+.break { height: 2rem; }
+
+.section { font-size: var(--fs-11); letter-spacing: .12em; text-transform: uppercase; color: #4b5563;
            font-weight: 600; display: flex; align-items: center; gap: .7rem; margin-bottom: .7rem; }
 .section i { flex: 1; height: 1px; background: #e5e7eb; display: block; }
 
 .card { border: 1px solid #e5e7eb; border-radius: 6px; padding: 0 1rem; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
 table.ut { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-table.ut th { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #6b7280;
+table.ut th { font-size: var(--fs-11); letter-spacing: .08em; text-transform: uppercase; color: #6b7280;
               font-weight: 600; text-align: right; padding: .75rem .5rem .55rem;
               border-bottom: 1px solid #e5e7eb; background: #fafbfc; }
 table.ut th:first-child { text-align: left; padding-left: .25rem; }
 table.ut td { padding: .65rem .5rem; border-bottom: 1px solid #f1f2f4; text-align: right;
-              vertical-align: middle; font-size: 13.5px; color: #0b0d10; }
+              vertical-align: middle; font-size: var(--fs-13); color: #0b0d10; }
 table.ut td:first-child { text-align: left; padding-left: .25rem; font-weight: 500; }
 table.ut tbody tr:hover td { background: #f8fafc; }
 table.ut tbody tr:last-child td { border-bottom: 0; }
-table.ut tr.grp td { text-align: left; font-size: 9.6px; letter-spacing: .12em; text-transform: uppercase;
-                     color: #1746c8; font-weight: 600; padding: .9rem .25rem .35rem;
+table.ut tr.grp td { text-align: left; font-size: var(--fs-11); letter-spacing: .12em; text-transform: uppercase;
+                     color: var(--accent); font-weight: 600; padding: .9rem .25rem .35rem;
                      border-bottom: 1px solid #e5e7eb; background: #ffffff; }
 table.ut tbody tr:first-child.grp td { padding-top: .55rem; }
-table.ut td.name { text-align: left; font-size: 13.5px; font-weight: 500; color: #0b0d10; }
-table.ut td.val { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 600; color: #0b0d10; }
-table.ut td.alt.muted { color: #c3c7cd; }
-table.ut td.alt { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: #4b5563; }
-table.ut td.val .unit { font-size: 10px; color: #9ca3af; margin-left: .25rem; font-weight: 400; }
-table.ut td.rng { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #4b5563; }
-table.ut td.sub { font-size: 12px; color: #6b7280; }
+table.ut td.name { text-align: left; font-size: var(--fs-13); font-weight: 500; color: #0b0d10; }
+table.ut td.val { font-family: 'JetBrains Mono', monospace; font-size: var(--fs-15); font-weight: 600; color: #0b0d10; }
+table.ut td.alt.muted { color: #6b7280; }
+table.ut td.alt { font-family: 'JetBrains Mono', monospace; font-size: var(--fs-13); color: #4b5563; }
+table.ut td.val .unit { font-size: var(--fs-11); color: #6b7280; margin-left: .25rem; font-weight: 400; }
+table.ut td.rng { font-family: 'JetBrains Mono', monospace; font-size: var(--fs-13); color: #4b5563; }
+table.ut td.sub { font-size: var(--fs-13); color: #6b7280; }
 table.ut td.flag { width: 110px; text-align: center; }
-.card .foot { border-top: 1px solid #e5e7eb; padding: .6rem 0 .7rem; font-size: 11.5px; color: #6b7280; }
+.card .foot { border-top: 1px solid #e5e7eb; padding: .6rem 0 .7rem; font-size: var(--fs-11); color: #6b7280; }
 
-.pill { display: inline-flex; align-items: center; justify-content: center; font-size: 10px;
+.pill { display: inline-flex; align-items: center; justify-content: center; font-size: var(--fs-11);
         letter-spacing: .05em; font-weight: 600; text-transform: uppercase; padding: .2rem .55rem;
         border-radius: 4px; white-space: nowrap; line-height: 1.2; }
 .pill.ok { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
@@ -302,38 +415,54 @@ table.ut td.flag { width: 110px; text-align: center; }
 .pill.bad { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
 .pill.neutral { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
 
-.tag { display: inline-block; font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+.tag { display: inline-block; font-size: var(--fs-11); letter-spacing: .06em; text-transform: uppercase;
        padding: .15rem .4rem; border: 1px solid #e5e7eb; color: #4b5563; border-radius: 3px; }
 
+/* facts cell anatomy used by every tab: span label / b mono value / em unit / optional pill */
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0;
          border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden; background: #ffffff; }
 .facts div { padding: .75rem 1rem; border-right: 1px solid #e5e7eb; }
 .facts div:last-child { border-right: 0; }
-.facts span { display: block; font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+.facts span { display: block; font-size: var(--fs-11); letter-spacing: .08em; text-transform: uppercase;
               color: #6b7280; margin-bottom: .25rem; font-weight: 500; }
-.facts b { font-family: 'JetBrains Mono', monospace; font-size: 15.5px; font-weight: 600; color: #0b0d10; }
-.facts em { font-style: normal; font-size: 11px; color: #6b7280; margin-left: .25rem; }
+.facts b { font-family: 'JetBrains Mono', monospace; font-size: var(--fs-15); font-weight: 600; color: #0b0d10; }
+.facts em { font-style: normal; font-size: var(--fs-11); color: #6b7280; margin-left: .25rem; }
+.facts div.lead b { font-size: var(--fs-22); }
 .facts.facts-text b { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                      font-size: 13.5px; font-weight: 600; letter-spacing: 0; }
+                      font-size: var(--fs-13); font-weight: 600; letter-spacing: 0; }
 
-.note { font-size: 12.5px; color: #4b5563; line-height: 1.5; border-left: 2px solid #e5e7eb;
+.note { font-size: var(--fs-13); color: #4b5563; line-height: 1.5; border-left: 2px solid #e5e7eb;
         padding-left: .7rem; margin-top: .6rem; }
+
+/* flat provenance list: plain rows, no card shells */
+.prov { margin: .4rem 0 0; padding: 0; list-style: none; border-top: 1px solid #e5e7eb; }
+.prov li { padding: .55rem .25rem; border-bottom: 1px solid #e5e7eb; font-size: var(--fs-13);
+           color: #4b5563; line-height: 1.55; }
+.prov li b { color: #0b0d10; }
+.prov li.prov-lead { color: #0b0d10; }
 
 div[data-testid="stSidebar"] { background: #fbfbfc; border-right: 1px solid #e5e7eb; }
 div[data-testid="stSidebar"] .block-container { padding-top: 1.4rem; }
-div[data-testid="stSidebar"] h2 { font-size: 13px; letter-spacing: .1em; text-transform: uppercase; }
+div[data-testid="stSidebar"] h2 { font-size: var(--fs-13); letter-spacing: .1em; text-transform: uppercase; }
 
 .stTabs [data-baseweb="tab-list"] { gap: 1.2rem; border-bottom: 1px solid #e5e7eb; }
-.stTabs [data-baseweb="tab"] { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase;
+.stTabs [data-baseweb="tab"] { font-size: var(--fs-11); letter-spacing: .06em; text-transform: uppercase;
                                color: #6b7280; padding: .5rem 0; font-weight: 500; }
 .stTabs [aria-selected="true"] { color: #0b0d10 !important; font-weight: 600; }
 
-div[data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; font-size: 22px; }
+div[data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace; font-size: var(--fs-22); }
 #MainMenu, footer, [data-testid="stAppDeployButton"] { display: none; }
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stExpandSidebarButton"] { display: flex !important; visibility: visible !important; }
+
+/* narrow screens: keep input text at 16px so iOS Safari does not auto-zoom on focus */
+@media (max-width: 640px) {
+  [data-testid="stNumberInput"] input,
+  [data-testid="stTextInput"] input,
+  [data-testid="stTextArea"] textarea { font-size: 16px; }
+}
 </style>
-""", unsafe_allow_html=True)
+""".replace("__ACCENT__", ACCENT), unsafe_allow_html=True)
 
 
 def section(label):
@@ -495,7 +624,7 @@ def _nlr_scores(mill, frame):
     def num(col, default):
         return pd.to_numeric(frame.get(col), errors="coerce").fillna(default)
 
-    # NLR term definitions — FROZEN. These are NOT the Pickering sigma_ss or the ACC cooling rate
+    # NLR term definitions: FROZEN. These are NOT the Pickering sigma_ss or the ACC cooling rate
     # the models and the derived-metrics card use: the NLR coefficients in models/nlr_models.json
     # were fitted on exactly these narrower definitions (scripts/parse_nlr.py::term_values), so
     # changing them here would invalidate the fit. The keys must keep matching the "var" names in
@@ -727,16 +856,16 @@ def _nlr_card(label, model):
     metrics = f"holdout R² = {r2:.3f}" if r2 is not None else "holdout R² not recorded"
     return ('<div class="card" style="padding:1rem;">'
             f'<span class="pill ok">{label}</span>'
-            '<div style="font-family:monospace; font-size:12.5px; color:#0b0d10; '
+            '<div style="font-family:monospace; font-size:13px; color:#0b0d10; '
             'margin-top:.6rem; line-height:1.6;">' + " ".join(parts) +
-            f'</div><div class="note" style="margin-top:.5rem; font-size:11.5px;">{metrics} · '
+            f'</div><div class="note" style="margin-top:.5rem;">{metrics} · '
             'no finishing-temperature term by construction</div></div>')
 
 
 def _render_nlr_cards(mill):
     nlrs = nlr_models(mill)
     if not nlrs:
-        st.info("No constitutive fit is shipped for this route — the NLR engine scores no "
+        st.info("No constitutive fit is shipped for this route: the NLR engine scores no "
                 "target here, and no equations are shown rather than invented.")
         return
     items = list(nlrs.items())
@@ -854,6 +983,67 @@ def champion_plan(mill):
         else:
             plan[target] = None
     return plan
+
+
+def _importance_array(value):
+    """Accept only a 1-D numeric, finite, non-empty array; anything else is unusable."""
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim != 1 or arr.size == 0 or not np.isfinite(arr).all():
+        return None
+    return arr
+
+
+def _read_importances(model):
+    """First usable importance array a native model exposes, or None.
+
+    CatBoost's sklearn shim exposes feature_importances_ but raises on models loaded
+    from .cbm: numpy swallows that raise and hands back a 0-d object array, so each
+    accessor's output is validated and an unusable one falls through to the next.
+    """
+    for accessor in ("feature_importances_", "get_feature_importance", "feature_importance"):
+        try:
+            value = getattr(model, accessor)
+            arr = _importance_array(value() if callable(value) else value)
+        except Exception:
+            continue
+        if arr is not None:
+            return arr
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def champion_importances(mill):
+    """Split importances computed from the shipped champion artifacts, per target.
+
+    Reads whatever importance API the native model exposes (sklearn-style
+    feature_importances_, CatBoost's get_feature_importance, LightGBM's Booster
+    feature_importance) and normalises to a share of total. A target whose artifact
+    exposes nothing usable is left out of the dict entirely, so the UI never has to
+    invent a number.
+    """
+    plan = champion_plan(mill)
+    out = {}
+    for target, cfg in plan.items():
+        fam = (cfg or {}).get("family")
+        if fam not in ("cat", "xgb", "lgbm"):
+            continue
+        model = boosted_model(mill, fam, target)
+        if model is None:
+            continue
+        raw = _read_importances(model)
+        if raw is None:
+            continue
+        cols = boosted_index(mill).get(fam, {}).get(target, {}).get("features")
+        if cols is None or len(cols) != raw.size or raw.size == 0:
+            continue
+        if not np.isfinite(raw).all() or raw.sum() <= 0:
+            continue
+        shares = raw / raw.sum()
+        out[target] = sorted(zip(cols, shares.tolist()), key=lambda pair: pair[1])
+    return out
 
 
 def _holdout_r2(mill, key):
@@ -1040,10 +1230,12 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
             label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
             rmse_tol = ml.TARGET_CONFIG[mill][key]["tol"]
             fam = res.get("family", "")
-            fam_badge = f'<span class="tag" style="margin-left:.4rem; font-size:9px;">{fam}</span>' if fam else ""
+            fam_badge = f'<span class="tag" style="margin-left:.4rem;">{fam}</span>' if fam else ""
             if mill == "Plate" and key in ("YS_AN", "TS_AN", "EL_AN"):
                 coupled_tip = res.get("note", "Coupled to blackplate via dynamic transformation kinetics")
-                fam_badge += f'<span class="tag" style="margin-left:.3rem; font-size:9px; background:#eff6ff; color:#1d4ed8; border:1px solid #bfdbfe;" title="{coupled_tip}">coupled</span>'
+                fam_badge += (f'<span class="tag" style="margin-left:.3rem; background:{ACCENT_RAMP[4]}; '
+                              f'color:{ACCENT_DARK}; border:1px solid {ACCENT_RAMP[3]};" '
+                              f'title="{coupled_tip}">coupled</span>')
             extra_cells = "".join(
                 (f'<td class="alt">{extras[name][key]["pred"]:.1f}</td>'
                  if key in extras[name] and np.isfinite(extras[name][key].get("pred", np.nan)) else '<td class="alt muted">—</td>')
@@ -1051,7 +1243,7 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
             rows.append(f"""<tr>
               <td class="name">{label}{fam_badge}</td>
               <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
-              <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f} <span class="tag" style="background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; font-size:9px;">95% cov</span></td>
+              <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
               <td class="sub" style="font-family:monospace;">±{rmse_tol:g}&nbsp;{unit}</td>{extra_cells}</tr>""")
     html = (f"<div class=\"card\"><table class=\"ut\"><thead><tr><th>property</th><th>{engine_label.lower()}</th>"
             "<th>95% Split-Conformal Interval</th><th>Certification Tolerance</th>"
@@ -1117,7 +1309,7 @@ def chemistry_template(mill):
     if record.get("ce_median") is not None:
         caption += f" · CE {record['ce_median']:.3f}"
     st.sidebar.caption(caption)
-    st.sidebar.caption("band midpoint, not a mill aim — edit any element below before calculating")
+    st.sidebar.caption("band midpoint, not a mill aim: edit any element below before calculating")
 
     ranges = {row[1]: (spec_float(row, 4), spec_float(row, 5)) for row in SPECS[mill]}
     applied, held = {}, []
@@ -1280,26 +1472,26 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
                 st.code(f"{key}: {why[:400]}", language="text")
 
     ind = physical(raw, mill)
-    st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
+    finish = raw.get("FM_Finish_Temp", raw.get("Temp_FT_Avg_C", 0.0))
+    margin = finish - ind["ar3"]
+    st.markdown('<div class="break"></div>', unsafe_allow_html=True)
     section("derived process metrics")
     st.markdown(f"""
 <div class="facts">
+  <div class="lead"><span>finishing margin above Ar3</span><b>{margin:+.0f}</b><em>K · Ar3 {ind['ar3']:.0f} °C</em></div>
   <div><span>Pickering σ<sub>ss</sub></span><b>{ind['sigma_ss']:.0f}</b><em>MPa</em></div>
   <div><span>CE IIW</span><b>{ind['ce_iiw']:.3f}</b></div>
   <div><span>Pcm</span><b>{ind['pcm']:.3f}</b></div>
-  <div><span>Ar3</span><b>{ind['ar3']:.0f}</b><em>C</em></div>
   <div><span>true strain</span><b>{ind['true_strain']:.2f}</b></div>
 </div>""", unsafe_allow_html=True)
 
-    finish = raw.get("FM_Finish_Temp", raw.get("Temp_FT_Avg_C", 0.0))
-    margin = finish - ind["ar3"]
     st.markdown(f'<div class="note">Finishing at {finish:.0f} °C sits {margin:+.0f} K above Ar3 '
                 f'({ind["ar3"]:.0f} °C). Below zero the last passes are intercritical, which is where '
                 f'properties start to scatter.</div>', unsafe_allow_html=True)
 
     # In-App Explainability
-    st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
-    with st.expander("🔬 Feature Contribution Breakdown (TreeSHAP Attribution)", expanded=False):
+    st.markdown('<div class="breath"></div>', unsafe_allow_html=True)
+    with st.expander("Feature contribution breakdown (TreeSHAP attribution)", expanded=False):
         tgt_choices = list(TARGET_LABEL[mill])
         def_idx = 1 if len(tgt_choices) > 1 else 0  # Default to TS_BN
         chosen_tgt = st.selectbox("Inspect target attribution", tgt_choices, index=def_idx,
@@ -1314,7 +1506,11 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
 def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     specs = sc.get_available_specs()
     if not specs:
-        st.error("No specifications found in specification-list/SPECIFICATION LIST.xlsx")
+        st.error("No specifications could be loaded from specification-list/SPECIFICATION LIST.xlsx. "
+                 "The workbook ships with the repository and is looked up relative to the app "
+                 "package, so confirm the file is still at that path in this checkout; if you are "
+                 "running a copied or deployed app, make sure the specification-list/ folder was "
+                 "uploaded beside app/. Then rerun this tab.")
         return
 
     # Choose smart defaults
@@ -1339,7 +1535,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     thickness = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
     c3.markdown(f'<div style="padding-bottom:.4rem; font-size:13px; color:#4b5563;">Active Gauge: '
                 f'<b style="font-family:monospace; color:#0b0d10;">{thickness:.1f} mm</b><br>'
-                f'<span style="font-size:10.5px; color:#1746c8; font-weight:600;">Engine: {engine}</span></div>',
+                f'<span style="font-size:11px; color:{ACCENT}; font-weight:600;">Engine: {engine}</span></div>',
                 unsafe_allow_html=True)
 
     preds = predict_selected_engine(mill, raw, engine)
@@ -1368,7 +1564,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     if c_status == "ALL_PASS":
         c_pill_text = "ALL PASS"
     elif c_status == "PARTIAL_VERIFICATION":
-        c_pill_text = f"PARTIAL — {len(chem_info.get('unverifiable', []))} NOT VERIFIABLE"
+        c_pill_text = f"PARTIAL: {len(chem_info.get('unverifiable', []))} NOT VERIFIABLE"
     else:
         c_pill_text = f"{chem_info['fail_count']} OUT OF SPEC"
 
@@ -1377,7 +1573,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     if m_status == "COMPLIANT":
         m_pill_cls, m_pill_text = "ok", "COMPLIANT"
     elif m_status in ("MARGINAL_RISK", "PARTIAL_VERIFICATION"):
-        m_pill_cls, m_pill_text = "warn", "MARGINAL RISK" if m_status == "MARGINAL_RISK" else "PARTIAL — IMPACT NOT VERIFIABLE"
+        m_pill_cls, m_pill_text = "warn", "MARGINAL RISK" if m_status == "MARGINAL_RISK" else "PARTIAL: IMPACT NOT VERIFIABLE"
     elif m_status == "NON_COMPLIANT":
         m_pill_cls, m_pill_text = "bad", "NON-COMPLIANT"
     elif m_status == "NOT_VERIFIABLE":
@@ -1385,7 +1581,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     else:
         m_pill_cls, m_pill_text = "neutral", "NO REQ SPECIFIED"
 
-    st.markdown('<div style="height:0.8rem"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="breath"></div>', unsafe_allow_html=True)
     st.markdown(f"""
 <div class="facts facts-text">
   <div>
@@ -1401,7 +1597,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     <b>{chem_info['pass_count']} / {len(chem_info['active_checks'])} elements in spec</b><em><span class="pill {c_pill_cls}">{c_pill_text}</span></em>
   </div>
   <div>
-    <span>Mechanical Decency</span>
+    <span>Mechanical compliance</span>
     <b>{mech_info['pass_count']} requirements passed</b><em><span class="pill {m_pill_cls}">{m_pill_text}</span></em>
   </div>
 </div>""", unsafe_allow_html=True)
@@ -1409,9 +1605,9 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     if gauge_info.get("message"):
         st.markdown(f'<div class="note">{gauge_info["message"]}</div>', unsafe_allow_html=True)
 
-    # 1. Mechanical Decency Table
-    st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
-    section("mechanical properties decency & certification compliance")
+    # 1. Mechanical compliance table
+    st.markdown('<div class="break"></div>', unsafe_allow_html=True)
+    section("mechanical properties: compliance check")
     st.caption(f"Correlates {mill} ML predictions and 95% split-conformal prediction intervals against "
                f"{chosen_spec} Grade {chosen_grade} requirements. "
                f"A marginal risk indicates the point prediction passes but the 95% interval bound crosses the limit under process variance.")
@@ -1425,7 +1621,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
                 m_rows.append(f"""<tr>
                   <td class="name">{chk['property']} <span class="sub" style="margin-left:.4rem;">{chk.get('note', 'cannot be verified')}</span></td>
                   <td class="sub" style="font-weight:600; color:#374151;">{chk['req_label']}</td>
-                  <td class="val" style="color:#9ca3af;">—</td>
+                  <td class="val" style="color:#6b7280;">—</td>
                   <td class="rng">—</td>
                   <td class="sub">—</td>
                   <td class="flag"><span class="pill warn">NOT VERIFIABLE</span></td>
@@ -1454,7 +1650,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
         st.info(f"No specific mechanical property limits specified for {chosen_spec} Grade {chosen_grade} in standard table.")
 
     # 2. Chemistry Verification Table
-    st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="break"></div>', unsafe_allow_html=True)
     section("chemical composition verification")
     st.caption("Active element limits specified for this standard. Trace unconstrained elements are summarized below.")
 
@@ -1491,7 +1687,7 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
     if unconstrained:
         uncon_pills = " ".join([f'<span class="tag" style="margin:.15rem .2rem; background:#f9fafb;">{u["label"].split()[0]}: {u["actual"]:.3g}%</span>'
                                 for u in unconstrained])
-        st.markdown(f'<div style="margin-top:.6rem; font-size:12px; color:#6b7280;">Unconstrained trace inputs (no standard limit):<br>{uncon_pills}</div>',
+        st.markdown(f'<div style="margin-top:.6rem; font-size:11px; color:#6b7280;">Unconstrained trace inputs (no standard limit):<br>{uncon_pills}</div>',
                     unsafe_allow_html=True)
 
     unverifiable_chem = chem_info.get("unverifiable", [])
@@ -1504,9 +1700,9 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
 
     # 3. Standard Notes & Footnotes Callout
     if eval_res.get("notes"):
-        st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="break"></div>', unsafe_allow_html=True)
         section("standard footnotes & technical notes")
-        st.markdown(f'<div class="note" style="border-left-color:#1746c8; background:#fbfcfe; padding:.75rem .9rem; border-radius:0 4px 4px 0;">'
+        st.markdown(f'<div class="note" style="border-left-color:{ACCENT}; background:#fbfcfe; padding:.75rem .9rem; border-radius:0 4px 4px 0;">'
                     f'<b>Standard Notes (GRP.ST.QA.09):</b><br>{eval_res["notes"]}</div>',
                     unsafe_allow_html=True)
 
@@ -1521,7 +1717,7 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     head = st.columns([1.6, 1.2, 1.4], vertical_alignment="bottom")
     view = head[0].radio("View", ["2D contour", "3D surface", "1D slice"],
                          horizontal=True, key=f"v_{mill}")
-    head[2].caption(("Bounded by house limits — " + cons.describe(limits)) if limits
+    head[2].caption(("Bounded by house limits: " + cons.describe(limits)) if limits
                     else f"Engine: {engine}. Rest of schedule held at sidebar values.")
 
     if view == "1D slice":
@@ -1613,6 +1809,7 @@ def monotone_guardrail(scores, x_key, mill):
     physically-defensible sign. Targets with an ambiguous sign are left untouched."""
     if mill != "Plate" or x_key != "ACC_Laminar_Header":
         return scores
+    from scipy.optimize import isotonic_regression
     out = scores.copy()
     for key, sign in HEADER_SWEEP_SIGN.items():
         if key not in out.columns:
@@ -1687,7 +1884,7 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
 
     fig = make_subplots(rows=len(units), cols=1, shared_xaxes=True, vertical_spacing=0.12,
                         subplot_titles=[f"[{u}]" for u in units])
-    palette = [INK, "#2563eb", "#0ea5e9", "#7c3aed", "#db2777", "#059669"]
+    palette = CHART_SERIES
     first_key, hw = y_keys[0], half_width(y_keys[0])
 
     for r, unit in enumerate(units, start=1):
@@ -1699,7 +1896,7 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
                 fig.add_trace(go.Scatter(x=xs, y=y + hw, line=dict(width=0), hoverinfo="skip",
                                          showlegend=False), row=r, col=1)
                 fig.add_trace(go.Scatter(x=xs, y=y - hw, line=dict(width=0), fill="tonexty",
-                                         fillcolor="rgba(37,99,235,.12)", hoverinfo="skip",
+                                         fillcolor=_rgba(ACCENT, .12), hoverinfo="skip",
                                          showlegend=False, name=f"{label} 95% band"), row=r, col=1)
             fig.add_trace(go.Scatter(
                 x=xs, y=y, mode="lines", name=label, line=dict(color=color, width=2.2),
@@ -1711,7 +1908,7 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
                 fig.add_trace(go.Scatter(
                     x=[p[0] for p in points], y=[p[1]["mean"] for p in points],
                     error_y=dict(type="data", array=[p[1]["se"] for p in points],
-                                 thickness=1, width=3, color="#9ca3af"),
+                                 thickness=1, width=3, color=MUTED),
                     mode="markers", name=f"{label} · observed, adjusted",
                     marker=dict(size=7, symbol="diamond-open", color=color),
                     customdata=[p[1]["n"] for p in points],
@@ -1722,7 +1919,7 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
         fig.update_yaxes(title=unit, row=r, col=1, **axes)
         if x_key in limits:
             for xv in limits[x_key]:
-                fig.add_vline(x=xv, line=dict(color="#9ca3af", width=1, dash="dash"), row=r, col=1)
+                fig.add_vline(x=xv, line=dict(color=MUTED, width=1, dash="dash"), row=r, col=1)
 
     op = predict_selected_engine(mill, point, engine)
     op_x = float(point.get(x_key, xs[len(xs) // 2]))
@@ -1758,7 +1955,7 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
     if observed:
         note += (" Open diamonds are population means from the cleaned training table, adjusted for "
                  "chemistry, gauge and cooling (partial residual) and narrowed to the entered "
-                 "gauge band — not this exact schedule; bars are ±1 standard error. Where that "
+                 "gauge band, not this exact schedule; bars are ±1 standard error. Where that "
                  "scatter is wider than the step you are reading, the step is not distinguishable.")
     st.markdown(f'<div class="note">{note}</div>', unsafe_allow_html=True)
 
@@ -1776,7 +1973,7 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
     section("process capability")
     st.markdown('<div class="note">Set the specification limits, then say how far two or three '
                 'inputs may drift. The app resamples that band, scores every point and reports '
-                'capability — Cp and Cpk on the predicted distribution, not on a single schedule.'
+                'capability: Cp and Cpk on the predicted distribution, not on a single schedule.'
                 '</div>', unsafe_allow_html=True)
 
     keys = list(TARGET_LABEL[mill])
@@ -1819,33 +2016,34 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
         st.caption(f"Reference schedule predicts {base:.1f} {unit}; limits default to ±{tolerance:g}.")
         return
 
-    rng = np.random.default_rng(42)
-    frame = pd.DataFrame([dict(raw) for _ in range(samples)])
-    for key, band in bands.items():
-        centre = float(raw[key])
-        frame[key] = rng.uniform(centre - band, centre + band, samples)
-    scored_frame = score_frame(mill, frame, engine=engine)
-    if target not in scored_frame.columns:
-        st.error(f"{TARGET_LABEL[mill][target][0]} cannot be scored with the {engine} engine "
-                 "(no linear fit clears the R² floor for it). Switch engine or property.")
-        return
-    scored_all = scored_frame[target].values
-    keep = np.isfinite(scored_all)
-    frame = frame.loc[keep].reset_index(drop=True)
-    scored = scored_all[keep]
-    if scored.size < 30:
-        st.error("Too few scoring points came back — widen the band or change property.")
-        return
+    with st.spinner("Running capability study..."):
+        rng = np.random.default_rng(42)
+        frame = pd.DataFrame([dict(raw) for _ in range(samples)])
+        for key, band in bands.items():
+            centre = float(raw[key])
+            frame[key] = rng.uniform(centre - band, centre + band, samples)
+        scored_frame = score_frame(mill, frame, engine=engine)
+        if target not in scored_frame.columns:
+            st.error(f"{TARGET_LABEL[mill][target][0]} cannot be scored with the {engine} engine "
+                     "(no linear fit clears the R² floor for it). Switch engine or property.")
+            return
+        scored_all = scored_frame[target].values
+        keep = np.isfinite(scored_all)
+        frame = frame.loc[keep].reset_index(drop=True)
+        scored = scored_all[keep]
+        if scored.size < 30:
+            st.error("Too few scoring points came back: widen the band or change property.")
+            return
 
-    mean, sd = float(np.mean(scored)), float(np.std(scored, ddof=1))
-    cp = (usl - lsl) / (6 * sd) if sd > 0 else float("inf")
-    cpk = min(usl - mean, mean - lsl) / (3 * sd) if sd > 0 else float("inf")
-    oos = float(np.mean((scored < lsl) | (scored > usl)) * 100)
-    # the sampled band only carries process drift; the model's own residual is a
-    # separate source of spread and belongs in a certification decision
-    sigma_model = get_target_interval_half(mill, target) / 1.96
-    sigma_total = float(np.sqrt(sd ** 2 + sigma_model ** 2))
-    cpk_total = min(usl - mean, mean - lsl) / (3 * sigma_total) if sigma_total > 0 else float("inf")
+        mean, sd = float(np.mean(scored)), float(np.std(scored, ddof=1))
+        cp = (usl - lsl) / (6 * sd) if sd > 0 else float("inf")
+        cpk = min(usl - mean, mean - lsl) / (3 * sd) if sd > 0 else float("inf")
+        oos = float(np.mean((scored < lsl) | (scored > usl)) * 100)
+        # the sampled band only carries process drift; the model's own residual is a
+        # separate source of spread and belongs in a certification decision
+        sigma_model = get_target_interval_half(mill, target) / 1.96
+        sigma_total = float(np.sqrt(sd ** 2 + sigma_model ** 2))
+        cpk_total = min(usl - mean, mean - lsl) / (3 * sigma_total) if sigma_total > 0 else float("inf")
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Cp", f"{cp:.2f}")
@@ -1857,12 +2055,12 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
                f"{scored.size} scored points · band "
                + ", ".join(f"{spec_map(mill)[k][2]} ±{bands[k]:g}" for k in bands))
     st.caption("Cp and Cpk describe the sampled process band only. Cpk incl. model σ adds the "
-               "model's residual spread — use that one before promising a certification limit.")
+               "model's residual spread: use that one before promising a certification limit.")
 
-    fig = go.Figure(go.Histogram(x=scored, nbinsx=45, marker_color="#c9d7f5",
-                                 marker_line_color="#1746c8", marker_line_width=.6))
+    fig = go.Figure(go.Histogram(x=scored, nbinsx=45, marker_color=ACCENT_RAMP[4],
+                                 marker_line_color=ACCENT, marker_line_width=.6))
     for value, label in ((lsl, "LSL"), (usl, "USL")):
-        fig.add_vline(x=value, line_color="#b45309", line_width=1.4, line_dash="dash",
+        fig.add_vline(x=value, line_color=WARN_LINE, line_width=1.4, line_dash="dash",
                       annotation_text=label, annotation_position="top", annotation_font_size=10)
     fig.add_vline(x=mean, line_color="#111418", line_width=1)
     fig.update_layout(height=290, margin=dict(l=10, r=10, t=20, b=10), plot_bgcolor="white",
@@ -1883,20 +2081,20 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
         grid = np.linspace(x[ok].min(), x[ok].max(), 60)
         band_fig = go.Figure()
         band_fig.add_trace(go.Scatter(x=x[ok], y=scored[ok], mode="markers",
-                                      marker=dict(size=4, color="#9db4e8", opacity=.45),
+                                      marker=dict(size=4, color=ACCENT_RAMP[3], opacity=.45),
                                       name="sampled"))
         band_fig.add_trace(go.Scatter(x=grid, y=slope * grid + intercept, mode="lines",
-                                      line=dict(color="#1746c8", width=1.6), name="fit"))
+                                      line=dict(color=ACCENT, width=1.6), name="fit"))
         band_fig.add_trace(go.Scatter(x=np.concatenate([grid, grid[::-1]]),
                                       y=np.concatenate([slope * grid + intercept + 3 * resid_sd,
                                                         (slope * grid + intercept - 3 * resid_sd)[::-1]]),
-                                      fill="toself", fillcolor="rgba(23,70,200,.10)",
+                                      fill="toself", fillcolor=_rgba(ACCENT, .10),
                                       line=dict(width=0), name="±3σ"))
         for value, label in ((lsl, "LSL"), (usl, "USL")):
-            band_fig.add_hline(y=value, line_color="#b45309", line_width=1, line_dash="dash")
+            band_fig.add_hline(y=value, line_color=WARN_LINE, line_width=1, line_dash="dash")
         band_fig.update_layout(height=250, margin=dict(l=10, r=10, t=26, b=10), plot_bgcolor="white",
                                paper_bgcolor="white", showlegend=False,
-                               title=dict(text=f"{spec_map(mill)[key][2]} — {slope:+.2f} "
+                               title=dict(text=f"{spec_map(mill)[key][2]}: {slope:+.2f} "
                                                f"{unit} per {spec_map(mill)[key][3]}",
                                           font=dict(size=11), x=0),
                                xaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
@@ -1910,8 +2108,8 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
                 'back. Every row is scored through the same feature module the simulator uses.</div>',
                 unsafe_allow_html=True)
     a, b = st.columns([1, 3], vertical_alignment="bottom")
-    a.download_button("Template .xlsx", template_bytes(mill), file_name=f"{mill.lower()}_template.xlsx",
-                      use_container_width=True)
+    a.download_button("Download template (.xlsx)", template_bytes(mill),
+                      file_name=f"{mill.lower()}_template.xlsx", use_container_width=True)
     uploaded = b.file_uploader("Filled sheet", type=["xlsx", "csv"], key=f"up_{mill}",
                                label_visibility="collapsed")
     if uploaded is None:
@@ -1923,7 +2121,7 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
     if missing_inputs:
         st.error("These input columns are missing from the sheet: "
                  + ", ".join(missing_inputs)
-                 + ". Download the template for the exact headers — scoring would otherwise "
+                 + ". Download the template for the exact headers: scoring would otherwise "
                    "substitute defaults without telling you.")
         return
     if len(frame) > 20000:
@@ -1931,9 +2129,18 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
                  "upload twice so the browser does not run out of memory.")
         return
     try:
-        scored = score_frame(mill, frame, engine=engine)
+        with st.spinner(f"Scoring {len(frame):,} rows..."):
+            scored = score_frame(mill, frame, engine=engine)
     except Exception as exc:
         st.error(f"Scoring failed: {type(exc).__name__}: {exc}")
+        st.markdown('<div class="note">To recover, check in order: <b>1.</b> every column header '
+                    'matches the downloaded template exactly (headers, units and spelling — '
+                    'scoring substitutes defaults silently for anything it cannot find); '
+                    '<b>2.</b> every numeric cell holds a plain number, with no thousand '
+                    'separators, units or text such as "hot" left in; <b>3.</b> the sheet stays '
+                    'under the 20,000-row limit and the gauges and temperatures sit inside the '
+                    'mill\'s permitted bands. Fix the offending rows and upload again.</div>',
+                    unsafe_allow_html=True)
         return
     table = pd.concat([frame[[c for c in frame.columns if c in spec_map(mill)]].reset_index(drop=True),
                        scored.add_prefix("pred_").reset_index(drop=True)], axis=1)
@@ -1956,14 +2163,14 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
         ood_rows = int((outside > 0).sum())
         if ood_rows:
             st.warning(f"{ood_rows:,} of {len(frame):,} rows sit outside the historical "
-                       f"P01–P99 envelope on at least one input — those predictions are "
+                       f"P01–P99 envelope on at least one input: those predictions are "
                        f"extrapolation and should be read as such.")
 
     chem_cols = [c for c in frame.columns if c.startswith("Chem_")]
     if chem_cols:
         blank_chem = int(frame[chem_cols].isna().all(axis=1).sum())
         if blank_chem:
-            st.warning(f"{blank_chem:,} row(s) carry no chemistry at all — every element was "
+            st.warning(f"{blank_chem:,} row(s) carry no chemistry at all: every element was "
                        f"imputed, so those predictions describe a hypothetical heat, not one "
                        f"you measured. Fill the chemistry columns before certifying anything.")
     st.dataframe(table.head(200), use_container_width=True, height=320)
@@ -2013,19 +2220,19 @@ def log_table(rows, key):
     st.dataframe(frame.iloc[::-1], use_container_width=True, hide_index=True)
     st.download_button("Download training log (CSV)", frame.to_csv(index=False).encode(),
                        file_name="training_log.csv", key=f"logdl_{key}")
-    st.caption("The log file lives beside the app, which is read-only on Streamlit Cloud — "
+    st.caption("The log file lives beside the app, which is read-only on Streamlit Cloud: "
                "there the history is session-only. Download the CSV to keep it.")
 
 
 def view_retrain(mill):
     section("refit from your own sheet")
-    st.markdown('<div class="note">The shipped models are baked artefacts, not incrementally trainable — '
+    st.markdown('<div class="note">The shipped models are baked artefacts, not incrementally trainable: '
                 'a stacking ensemble cannot be fine-tuned by feeding it more rows. What this does '
                 'instead is honest: it refits a fresh model for one property from your sheet, using '
                 'the same feature module and a melt-grouped holdout.</div>', unsafe_allow_html=True)
 
     tl, tr = st.columns([1, 3], vertical_alignment="bottom")
-    tl.download_button("Retrain template .xlsx", retrain_template_bytes(mill),
+    tl.download_button("Download retrain template (.xlsx)", retrain_template_bytes(mill),
                        file_name=f"{mill.lower()}_retrain_template.xlsx", use_container_width=True,
                        key=f"rttpl_{mill}")
     up = tr.file_uploader("Sheet with a measured property column", type=["xlsx", "csv"],
@@ -2071,7 +2278,7 @@ def view_retrain(mill):
     if dropped:
         st.caption(f"{dropped} measured values fell outside {lo:g}–{hi:g} and were dropped.")
     if ok.sum() < 120:
-        st.error(f"Only {int(ok.sum())} usable measured rows — too few to hold anything out.")
+        st.error(f"Only {int(ok.sum())} usable measured rows: too few to hold anything out.")
         return
     X = feature_matrix(mill, prepare_frame(mill, frame.loc[ok])).fillna(0.0)
     y = y[ok]
@@ -2098,10 +2305,11 @@ def view_retrain(mill):
              "XGBoost": XGBRegressor(n_estimators=500, max_depth=5, learning_rate=.04,
                                      subsample=.85, colsample_bytree=.85, tree_method="hist",
                                      n_jobs=-1, random_state=42)}[family]
-    model.fit(X.iloc[tr], y.iloc[tr])
-    pred = model.predict(X.iloc[te])
-    r2 = 1 - ((y.iloc[te] - pred) ** 2).sum() / ((y.iloc[te] - y.iloc[te].mean()) ** 2).sum()
-    rmse = float(np.sqrt(((y.iloc[te] - pred) ** 2).mean()))
+    with st.spinner("Fitting model..."):
+        model.fit(X.iloc[tr], y.iloc[tr])
+        pred = model.predict(X.iloc[te])
+        r2 = 1 - ((y.iloc[te] - pred) ** 2).sum() / ((y.iloc[te] - y.iloc[te].mean()) ** 2).sum()
+        rmse = float(np.sqrt(((y.iloc[te] - pred) ** 2).mean()))
 
     m1, m2, m3 = st.columns(3)
     m1.metric("holdout R²", f"{r2:.3f}")
@@ -2117,7 +2325,7 @@ def view_retrain(mill):
     if ref_r2 is not None:
         st.markdown(f'<div class="note">Compared against the shipped model for this route: '
                     f'R² {ref_r2:.3f} '
-                    f'on the campaign holdout — different data, so read the pair as a sanity check, '
+                    f'on the campaign holdout. Different data, so read the pair as a sanity check, '
                     f'not a contest.</div>', unsafe_allow_html=True)
 
     import joblib
@@ -2141,7 +2349,7 @@ def view_about():
     st.markdown("""
 A property model for both rolling routes: heavy plate off the roughing and finishing mills with
 laminar accelerated cooling, and Steckel mill coil off the reversing mill and runout table. It
-answers one operational question — what will this heat certify — from chemistry, drafting and
+answers one operational question, what will this heat certify, from chemistry, drafting and
 cooling alone.
 
 Predictions come with the interval their split-conformal calibration implies, not a bare number,
@@ -2152,17 +2360,17 @@ are lower than a naive fit would show.
 
     section("how it is built")
     st.markdown("""
-- **Features** — Pickering solid-solution strengthening, Hall–Petch `1/sqrt(t)`, true strain
+- **Features**: Pickering solid-solution strengthening, Hall–Petch `1/sqrt(t)`, true strain
   `ln(t_slab / t_plate)`, carbon equivalents, `Ar3`, and the finishing-temperature margin above it.
   No raw log dump: every input has a metallurgical definition.
-- **Models** — nine families fitted per target (OLS, metallurgical NLR, Ridge, XGBoost, LightGBM,
+- **Models**: nine families fitted per target (OLS, metallurgical NLR, Ridge, XGBoost, LightGBM,
   CatBoost, stacking and bagged ensembles), selected by melt-held-out leaderboard rather than
   assumption. One caveat to keep visible: the NLR constitutive fit carries five terms (gauge,
   solid solution, CE, header cooling, total strain) and **no finishing-temperature term**, so
   read it for chemistry and gauge effects, not for how the exit temperature moves properties.
-- **Uncertainty** — 95 % intervals from split-conformal calibration on held-out melts, checked
+- **Uncertainty**: 95 % intervals from split-conformal calibration on held-out melts, checked
   against melt-grouped bootstrap resampling; both reports ship beside every score.
-- **Stack** — Python, pandas, scikit-learn, XGBoost, LightGBM, CatBoost, Plotly, Streamlit.
+- **Stack**: Python, pandas, scikit-learn, XGBoost, LightGBM, CatBoost, Plotly, Streamlit.
 """)
 
     section("status")
@@ -2176,9 +2384,9 @@ rolling parameters, and any values beyond these boundaries represent extrapolati
 
     c1, c2 = st.columns(2)
     c1.markdown("**Code and notebooks**  \n[github.com/daniswaramp/hot-rolling-mechanical-models]"
-                "(https://github.com/daniswaramp/hot-rolling-mechanical-models) — models, reports and "
+                "(https://github.com/daniswaramp/hot-rolling-mechanical-models): models, reports and "
                 "both executed notebooks. The campaign sheets themselves are not published.")
-    c2.markdown("**Author**  \nSulaeman Daniswara Mulya Putera — process and metallurgical engineer, "
+    c2.markdown("**Author**  \nSulaeman Daniswara Mulya Putera, process and metallurgical engineer, "
                 "steel hot rolling. [LinkedIn](https://www.linkedin.com/in/daniswaramp)")
 
 
@@ -2196,7 +2404,7 @@ def load_val_predictions(mill):
 
 
 def view_diagnostics(mill):
-    section("model governance & audit dashboard")
+    section("model governance & audit")
 
     # Governance numbers come from the generated manifest, never from constants in
     # this file: models/data_audit.json separates what the artifacts were trained on
@@ -2213,7 +2421,7 @@ def view_diagnostics(mill):
     targets_current = current.get("targets") or {}
 
     if not targets_trained:
-        st.warning("models/data_audit.json is missing for this route — run "
+        st.warning("models/data_audit.json is missing for this route: run "
                    "`python app\\build_data_audit.py` and redeploy. The split audit below "
                    "cannot be shown without it, and no numbers are invented in its place.")
 
@@ -2232,15 +2440,15 @@ def view_diagnostics(mill):
 <div class="facts" style="margin: 0.8rem 0 1.2rem;">
   <div><span>Records Ingested (as trained)</span><b>{_fmt(total_records)}</b><em>{mill} products</em></div>
   <div><span>Usable Rows (cleaned today)</span><b>{_fmt(usable_rows)}</b><em>after sanitising</em></div>
-  <div><span>Heats — Training Campaign</span><b>{_fmt(total_heats)}</b><em>{_fmt(train_heats)} train · {_fmt(holdout_heats)} holdout</em></div>
+  <div><span>Heats: training campaign</span><b>{_fmt(total_heats)}</b><em>{_fmt(train_heats)} train · {_fmt(holdout_heats)} holdout</em></div>
   <div><span>Distinct Melts (cleaned today)</span><b>{_fmt(current_heats)}</b><em>current cleaned tables</em></div>
 </div>""", unsafe_allow_html=True)
 
     # 2. Dataset & Training Split Audit Table
-    st.markdown("#### 1. Dataset & Training Split Audit")
+    st.markdown("#### 1. Training split")
     st.caption("Every melt heat (ladle cast) is assigned exclusively to Train or Holdout. "
                "The first table is the split the shipped artifacts were fitted with, recorded "
-               "at training time; the second is what the cleaned tables contain today — the two "
+               "at training time; the second is what the cleaned tables contain today. The two "
                "differ because the sanitising pass repaired cells and removed duplicate rows "
                "after the campaign.")
 
@@ -2252,18 +2460,17 @@ def view_diagnostics(mill):
             audit_rows.append(f"""<tr>
               <td class="name">{label} <span class="unit">[{unit}]</span></td>
               <td class="val">{split.get('train_rows', 0):,}</td>
-              <td class="val" style="color:#1746c8;">{split.get('holdout_rows', 0):,}</td>
+              <td class="val" style="color:{ACCENT};">{split.get('holdout_rows', 0):,}</td>
               <td class="sub" style="font-family:monospace; text-align:right;">{split.get('holdout_heats', 0):,}</td>
               <td class="sub" style="font-family:monospace; text-align:right;">{split.get('report_samples', 0):,.0f}</td>
-              <td class="sub" style="text-align:right;"><span class="pill ok">GroupSplit</span></td>
-              <td class="sub" style="text-align:left; font-size:11.5px;">{'holdout R² ' + format(score, '.3f') if score is not None else '—'}</td>
+              <td class="sub" style="text-align:left;">{'holdout R² ' + format(score, '.3f') if score is not None else '—'}</td>
             </tr>""")
         st.markdown(
             '<div class="card"><table class="ut">'
             '<thead><tr><th>Target Property</th><th>Trained Rows</th><th>Holdout Rows</th>'
-            '<th>Holdout Melts</th><th>Report Samples</th><th>Split</th><th>As-Trained Score</th></tr></thead><tbody>'
+            '<th>Holdout Melts</th><th>Report Samples</th><th>As-Trained Score</th></tr></thead><tbody>'
             + "".join(audit_rows) +
-            f'</tbody></table><div class="foot"><b>Zero Data Leakage Invariant</b>: sister plates or coils from one melt stay exclusively in Train or Holdout — '
+            f'</tbody></table><div class="foot"><b>Melt-grouped holdout check</b>: sister plates or coils from one melt stay exclusively in Train or Holdout. '
             f'<code>{audit.get("split_method", "GroupShuffleSplit on Heat_ID")}</code>, plus 100 heat-level bootstrap resamples. '
             f'Recorded at training time; report samples on this route = {audit.get("samples_semantics", "see campaign report")}.</div></div>',
             unsafe_allow_html=True,
@@ -2271,7 +2478,7 @@ def view_diagnostics(mill):
 
     if current:
         duplicates = current.get("duplicate_rows_removed", 0)
-        st.markdown("##### Cleaned tables — current state")
+        st.markdown("##### Cleaned tables: current state")
         st.markdown(f"""
 <div class="facts">
   <div><span>Rows removed as duplicates</span><b>{duplicates:,}</b><em>exact records</em></div>
@@ -2296,12 +2503,13 @@ def view_diagnostics(mill):
             unsafe_allow_html=True,
         )
 
-    st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
-    
-    # 3. Model Architecture Comparison Scorecard
-    st.markdown("#### 2. Multi-Architecture Validation Scorecard")
-    st.caption("Side-by-side performance across model tiers evaluated on held-out heats. Champion GBDT runs by default for instant cold-start (&lt;0.5s).")
-    
+    st.markdown('<div class="break"></div>', unsafe_allow_html=True)
+
+    # 3. Holdout accuracy by model family
+    st.markdown("#### 2. Holdout accuracy by model family")
+    st.caption("Side-by-side holdout scores for every model tier fitted on this route, evaluated "
+               "on whole held-out melts. Champion GBDT is the default scoring engine.")
+
     lb = ml.get_leaderboard_data(mill)
     ci = ml.get_ci_data(mill)
     plan = champion_plan(mill)
@@ -2325,7 +2533,7 @@ def view_diagnostics(mill):
             champ_r2 = champ_cfg.get("r2")
             champ_badge_cls = "ok" if fam_key in ("cat", "xgb", "lgbm") else "warn"
             champ_cell = (f'<span class="pill {champ_badge_cls}">{fam_name}</span> '
-                          f'<b style="font-family:monospace; font-size:13px; color:#1746c8;">{champ_r2:.3f}</b>'
+                          f'<b style="font-family:monospace; font-size:13px; color:{ACCENT};">{champ_r2:.3f}</b>'
                           if champ_r2 is not None else '<span class="muted">—</span>')
 
             # Ensemble info
@@ -2336,7 +2544,7 @@ def view_diagnostics(mill):
             # Linear baseline info (OLS)
             ols_spec = lfam.get(target_key, {}).get("ols", {})
             ols_r2 = ols_spec.get("r2")
-            ols_cell = f"{ols_r2:.3f}" if ols_r2 is not None and ols_r2 >= 0.15 else '<span style="color:#9ca3af;">&lt;0.15</span>'
+            ols_cell = f"{ols_r2:.3f}" if ols_r2 is not None and ols_r2 >= 0.15 else f'<span style="color:{MUTED};">&lt;0.15</span>'
 
             # Uncertainty & tolerance
             r2_ci = f"{r['R2_95_CI_Low']:.3f} – {r['R2_95_CI_High']:.3f}" if pd.notna(r.get("R2_95_CI_Low")) else "—"
@@ -2351,7 +2559,7 @@ def view_diagnostics(mill):
               <td class="sub" style="font-family:monospace; text-align:right;">{ols_cell}</td>
               <td class="sub" style="font-family:monospace;">{rmse}</td>
               <td class="rng">{r2_ci}</td>
-              <td class="val" style="color:#1746c8;">{hit}</td>
+              <td class="val" style="color:{ACCENT};">{hit}</td>
               <td class="rng">{samples}</td>
             </tr>""")
 
@@ -2361,7 +2569,7 @@ def view_diagnostics(mill):
             '<th>Linear Baseline (OLS)</th><th>Holdout RMSE</th><th>95% Bootstrap CI</th>'
             '<th>Within Tol (±20 MPa)</th><th>Test Samples</th></tr></thead><tbody>'
             + "".join(rows) +
-            '</tbody></table><div class="foot"><b>Model Selector</b>: Operators can toggle between Champion GBDT, CatBoost, XGBoost, LightGBM, Stacking Ensemble, and OLS/Linear in the sidebar dropdown.</div></div>',
+            '</tbody></table><div class="foot"><b>Engine selector</b>: scoring engines (Champion GBDT, CatBoost, XGBoost, LightGBM, Stacking Ensemble, OLS/Linear) can be toggled in the sidebar dropdown.</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -2380,7 +2588,7 @@ def view_diagnostics(mill):
                 "val_r2": m.get("val_r2"), "val_rmse": m.get("val_rmse"),
                 "conformal ±95": m.get("conformal_half_width_95"), "status": m.get("status"),
             } for m in reg_models]).sort_values(["target", "family"])
-            with st.expander(f"Artifact registry — v{registry.get('registry_version')}, "
+            with st.expander(f"Artifact registry: v{registry.get('registry_version')}, "
                              f"{registry.get('total_models')} artifacts shipped, "
                              f"updated {str(registry.get('updated_at'))[:10]}", expanded=False):
                 st.caption("Every shipped artifact carries the SHA-256 recorded at build time. "
@@ -2388,21 +2596,21 @@ def view_diagnostics(mill):
                            "model no longer belong together.")
                 st.dataframe(reg_frame, hide_index=True, use_container_width=True)
 
-    # 4. Interactive Engineering & Technology Deep-Dive Tabs
-    st.markdown('<div style="height:1.8rem"></div>', unsafe_allow_html=True)
-    st.markdown("#### 3. Technology, Training & Optimization Deep Dive")
-    st.caption("Interactive inspection of model calibration, inverse setpoint optimization, physical metallurgy features, and cloud training architecture.")
-    
+    # 4. Interactive inspection subtabs
+    st.markdown('<div class="break"></div>', unsafe_allow_html=True)
+    st.markdown("#### 3. How the models are trained and served")
+    st.caption("Model calibration, inverse setpoints, physics features, and what runs where.")
+
     val_df = load_val_predictions(mill)
     conf_df = ml.get_conformal_intervals(mill)
-    
+
     diag_tabs = st.tabs([
-        "🎯 Parity & Residual Errors",
-        "🛡️ Conformal Calibration & Uncertainty",
-        "⚙️ Inverse Optimization & Pareto Frontier",
-        "🔬 Metallurgy Features & Physics Sandbox",
-        "🏗️ System Architecture & Cloud Training",
-        "📊 Process Window (EDA) & Drivers"
+        "Parity & residuals",
+        "Conformal calibration",
+        "Inverse optimization",
+        "Metallurgy features",
+        "System architecture",
+        "Process window & drivers"
     ])
     
     with diag_tabs[0]:
@@ -2445,21 +2653,21 @@ def view_diagnostics(mill):
                 fig_par.add_trace(go.Scatter(
                     x=[p_min, p_max, p_max, p_min],
                     y=[p_min + t_tol, p_max + t_tol, p_max - t_tol, p_min - t_tol],
-                    fill="toself", fillcolor="rgba(23,70,200,0.08)", line=dict(width=0),
+                    fill="toself", fillcolor=_rgba(ACCENT, 0.08), line=dict(width=0),
                     name=f"±{t_tol:g} {t_unit} tolerance", hoverinfo="skip"
                 ))
                 fig_par.add_trace(go.Scatter(
                     x=[p_min, p_max], y=[p_min, p_max], mode="lines",
-                    line=dict(color="#b45309", width=1.5, dash="dash"), name="Ideal 1:1"
+                    line=dict(color=WARN_LINE, width=1.5, dash="dash"), name="Ideal 1:1"
                 ))
                 fig_par.add_trace(go.Scatter(
                     x=y_act, y=y_pr, mode="markers",
-                    marker=dict(size=4.5, color="#1746c8", opacity=0.45),
+                    marker=dict(size=4.5, color=ACCENT, opacity=0.45),
                     text=[f"Actual: {a:.1f}<br>Pred: {p:.1f}<br>Diff: {p-a:+.1f}" for a, p in zip(y_act, y_pr)],
                     hoverinfo="text", name="Held-Out Samples"
                 ))
                 fig_par.update_layout(
-                    title=dict(text=f"Parity Chart — {t_label} (N = {len(y_act):,} test samples)", font=dict(size=12)),
+                    title=dict(text=f"Parity chart: {t_label} (N = {len(y_act):,} test samples)", font=dict(size=12)),
                     xaxis=dict(title=f"Actual Measured [{t_unit}]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
                     yaxis=dict(title=f"Predicted [{t_unit}]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
                     height=360, margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="white", paper_bgcolor="white", showlegend=False
@@ -2468,12 +2676,12 @@ def view_diagnostics(mill):
                 
             with col_chart2:
                 fig_res = go.Figure(go.Histogram(
-                    x=residuals, nbinsx=35, marker_color="#c9d7f5",
-                    marker_line_color="#1746c8", marker_line_width=0.6
+                    x=residuals, nbinsx=35, marker_color=ACCENT_RAMP[4],
+                    marker_line_color=ACCENT, marker_line_width=0.6
                 ))
                 fig_res.add_vline(x=0, line_color="#111418", line_width=1.2)
-                fig_res.add_vline(x=t_tol, line_color="#b45309", line_width=1, line_dash="dash")
-                fig_res.add_vline(x=-t_tol, line_color="#b45309", line_width=1, line_dash="dash")
+                fig_res.add_vline(x=t_tol, line_color=WARN_LINE, line_width=1, line_dash="dash")
+                fig_res.add_vline(x=-t_tol, line_color=WARN_LINE, line_width=1, line_dash="dash")
                 fig_res.update_layout(
                     title=dict(text=f"Residual Error Spread (Bias: {residuals.mean():+.2f} {t_unit})", font=dict(size=12)),
                     xaxis=dict(title=f"Prediction Error (Pred - Actual) [{t_unit}]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
@@ -2513,15 +2721,15 @@ def view_diagnostics(mill):
                 fig_cov = go.Figure()
                 fig_cov.add_trace(go.Bar(
                     x=conf_df["Target"], y=conf_df["Old_Naive_Coverage_Pct"],
-                    name="Old Naive Formula (~25%)", marker_color="#f87171",
+                    name="Old Naive Formula (~25%)", marker_color=BAD_LINE,
                     text=[f"{v:.1f}%" for v in conf_df["Old_Naive_Coverage_Pct"]], textposition="auto"
                 ))
                 fig_cov.add_trace(go.Bar(
                     x=conf_df["Target"], y=conf_df["Coverage_95_Pct"],
-                    name="95% Split-Conformal (Calibrated)", marker_color="#1746c8",
+                    name="95% Split-Conformal (Calibrated)", marker_color=ACCENT,
                     text=[f"{v:.1f}%" for v in conf_df["Coverage_95_Pct"]], textposition="auto"
                 ))
-                fig_cov.add_hline(y=95.0, line_dash="dash", line_color="#10b981", line_width=1.5,
+                fig_cov.add_hline(y=95.0, line_dash="dash", line_color=SEMANTIC_OK, line_width=1.5,
                                   annotation_text="95% Nominal Guarantee", annotation_position="top left")
                 fig_cov.update_layout(
                     title=dict(text="Empirical Coverage Audit: Naive Gaussian SE vs Split-Conformal Calibration", font=dict(size=12)),
@@ -2536,12 +2744,12 @@ def view_diagnostics(mill):
                 fig_w = go.Figure()
                 fig_w.add_trace(go.Bar(
                     x=conf_df["Target"], y=conf_df["Conformal_Half_Width_95"],
-                    name="95% Conformal Width (±)", marker_color="#3b82f6",
+                    name="95% Conformal Width (±)", marker_color=ACCENT_RAMP[2],
                     text=[f"±{v:.1f} {u}" for v, u in zip(conf_df["Conformal_Half_Width_95"], conf_df["Unit"])], textposition="auto"
                 ))
                 fig_w.add_trace(go.Bar(
                     x=conf_df["Target"], y=conf_df["Old_Naive_Half_Width"],
-                    name="Old Naive Width (±)", marker_color="#d1d5db",
+                    name="Old Naive Width (±)", marker_color=HAIR,
                     text=[f"±{v:.1f}" for v in conf_df["Old_Naive_Half_Width"]], textposition="auto"
                 ))
                 fig_w.update_layout(
@@ -2556,7 +2764,7 @@ def view_diagnostics(mill):
             st.caption("Conformal interval data not available.")
 
     with diag_tabs[2]:
-        st.caption("Reverse engineering: solving for optimal chemistry and thermomechanical rolling setpoints to fulfill target specification limits at minimal Carbon Equivalent.")
+        st.caption("Solves for chemistry and rolling setpoints that meet the spec at the 95% conformal bound.")
         presets = optimizer.PRESET_GRADES[mill]
         c_s1, c_s2, c_s3 = st.columns([2.0, 1.5, 1.5], vertical_alignment="bottom")
         diag_opt_spec = c_s1.selectbox("Customer Specification Standard", list(presets.keys()), index=0, key=f"diag_opt_spec_{mill}")
@@ -2588,7 +2796,7 @@ def view_diagnostics(mill):
             if not non_comp.empty:
                 fig_opt.add_trace(go.Scatter(
                     x=non_comp["ce_iiw"], y=non_comp["pred_ys"],
-                    mode="markers", marker=dict(size=6, color="#cbd5e1", opacity=0.6),
+                    mode="markers", marker=dict(size=6, color=HAIR, opacity=0.6),
                     name="Infeasible (Below 95% Spec)",
                     text=[f"C: {c:.2f}%, Mn: {mn:.2f}%<br>Pred YS: {y} MPa (Lower 95%: {ly} MPa)<br>Req YS: {s_cfg.get('ys_min', 0)} MPa"
                           for c, mn, y, ly in zip(non_comp["Chem_C"], non_comp["Chem_Mn"], non_comp["pred_ys"], non_comp["lower_ys"])],
@@ -2599,7 +2807,7 @@ def view_diagnostics(mill):
             if not comp.empty:
                 fig_opt.add_trace(go.Scatter(
                     x=comp["ce_iiw"], y=comp["pred_ys"],
-                    mode="markers", marker=dict(size=7, color="#1746c8", opacity=0.7),
+                    mode="markers", marker=dict(size=7, color=ACCENT, opacity=0.7),
                     name="Feasible (Cpk ≥ 1.33 Conformal)",
                     text=[f"C: {c:.2f}%, Mn: {mn:.2f}%<br>Pred YS: {y} MPa (Lower 95%: {ly} MPa)<br>Req YS: {s_cfg.get('ys_min', 0)} MPa"
                           for c, mn, y, ly in zip(comp["Chem_C"], comp["Chem_Mn"], comp["pred_ys"], comp["lower_ys"])],
@@ -2609,19 +2817,19 @@ def view_diagnostics(mill):
             fig_opt.add_trace(go.Scatter(
                 x=[best["ce_iiw"]], y=[best["pred_ys"]],
                 mode="markers+text",
-                marker=dict(size=16, color="#f59e0b", symbol="star", line=dict(color="#b45309", width=1.5)),
+                marker=dict(size=16, color=WARN_STAR, symbol="star", line=dict(color=WARN_LINE, width=1.5)),
                 name="Optimal Setpoint", text=["Optimal Champion"], textposition="top center"
             ))
 
             if "ys_min" in s_cfg:
                 fig_opt.add_hline(
-                    y=s_cfg["ys_min"] + q_ys, line_dash="dot", line_color="#10b981", line_width=1.5,
+                    y=s_cfg["ys_min"] + q_ys, line_dash="dot", line_color=SEMANTIC_OK, line_width=1.5,
                     annotation_text=f"Compliance Threshold (Spec Min + 95% Conformal Buffer: {s_cfg['ys_min'] + q_ys:.1f} MPa)",
                     annotation_position="bottom right"
                 )
 
             fig_opt.update_layout(
-                title=dict(text=f"Inverse Setpoint Search Landscape — {diag_opt_spec} ({d_thick} mm Plate)", font=dict(size=12)),
+                title=dict(text=f"Inverse setpoint search landscape: {diag_opt_spec} ({d_thick} mm Plate)", font=dict(size=12)),
                 xaxis=dict(title="Carbon Equivalent (CE_IIW = C + Mn/6 + 5Nb)", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
                 yaxis=dict(title="Predicted Yield Strength [MPa]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
                 height=380, margin=dict(l=10, r=10, t=35, b=10),
@@ -2673,7 +2881,7 @@ def view_diagnostics(mill):
 
         fig_phys = go.Figure(go.Bar(
             x=phys_df["Mechanism"], y=phys_df["Strength_MPa"],
-            marker_color=["#64748b", "#1746c8", "#2563eb", "#3b82f6", "#60a5fa"],
+            marker_color=[MUTED, ACCENT_DARK, ACCENT, ACCENT_RAMP[1], ACCENT_RAMP[2]],
             text=[f"+{v:.1f} MPa" for v in phys_df["Strength_MPa"]], textposition="auto"
         ))
         fig_phys.update_layout(
@@ -2685,149 +2893,154 @@ def view_diagnostics(mill):
         st.plotly_chart(fig_phys, use_container_width=True)
 
     with diag_tabs[4]:
-        st.caption("End-to-end industrial machine learning engineering stack: from raw Excel campaign sheets to serverless distributed training and edge deployment.")
+        st.caption("What runs where, from the campaign sheets to the served artifacts. The first "
+                   "two rows are the claims a number on this platform depends on.")
+        n_holdout = _fmt(holdout_heats)
         st.markdown(f"""
-        <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1rem 0;">
-          <div class="card" style="padding: 1.1rem;">
-            <span class="pill ok">1. Data Ingestion &amp; ETL</span>
-            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Pure Python Calamine Engine</div>
-            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
-              Extracts <b>{total_records:,} {mill} production records</b> from multi-sheet plant workbooks using Rust-accelerated <code>python-calamine</code> in 8–14 seconds. 
-              Zero <code>win32com.client</code> or Microsoft Office runtime required.
-            </p>
-          </div>
-
-          <div class="card" style="padding: 1.1rem;">
-            <span class="pill ok">2. Quality Control &amp; Physics</span>
-            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Typo Rescaling &amp; Featurization</div>
-            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
-              Automatic detection and correction of 100x decimal entry shifts (e.g. 41,205 &rarr; 412.05 MPa). 
-              Computes metallurgical features: Pickering lattice distortion (&sigma;<sub>ss</sub>), Hall-Petch grain proxy (<i>t</i><sup>-0.5</sup>), true strain (&epsilon;), and transformation margins (<i>FRT - Ar<sub>3</sub></i>).
-            </p>
-          </div>
-
-          <div class="card" style="padding: 1.1rem;">
-            <span class="pill ok">3. Zero Data Leakage</span>
-            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Melt-Level Group Partitioning</div>
-            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
-              Multiple plates or coils cut from the same parent melt heat share identical chemistry. 
-              <code>GroupShuffleSplit</code> strictly partitions by <code>Heat_ID</code> (80% Train : 20% Holdout) ensuring <b>0.0% data leakage across {holdout_heats:,} held-out heats</b>.
-            </p>
-          </div>
-
-          <div class="card" style="padding: 1.1rem;">
-            <span class="pill ok">4. Serverless Cloud Compute</span>
-            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Modal Cloud Debian Containers</div>
-            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
-              Heavy model training, Bayesian hyperparameter search, and 100-iteration bootstrapping run remotely on Modal Cloud with 4–8 vCPUs and 16 GB RAM. 
-              Local workstations remain lightweight and 100% responsive.
-            </p>
-          </div>
-
-          <div class="card" style="padding: 1.1rem;">
-            <span class="pill ok">5. Multi-Model Ladder</span>
-            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">6 Model Families Evaluated</div>
-            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
-              Every target is benchmarked across 2 whitebox models (OLS Linear, NLR Constitutive Physics Fit), 
-              regularized RidgeCV, 3 gradient boosted decision trees (XGBoost, LightGBM, CatBoost), and a meta-stacking ensemble.
-            </p>
-          </div>
-
-          <div class="card" style="padding: 1.1rem;">
-            <span class="pill ok">6. Cold-Start Deployment</span>
-            <div style="font-weight:600; font-size:14px; margin:.5rem 0 .2rem;">Champion GBDT Engine</div>
-            <p style="font-size:12.5px; color:#4b5563; line-height:1.6; margin:0;">
-              Champion GBDT models serialized to native C-level binary formats in <code>models/boosted_out/</code>. 
-              Provides &lt;0.5s cold-start time and sub-second inference in Streamlit Community Cloud.
-            </p>
-          </div>
-        </div>
+        <ul class="prov">
+          <li class="prov-lead"><b>Melt-grouped holdout:</b> sister plates or coils cut from one melt share
+          chemistry, so the split never cuts a heat in half. <code>GroupShuffleSplit</code> on <code>Heat_ID</code>
+          holds out {n_holdout} whole melts (80% train / 20% holdout).</li>
+          <li class="prov-lead"><b>Split-conformal intervals:</b> the 95% interval beside every prediction
+          comes from split-conformal calibration on held-out melts, not a bare RMSE. Empirical coverage is
+          audited per target on the Conformal calibration subtab.</li>
+          <li>Campaign workbooks are read with <code>python-calamine</code> (no Excel COM); decimal-shift
+          typos such as 41,205 &rarr; 412.05 MPa are rescaled before training, and every repair is logged
+          in <code>reports/sanitise_log.csv</code>.</li>
+          <li>One row per plate is scored through the same feature module the simulator uses: Pickering
+          &sigma;<sub>ss</sub>, Hall-Petch <i>t</i><sup>-0.5</sup>, true strain, <i>FRT &minus; Ar<sub>3</sub></i>.</li>
+          <li>Every target is benchmarked across OLS, a metallurgical non-linear fit, Ridge, XGBoost,
+          LightGBM, CatBoost and a stacking ensemble; the melt-held-out leaderboard picks the champion.</li>
+          <li>Heavy training, hyperparameter search and the 100-iteration heat-level bootstrap run on
+          Modal Cloud containers; this app only serves fitted artifacts.</li>
+          <li>Champion GBDT models ship as native binaries in <code>models/boosted_out/</code>, each with
+          the SHA-256 recorded at build time (see the artifact registry above).</li>
+        </ul>
         """, unsafe_allow_html=True)
 
     with diag_tabs[5]:
-        st.caption("Operating windows and parameter distribution ranges across the production campaign.")
+        st.caption("How each schedule input actually ran in the cleaned campaign. When the full "
+                   "cleaned table is not shipped with the deployment, the bundled quantile summary "
+                   "is used instead; nothing synthetic is plotted.")
         eda_vars = [row[1] for row in SPECS[mill]]
         eda_choice = st.selectbox("Select Process Parameter / Chemistry for Distribution EDA", eda_vars,
                                   format_func=lambda k: f"{spec_map(mill)[k][2]} ({spec_map(mill)[k][3]})",
                                   key=f"eda_var_{mill}")
         row_meta = spec_map(mill)[eda_choice]
-        u_label, u_unit, lo_b, hi_b, def_val, step_val = row_meta[2], row_meta[3], row_meta[4], row_meta[5], row_meta[6], row_meta[7]
-        
-        rng = np.random.default_rng(42)
-        n_pts = 1200
-        sim_data = rng.normal(loc=def_val, scale=(hi_b - lo_b) / 8.0, size=n_pts)
-        sim_data = np.clip(sim_data, lo_b, hi_b)
-        
-        q05, q50, q95 = np.percentile(sim_data, [5, 50, 95])
-        e1, e2, e3, e4, e5 = st.columns(5)
-        e1.metric("Min Allowed", f"{lo_b:g} {u_unit}")
-        e2.metric("5th Percentile", f"{q05:.2f} {u_unit}")
-        e3.metric("Campaign Median", f"{q50:.2f} {u_unit}")
-        e4.metric("95th Percentile", f"{q95:.2f} {u_unit}")
-        e5.metric("Max Allowed", f"{hi_b:g} {u_unit}")
-        
-        fig_dist = go.Figure(go.Histogram(
-            x=sim_data, nbinsx=40, marker_color="#dbeafe",
-            marker_line_color="#1d4ed8", marker_line_width=0.6
-        ))
-        fig_dist.add_vline(x=q50, line_color="#111418", line_width=1.5, annotation_text="Median", annotation_position="top")
-        fig_dist.add_vline(x=q05, line_color="#6b7280", line_width=1, line_dash="dash", annotation_text="P05", annotation_position="top")
-        fig_dist.add_vline(x=q95, line_color="#6b7280", line_width=1, line_dash="dash", annotation_text="P95", annotation_position="top")
-        fig_dist.update_layout(
-            title=dict(text=f"Production Operating Window — {u_label} (N = {total_records:,} {mill} records)", font=dict(size=12)),
-            xaxis=dict(title=f"{u_label} [{u_unit}]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
-            yaxis=dict(title="Frequency", showline=False, gridcolor="#f4f5f7"),
-            height=300, margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="white", paper_bgcolor="white"
-        )
-        st.plotly_chart(fig_dist, use_container_width=True)
+        u_label, u_unit, lo_b, hi_b = row_meta[2], row_meta[3], row_meta[4], row_meta[5]
 
-        st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
-        st.caption("Top physical and chemical variables driving model predictions, ranked by tree split importance.")
-        top_features_plate = [
-            ("sigma_ss (Pickering Solid Solution)", 0.285),
-            ("inv_sqrt_t (Hall-Petch Gauge Proxy)", 0.214),
-            ("CE_IIW (Carbon Equivalent)", 0.142),
-            ("ACC_Temp_Drop (Cooling Severity)", 0.088),
-            ("eps_total (True Strain Deformation)", 0.075),
-            ("FM_Finish_Temp (Finishing Temperature)", 0.052),
-            ("Chem_Mn (Manganese Content)", 0.041),
-            ("Chem_C (Carbon Content)", 0.038),
-            ("Cooling_Rate_Proxy (ACC Laminar)", 0.026),
-            ("FRT_minus_Ar3 (Supercooling Margin)", 0.018),
-            ("Plate_W_mm (Plate Width)", 0.012),
-            ("Chem_Nb (Niobium Microalloy)", 0.009),
-        ]
-        top_features_hrc = [
-            ("sigma_ss (Pickering Solid Solution)", 0.312),
-            ("inv_sqrt_t (Coil Thickness Proxy)", 0.235),
-            ("Chem_CE (Carbon Equivalent)", 0.138),
-            ("Temp_CT_Avg_C (Coiling Temperature)", 0.096),
-            ("eps_STM (True Strain Deformation)", 0.071),
-            ("Temp_FT_Avg_C (Finishing Temperature)", 0.054),
-            ("Chem_Mn (Manganese Content)", 0.035),
-            ("Chem_C (Carbon Content)", 0.027),
-            ("Chem_Si (Silicon Content)", 0.015),
-            ("Coil_W_mm (Coil Width)", 0.009),
-            ("Temp_Transfer_Bar_C (Entry Temp)", 0.005),
-            ("Chem_Nb (Niobium)", 0.003),
-        ]
-        feats = top_features_plate if mill == "Plate" else top_features_hrc
-        feat_df = pd.DataFrame(feats, columns=["Feature", "Importance"]).sort_values(by="Importance", ascending=True)
-        
-        fig_feat = go.Figure(go.Bar(
-            x=feat_df["Importance"], y=feat_df["Feature"], orientation="h",
-            marker=dict(color="#1746c8", line=dict(color="#0e2a7b", width=0.5))
-        ))
-        fig_feat.update_layout(
-            title=dict(text=f"Top 12 Metallurgical Feature Drivers ({mill} Route)", font=dict(size=12)),
-            xaxis=dict(title="Relative Feature Importance (Normalized)", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
-            yaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
-            height=380, margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="white", paper_bgcolor="white"
-        )
-        st.plotly_chart(fig_feat, use_container_width=True)
+        table = ts.load_table(mill)
+        values = None
+        if not table.empty and eda_choice in table.columns:
+            column = ts._numeric(table[eda_choice]).dropna()
+            column = column[(column >= lo_b) & (column <= hi_b)]  # decimal-shift typos out
+            if len(column) >= 40:
+                values = column
+
+        if values is not None:
+            q05, q50, q95 = np.percentile(values, [5, 50, 95])
+            e1, e2, e3, e4, e5 = st.columns(5)
+            e1.metric("Min allowed", f"{lo_b:g} {u_unit}")
+            e2.metric("P05, measured", f"{q05:.2f} {u_unit}")
+            e3.metric("Median, measured", f"{q50:.2f} {u_unit}")
+            e4.metric("P95, measured", f"{q95:.2f} {u_unit}")
+            e5.metric("Max allowed", f"{hi_b:g} {u_unit}")
+            fig_dist = go.Figure(go.Histogram(
+                x=values, nbinsx=40, marker_color=ACCENT_RAMP[4],
+                marker_line_color=ACCENT, marker_line_width=0.6
+            ))
+            fig_dist.add_vline(x=q50, line_color="#111418", line_width=1.5, annotation_text="Median", annotation_position="top")
+            fig_dist.add_vline(x=q05, line_color=MUTED, line_width=1, line_dash="dash", annotation_text="P05", annotation_position="top")
+            fig_dist.add_vline(x=q95, line_color=MUTED, line_width=1, line_dash="dash", annotation_text="P95", annotation_position="top")
+            fig_dist.update_layout(
+                title=dict(text=f"Campaign distribution: {u_label} (N = {len(values):,} cleaned {mill} records)", font=dict(size=12)),
+                xaxis=dict(title=f"{u_label} [{u_unit}]", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                yaxis=dict(title="Frequency", showline=False, gridcolor="#f4f5f7"),
+                height=300, margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="white", paper_bgcolor="white"
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+            st.caption("Source: the cleaned training table. Values outside the schedule form's "
+                       "allowed band are dropped before plotting.")
+        else:
+            stats = ts.load_bundle().get(mill, {}).get("variables", {}).get(eda_choice, {}).get("all")
+            if stats:
+                fig_dist = go.Figure(go.Box(
+                    x=[0],
+                    q1=[stats["q1"]], median=[stats["median"]], q3=[stats["q3"]],
+                    lowerfence=[stats["min"]], upperfence=[stats["max"]],
+                    marker_color=ACCENT, fillcolor=ACCENT_RAMP[4], name=u_label,
+                    hoverinfo="x",
+                ))
+                fig_dist.update_layout(
+                    title=dict(text=f"Campaign distribution: {u_label} "
+                                    f"(bundled summary, N = {stats['n']:,} records)", font=dict(size=12)),
+                    xaxis=dict(title=f"{u_label} [{u_unit}]", showline=True, linecolor=HAIR,
+                               gridcolor="#f4f5f7", range=[min(lo_b, stats["min"]),
+                                                           max(hi_b, stats["max"])]),
+                    yaxis=dict(showgrid=False, showticklabels=False),
+                    height=220, margin=dict(l=10, r=10, t=30, b=10),
+                    plot_bgcolor="white", paper_bgcolor="white", showlegend=False,
+                )
+                st.plotly_chart(fig_dist, use_container_width=True)
+                st.caption(f"Measured quantiles of this input: min {stats['min']:g}, Q1 {stats['q1']:g}, "
+                           f"median {stats['median']:g}, Q3 {stats['q3']:g}, max {stats['max']:g} {u_unit} "
+                           f"over {stats['n']:,} records. Source: the bundled training summary "
+                           "(models/training_stats.json); the full cleaned table is not shipped with "
+                           "this deployment, so no per-record histogram is drawn.")
+            else:
+                fig_dist = go.Figure(go.Scatter(
+                    x=[lo_b, hi_b], y=[0, 0], mode="lines",
+                    line=dict(color=ACCENT_RAMP[3], width=10), name="allowed band",
+                    hoverinfo="x",
+                ))
+                fig_dist.update_layout(
+                    title=dict(text=f"Input band only: {u_label} (no measured distribution shipped)", font=dict(size=12)),
+                    xaxis=dict(title=f"{u_label} [{u_unit}]", showline=True, linecolor=HAIR,
+                               gridcolor="#f4f5f7", range=[lo_b, hi_b]),
+                    yaxis=dict(showgrid=False, showticklabels=False),
+                    height=180, margin=dict(l=10, r=10, t=30, b=10),
+                    plot_bgcolor="white", paper_bgcolor="white", showlegend=False,
+                )
+                st.plotly_chart(fig_dist, use_container_width=True)
+                st.caption("Neither the cleaned table nor the bundled summary carries this input, so "
+                           "no distribution is drawn. The bar marks the schedule form's allowed range "
+                           "only; nothing on this chart is measured data.")
+
+        st.markdown('<div class="breath"></div>', unsafe_allow_html=True)
+        st.caption("Top variables driving the champion model's predictions, ranked by the split "
+                   "importance computed from the shipped artifact at render time.")
+        importances = champion_importances(mill)
+        if not importances:
+            st.caption("No shipped boosted artifact on this route exposes feature importances, "
+                       "so no ranking is shown rather than a guessed one.")
+        else:
+            prune_stale_widget_key(f"feat_tgt_{mill}", list(importances))
+            feat_target = st.selectbox("Target", list(importances),
+                                       format_func=lambda k: TARGET_LABEL[mill].get(k, (k, ""))[0],
+                                       key=f"feat_tgt_{mill}")
+            feat_fam = (champion_plan(mill).get(feat_target) or {}).get("family")
+            feat_fam_name = {"cat": "CatBoost", "xgb": "XGBoost", "lgbm": "LightGBM"}.get(feat_fam, feat_fam)
+            ranked = importances[feat_target][-12:]
+            feat_df = pd.DataFrame([(FEATURE_LABELS.get(name, name), float(weight))
+                                    for name, weight in ranked],
+                                   columns=["Feature", "Importance"])
+            fig_feat = go.Figure(go.Bar(
+                x=feat_df["Importance"], y=feat_df["Feature"], orientation="h",
+                marker=dict(color=ACCENT, line=dict(color=ACCENT_DARK, width=0.5))
+            ))
+            fig_feat.update_layout(
+                title=dict(text=f"Feature split importance: {TARGET_LABEL[mill].get(feat_target, (feat_target, ''))[0]} "
+                                f"({mill}, {feat_fam_name} champion artifact)", font=dict(size=12)),
+                xaxis=dict(title="Share of total split importance", showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                yaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                height=380, margin=dict(l=10, r=10, t=30, b=10), plot_bgcolor="white", paper_bgcolor="white"
+            )
+            st.plotly_chart(fig_feat, use_container_width=True)
+            st.caption(f"Computed from the shipped {feat_fam_name} artifact in models/boosted_out at "
+                       f"render time; the ranking changes if the models are retrained.")
 
     # 5. Physical Basis & Constitutive Metallurgy (Clean HTML & LaTeX without messy KaTeX breaks)
-    st.markdown('<div style="height:1.8rem"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="break"></div>', unsafe_allow_html=True)
     section("physical basis & constitutive metallurgy")
     st.markdown("""
 <div class="note">
@@ -2842,16 +3055,16 @@ fitted via Levenberg-Marquardt / Trust Region Reflective non-linear optimization
         st.markdown("#### Heavy Plate Constitutive Formulation")
         st.latex(r"\sigma\ (\text{MPa}) = \sigma_0 + k_{\mathrm{hp}} \cdot d_{\alpha}^{-1/2} + k_{\mathrm{ss}} \cdot \sigma_{\mathrm{ss}} + k_{\mathrm{ce}} \cdot CE_{\mathrm{IIW}}^2 + k_{\mathrm{cr}} \cdot CR + k_{\varepsilon} \cdot \varepsilon_{\mathrm{total}}")
 
-        st.markdown("""
+        st.markdown(f"""
 <div class="card" style="padding: 1rem 1.25rem; margin: 1rem 0;">
-  <div style="font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#1746c8; margin-bottom:.6rem;">
+  <div style="font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:{ACCENT}; margin-bottom:.6rem;">
     Physical Variable &amp; Dislocation Mechanism Breakdown
   </div>
-  <ul style="margin:0; padding-left:1.2rem; font-size:13.5px; line-height:1.75; color:#1f2937;">
+  <ul style="margin:0; padding-left:1.2rem; font-size:13px; line-height:1.75; color:#1f2937;">
     <li><b>&sigma;<sub>0</sub> (Lattice Friction Stress)</b>: Peierls-Nabarro friction stress resisting dislocation glide in pure &alpha;-ferrite matrix (&sim; 96.5 MPa for yield, 310.6 MPa for tensile).</li>
     <li><b><i>k</i><sub>hp</sub> · <i>t</i><sup>−1/2</sup> (Hall-Petch Grain Refinement)</b>: Grain boundaries block slip bands. Plate finish gauge <i>t</i><sup>−1/2</sup> acts as the physical proxy for ferrite grain size (<i>d</i><sub>&alpha;</sub> &prop; &radic;<i>t</i>).</li>
     <li><b><i>k</i><sub>ss</sub> · &sigma;<sub>ss</sub> (Pickering Solid Solution Hardening)</b>: Ferrite lattice distortion from dissolved interstitial and substitutional solute atoms:
-      <div style="font-family:monospace; font-size:12px; color:#1746c8; padding:.25rem 0; font-weight:500;">
+      <div style="font-family:monospace; font-size:13px; color:{ACCENT}; padding:.25rem 0; font-weight:500;">
         &sigma;<sub>ss</sub> (MPa) = 32[%Mn] + 84[%Si] + 43[%Ni] − 30[%Cr] + 38[%Cu] + 80[%Ti] + 11[%Mo] + 354[%N]
       </div>
     </li>
@@ -2869,12 +3082,12 @@ fitted via Levenberg-Marquardt / Trust Region Reflective non-linear optimization
         st.markdown("#### Steckel Mill HRC Constitutive Formulation")
         st.latex(r"\sigma\ (\text{MPa}) = \sigma_0 + k_{\mathrm{ss}} \cdot \sigma_{\mathrm{ss}} + k_{\mathrm{hp}} \cdot t^{-1/2} + k_{\varepsilon} \cdot \varepsilon_{\mathrm{STM}}^n - k_T \cdot (CT_{\mathrm{avg}} - 500)")
 
-        st.markdown("""
+        st.markdown(f"""
 <div class="card" style="padding: 1rem 1.25rem; margin: 1rem 0;">
-  <div style="font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#1746c8; margin-bottom:.6rem;">
+  <div style="font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:{ACCENT}; margin-bottom:.6rem;">
     Physical Variable &amp; Dislocation Mechanism Breakdown
   </div>
-  <ul style="margin:0; padding-left:1.2rem; font-size:13.5px; line-height:1.75; color:#1f2937;">
+  <ul style="margin:0; padding-left:1.2rem; font-size:13px; line-height:1.75; color:#1f2937;">
     <li><b>&sigma;<sub>0</sub> (Lattice Friction Stress)</b>: Base yield stress of unalloyed ferrite matrix (308.35 MPa for YS, 461.25 MPa for TS).</li>
     <li><b><i>k</i><sub>ss</sub> · &sigma;<sub>ss</sub> (Pickering Solid Solution)</b>: Ferrite lattice distortion from dissolved interstitial and substitutional elements.</li>
     <li><b><i>k</i><sub>hp</sub> · <i>t</i><sup>−1/2</sup> (Hall-Petch Proxy)</b>: Strip thickness (<i>t</i>) proxy for runout table cooling rate and ferrite grain diameter.</li>
@@ -2887,8 +3100,8 @@ fitted via Levenberg-Marquardt / Trust Region Reflective non-linear optimization
         _render_nlr_cards(mill)
 
     # 6. Linear Whitebox Coefficients Inspector
-    st.markdown('<div style="height:1.5rem"></div>', unsafe_allow_html=True)
-    with st.expander("🔬 Linear Whitebox Model Weights (Standardized OLS / Ridge Regression)", expanded=False):
+    st.markdown('<div class="break"></div>', unsafe_allow_html=True)
+    with st.expander("Linear whitebox model weights (standardized OLS / Ridge regression)", expanded=False):
         st.caption("Standardized z-score weights indicate the relative strength and direction of each physical input on room-temperature mechanical properties.")
         target_choice = st.selectbox("Inspect target coefficients", list(TARGET_LABEL[mill]),
                                      format_func=lambda k: TARGET_LABEL[mill][k][0], key=f"diag_cf_{mill}")
@@ -2944,7 +3157,7 @@ def main():
         st.caption("Data: Gunung Raja Paksi production logs. Models private; app public.")
         with st.expander("build and self-test", expanded=False):
             st.caption(f"build {BUILD}")
-            for name, (good, total, err) in boot_check().items():
+            for name, (good, total, err) in boot_check(mill).items():
                 if total and good == total:
                     st.caption(f"{name}: {good}/{total} targets scoring")
                 else:

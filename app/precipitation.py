@@ -1,5 +1,5 @@
 """
-Precipitation & Solubility tab — microalloy precipitate thermodynamics for the current schedule.
+Precipitation & Solubility tab: microalloy precipitate thermodynamics for the current schedule.
 
 Published austenite solubility products (log10 of the wt%-product), a 1:1-molar precipitation
 balance, a sequential nitride-then-carbide engineering model for the undissolved Nb/Ti/V/Al
@@ -57,7 +57,30 @@ GAMMA_GB = 0.5      # J/m2, austenite grain-boundary energy
 TERNARY_MAX = {"C": 0.35, "N": 0.02, "Nb": 0.09, "Ti": 0.06, "V": 0.12}
 
 INK, HAIR, GRID = "#0b0d10", "#e5e7eb", "#f1f2f4"
-SERIES = ["#1746c8", "#c81e1e", "#0f766e", "#b45309", "#7c3aed", "#be185d", "#4d7c0f"]
+ACCENT = "#1746c8"   # GRP brand blue, same token as the app stylesheet
+
+
+def _shade(hex_color, factor):
+    """Lighter (factor > 0, toward white) or darker (factor < 0, toward black) step of a hex."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    if factor >= 0:
+        r, g, b = (round(c + (255 - c) * factor) for c in (r, g, b))
+    else:
+        r, g, b = (round(c * (1 + factor)) for c in (r, g, b))
+    return "#{:02x}{:02x}{:02x}".format(r, g, b)
+
+
+ACCENT_DARK = _shade(ACCENT, -0.45)
+# Semantic state tokens, matching the pill colours used across the app.
+SEMANTIC_OK = "#065f46"
+SEMANTIC_WARN = "#92400e"
+SEMANTIC_BAD = "#991b1b"
+WARN_LINE = "#b45309"
+# Categorical series palette anchored on the accent plus the semantic counter-hues
+# (the former violet/pink picks are gone); order matters for the solubility chart.
+SERIES = [ACCENT, SEMANTIC_BAD, SEMANTIC_OK, WARN_LINE, ACCENT_DARK, SEMANTIC_WARN,
+          _shade(ACCENT, 0.35)]
 METAL_COLOR = {"Nb": SERIES[0], "Ti": SERIES[1], "V": SERIES[2], "Al": SERIES[3]}
 
 
@@ -240,7 +263,7 @@ def _solubility_fig(chem, frt):
     """Chart 1: log K vs reciprocal temperature, chemistry levels and the FRT marker."""
     T = np.linspace(1100.0, 1550.0, 220)
     x = 1000.0 / T
-    fig = _base_fig("Solubility products — log₁₀[M][X] vs 1000/T",
+    fig = _base_fig("Solubility products: log₁₀[M][X] vs 1000/T",
                     "1000/T (1/K)", "log₁₀ ([Me]·[X], wt%²)")
     for i, (label, sysd) in enumerate(SOLUBILITY.items()):
         fig.add_scatter(x=x, y=sysd["A"] - sysd["B"] / T, mode="lines", name=label,
@@ -357,14 +380,9 @@ def view_precipitation(mill, raw):
 
     _section("precipitation & solubility")
     st.markdown(
-        '<div class="kicker">Microalloy Thermodynamics</div>', unsafe_allow_html=True)
-    st.markdown('<div class="title">Precipitation &amp; Solubility</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="lede">What stays undissolved at your rolling temperature — Nb, Ti, V and Al '
-        'precipitate thermodynamics, the C–N–Me stability map, and whether Zener pinning from the '
-        'surviving precipitates can still hold a pancaked, unrecrystallised austenite grain.</div>',
-        unsafe_allow_html=True)
-    st.caption("Chemistry comes from the sidebar; edit it there.")
+        '<div class="note">Paraequilibrium screening of Nb, Ti, V and Al precipitates at this '
+        'schedule\'s temperatures: not Thermo-Calc. Chemistry comes from the sidebar; edit it '
+        'there.</div>', unsafe_allow_html=True)
 
     # --- facts card: per-system solution temperature and status at FRT -------------------
     cells = []
@@ -398,7 +416,7 @@ def view_precipitation(mill, raw):
         st.markdown(
             '<div class="note">Each solid curve is log₁₀[M][X] = A − B/T for one precipitate '
             'system; the dashed horizontal line is this steel\'s own log₁₀(Me·X) level. Where the '
-            'level crosses its curve the precipitate is just fully dissolved — that intersection '
+            'level crosses its curve the precipitate is just fully dissolved: that intersection '
             'is the solution temperature. Right of the dotted FRT marker (colder) the level sits '
             'above the curve, so the excess precipitates out.</div>', unsafe_allow_html=True)
     with col_b:
@@ -436,11 +454,15 @@ def view_precipitation(mill, raw):
     f_entry = float(undissolved_fraction(metal, temps["entry"], chem[metal], chem["C"], chem["N"]))
     f_frt = float(undissolved_fraction(metal, temps["frt"], chem[metal], chem["C"], chem["N"]))
     f_exit = float(undissolved_fraction(metal, temps["exit"], chem[metal], chem["C"], chem["N"]))
-    m1, m2, m3 = st.columns(3)
-    m1.metric(f"{metal} undissolved at entry ({temps['entry']:.0f} °C)", f"{f_entry * 100:.1f} %")
-    m2.metric(f"{metal} undissolved at FRT ({temps['frt']:.0f} °C)", f"{f_frt * 100:.1f} %")
-    m3.metric(f"{metal} undissolved at {temps['exit_label']} ({temps['exit']:.0f} °C)",
-              f"{f_exit * 100:.1f} %")
+    st.markdown(
+        '<div class="facts">'
+        f'<div><span>{metal} undissolved at entry ({temps["entry"]:.0f} °C)</span>'
+        f'<b>{f_entry * 100:.1f}</b><em>%</em></div>'
+        f'<div><span>{metal} undissolved at FRT ({temps["frt"]:.0f} °C)</span>'
+        f'<b>{f_frt * 100:.1f}</b><em>%</em></div>'
+        f'<div><span>{metal} undissolved at {temps["exit_label"]} ({temps["exit"]:.0f} °C)</span>'
+        f'<b>{f_exit * 100:.1f}</b><em>%</em></div>'
+        '</div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="note">Pancaked-austenite indicator: undissolved {metal} surviving into the '
         f'finishing passes pins the recrystallisation front. A large entry-to-FRT fraction means '
@@ -472,10 +494,8 @@ def view_precipitation(mill, raw):
         f'<div><span>precipitate mass fraction at FRT</span><b>{sum(f_mass_map.values()):.2e}</b>'
         f'<em>wt fraction</em></div>'
         f'<div><span>volume fraction f_v</span><b>{f_v:.2e}</b><em>ρ<sub>matrix</sub> 7.87</em></div>'
-        f'<div><span>Zener pinning pressure</span><b>{p_z:.3f}<em> MPa</em></b>'
-        f'<em>3·f_v·γ / 2r</em></div>'
-        f'<div><span>driving pressure</span><b>{drive_mpa:.1f}<em> MPa</em></b>'
-        f'<em>screening threshold</em></div>'
+        f'<div><span>Zener pinning pressure</span><b>{p_z:.3f}</b><em> MPa · 3·f_v·γ / 2r</em></div>'
+        f'<div><span>driving pressure</span><b>{drive_mpa:.1f}</b><em> MPa · screening threshold</em></div>'
         f'<div><span>verdict</span><span class="pill {v_cls}">{verdict}</span></div>'
         '</div>', unsafe_allow_html=True)
     st.plotly_chart(_zener_fig(f_v, drive_mpa), use_container_width=True)
@@ -489,14 +509,14 @@ def view_precipitation(mill, raw):
     with st.expander("Method, sources & caveats"):
         st.markdown(
             '<div class="note"><b>Solubility products</b> (austenite, log₁₀ of the wt%-product): '
-            'NbC and NbN, VC, VN — Irvine et al., 1967; TiN — Wada &amp; Pehlke, 1977; TiC — '
-            'austenite fit, cf. the Wada &amp; Pehlke family; AlN — austenite fit, cf. the '
+            'NbC and NbN, VC, VN: Irvine et al., 1967; TiN: Wada &amp; Pehlke, 1977; TiC: '
+            'austenite fit, cf. the Wada &amp; Pehlke family; AlN: austenite fit, cf. the '
             'Davern &amp; Edmonds family. The wt%-product fits carry a literature spread of '
             'roughly ±200 K on solution temperatures.<br><br>'
             'These are <b>paraequilibrium screening estimates</b>, not Thermo-Calc calls: '
             'substitutional diffusion is assumed frozen and the microalloy partitions 1:1-molar '
             'between matrix and precipitate at each temperature. The sequential '
             'nitride-then-carbide order per metal is the standard engineering approximation of '
-            'the coupled equilibrium — nitrides (especially TiN) are far stabler and precipitate '
+            'the coupled equilibrium: nitrides (especially TiN) are far stabler and precipitate '
             'first. Zener pinning uses γ = 0.5 J/m² and matrix density 7.87 g/cm³.</div>',
             unsafe_allow_html=True)

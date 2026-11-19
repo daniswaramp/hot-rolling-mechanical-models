@@ -10,8 +10,11 @@ import time
 import numpy as np
 import pandas as pd
 import streamlit as st
-import xgboost as xgb
-from catboost import CatBoostRegressor
+
+# NOTE: xgboost / catboost are intentionally NOT imported at module level —
+# they add hundreds of MB of committed private memory and only the boosted
+# model loading inside score_targets.from_boosted needs them (lightgbm was
+# already lazy there). Imports happen on first use; Python caches per process.
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(APP_DIR)
@@ -186,9 +189,11 @@ def score_targets(mill: str, X_all, targets):
                          index=X_all.index)
         algo = key.rsplit("|", 1)[-1]
         if algo == "xgb":
+            import xgboost as xgb
             model = xgb.XGBRegressor()
             model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_xgb.ubj"))
         elif algo == "cat":
+            from catboost import CatBoostRegressor
             model = CatBoostRegressor()
             model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_cat.cbm"))
         else:
@@ -448,7 +453,7 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
             "objectives": selected,
             "message": ("Every candidate schedule violates the chemistry caps "
                         f"(CE_IIW ≤ {chem_caps.get('ceq')}, P_cm ≤ {chem_caps.get('pcm')}). "
-                        "The caps exclude the whole grid before strength is even considered — "
+                        "The caps exclude the whole grid before strength is even considered: "
                         "relax a cap or widen the window."),
         }
 
@@ -1003,15 +1008,12 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     """
     raw = dict(raw)
     finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
-    st.markdown('<div class="kicker">Automated Inverse Design</div>', unsafe_allow_html=True)
-    st.markdown('<div class="title">Reverse Setpoint Optimizer</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="lede">Searches the constraint space for the <b>hottest feasible recipe</b>: '
-        'the hottest entry and finish temperatures that keep every spec-required property '
-        'non-marginal at the 95% conformal bound, with the leanest chemistry that gets there. '
-        'Cold corners are chosen only when hotter bands fail the margin rule.</div>',
-        unsafe_allow_html=True)
-    st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section"><span>inverse setpoint search</span><i></i></div>',
+                unsafe_allow_html=True)
+    st.markdown('<div class="note">Hottest feasible recipe search against the spec at the 95% '
+                'conformal bound: the hottest entry and finish temperatures that keep every '
+                'spec-required property non-marginal, with the leanest chemistry that gets there.</div>',
+                unsafe_allow_html=True)
 
     # ---- 1. end specification -----------------------------------------------------------
     specs = sc.get_available_specs()
@@ -1029,7 +1031,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                 grade_idx = grades.index(jis_grades[0])
         chosen_grade = st.selectbox("Grade", grades, index=grade_idx, key=f"opt_grade_{mill}")
     else:
-        st.warning("The GRP specification workbook is unavailable — using the built-in preset "
+        st.warning("The GRP specification workbook is unavailable: using the built-in preset "
                    "grades (YS/TS/EL minima only).")
         preset_names = list(PRESET_GRADES[mill].keys())
         chosen_spec = st.selectbox("End specification standard (preset)", preset_names,
@@ -1045,14 +1047,15 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         gauge_lo, gauge_hi = (6.0, 120.0) if mill == "Plate" else (1.8, 16.0)
     cur_t = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
     cur_t = min(max(cur_t, gauge_lo), gauge_hi)
-    thickness = st.number_input(f"Target thickness ({t_key})", min_value=gauge_lo,
-                                max_value=gauge_hi, value=cur_t, step=1.0)
+    thickness = st.number_input("Target thickness", min_value=gauge_lo,
+                                max_value=gauge_hi, value=cur_t, step=1.0,
+                                help="Finish gauge in millimetres.")
 
     rolling_type = "AR"
     if mill == "Plate":
         process = st.radio("Rolling process", PROCESS_CHOICES, index=0, horizontal=True)
         rolling_type = ROLLING_TYPE_MAP[process]
-        st.caption("Process mapping — " + " · ".join(PROCESS_HELP[p] for p in PROCESS_CHOICES))
+        st.caption("Process mapping: " + " · ".join(PROCESS_HELP[p] for p in PROCESS_CHOICES))
     else:
         st.caption("Rolling_Type is not a feature of the Steckel HRC model, so the coil route "
                    "offers no process selector.")
@@ -1082,7 +1085,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         band_hi = c2.number_input(f"{label} max (°C)", min_value=lo, max_value=hi,
                                   value=float(hi), step=10.0, key=f"opt_{key}_hi_{mill}")
         if band_hi < band_lo:
-            st.warning(f"{label}: max below min — using the full row band.")
+            st.warning(f"{label}: max below min, using the full row band.")
             band_lo, band_hi = lo, hi
         return float(band_lo), float(band_hi)
 
@@ -1105,12 +1108,12 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         ct_range = band_inputs("Temp_CT_Top_C", "Coiling temperature")
         cooling = "rot"
         headers_range = (0, 0)
-        st.caption("No header choice on the Steckel runout table — the coiling temperature "
+        st.caption("No header choice on the Steckel runout table: the coiling temperature "
                    "carries the cooling, applied symmetrically to top and bottom.")
 
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
-    if not st.button("⚡ Search hottest feasible recipe", type="primary", use_container_width=True):
+    if not st.button("Search recipes", type="primary", use_container_width=True):
         return
 
     if slab_choice == AUTO_CHEMISTRY:
@@ -1132,7 +1135,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         if info.get("status") == "out_of_gauge":
             st.warning(info.get("message", "Thickness outside the standard range."))
         if not requirements:
-            st.error("This specification tier carries no readable YS/TS/EL/CE limits — "
+            st.error("This specification tier carries no readable YS/TS/EL/CE limits: "
                      "pick another standard/grade.")
             return
     else:
@@ -1157,7 +1160,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     chosen = res["chosen"]
     if chosen is None:
         st.error(f"No feasible recipe in {res['n_evaluated']:,} evaluated candidates at "
-                 f"k = {k:.1f}× the 95% interval. Nothing is proposed — widen a temperature "
+                 f"k = {k:.1f}× the 95% interval. Nothing is proposed: widen a temperature "
                  "band, raise k's tolerance via a lower safety factor, pick a richer slab "
                  "grade, or relax the specification.")
         for note in res["rejected"]:
@@ -1165,12 +1168,12 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         return
 
     if chosen.get("_extrapolated"):
-        st.warning("⚠️ The selected recipe sits outside the historical P01–P99 envelope on at "
+        st.warning("The selected recipe sits outside the historical P01–P99 envelope on at "
                    "least one parameter. Every in-domain candidate failed the margin rule, so "
-                   "an extrapolated candidate was used — treat the predictions as extrapolation.")
+                   "an extrapolated candidate was used: treat the predictions as extrapolation.")
 
     # ---- recipe card ---------------------------------------------------------------------
-    st.markdown(f"#### 📇 Recipe card — solved in {elapsed * 1000:.0f} ms "
+    st.markdown(f"#### Recipe card: solved in {elapsed * 1000:.0f} ms "
                 f"({res['n_evaluated']:,} candidates scored)")
     if mill == "Plate":
         entry, frt = float(chosen[entry_col]), float(chosen[finish_col])
@@ -1236,7 +1239,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                f"{OVERPOWER_CAP_INTERVALS:.0f} × conformal half-width, fixed constant).")
 
     # ---- rejection ladder -----------------------------------------------------------------
-    st.markdown("#### 🪜 Rejection ladder — next hottest feasible alternatives")
+    st.markdown("#### Rejection ladder: next hottest feasible alternatives")
     if res["ladder"]:
         ladder_rows = []
         for rank, alt in enumerate(res["ladder"], start=2):
@@ -1263,9 +1266,9 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
             })
         st.dataframe(pd.DataFrame(ladder_rows), hide_index=True, use_container_width=True)
     else:
-        st.caption("No hotter feasible alternative — the selected recipe is the only feasible point.")
+        st.caption("No hotter feasible alternative: the selected recipe is the only feasible point.")
 
-    st.markdown("#### 🚫 Why the app stepped down — hottest rejected bands")
+    st.markdown("#### Why the solver stepped down: hottest rejected bands")
     if res["rejected"]:
         for note in res["rejected"]:
             st.markdown(f"- {note}")
@@ -1286,7 +1289,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     csv_row["k"] = k
     csv_row["ood"] = bool(chosen.get("ood", False))
     st.download_button(
-        "⬇️ Download recipe (CSV)",
+        "Download recipe (CSV)",
         data=pd.DataFrame([csv_row]).to_csv(index=False).encode("utf-8"),
         file_name=f"recipe_{mill}_{chosen_spec.replace(' ', '_')}_{chosen_grade}.csv",
         mime="text/csv",

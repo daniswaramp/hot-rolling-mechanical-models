@@ -9,9 +9,11 @@ import json
 import numpy as np
 import pandas as pd
 import streamlit as st
-import xgboost as xgb
-import lightgbm as lgb
-from catboost import CatBoostRegressor, Pool
+
+# NOTE: xgboost / lightgbm / catboost are intentionally NOT imported at module
+# level — each adds hundreds of MB of committed private memory and only the
+# TreeSHAP attribution path needs them. They are imported inside
+# compute_tree_shap_attribution on first use (Python caches them per process).
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(APP_DIR)
@@ -141,6 +143,7 @@ def compute_tree_shap_attribution(mill: str, target_key: str, X_row: pd.DataFram
 
     try:
         if best_fam == "xgb":
+            import xgboost as xgb
             m_path = os.path.join(BOOSTED_DIR, f"{mill}_{target_key}_xgb.ubj")
             if not os.path.exists(m_path):
                 return {}
@@ -151,6 +154,7 @@ def compute_tree_shap_attribution(mill: str, target_key: str, X_row: pd.DataFram
             shap_vals = contribs[:-1]
 
         elif best_fam == "cat":
+            from catboost import CatBoostRegressor, Pool
             m_path = os.path.join(BOOSTED_DIR, f"{mill}_{target_key}_cat.cbm")
             if not os.path.exists(m_path):
                 return {}
@@ -161,6 +165,7 @@ def compute_tree_shap_attribution(mill: str, target_key: str, X_row: pd.DataFram
             shap_vals = contribs[:-1]
 
         elif best_fam == "lgbm":
+            import lightgbm as lgb
             m_path = os.path.join(BOOSTED_DIR, f"{mill}_{target_key}_lgbm.txt")
             if not os.path.exists(m_path):
                 return {}
@@ -210,7 +215,7 @@ def render_feature_contributions_ui(mill: str, target_key: str, X_row: pd.DataFr
         st.info("Feature attribution unavailable for this configuration.")
         return
 
-    st.markdown(f"#### 🔬 Metallurgical Feature Attributions ({target_key})")
+    st.markdown(f"#### Metallurgical feature attributions ({target_key})")
     st.caption(f"Deconstructs prediction via TreeSHAP against baseline heat mean ({attr['family'].upper()} model). "
                f"Baseline: **{attr['base_val']:.1f} {unit}** → Final Predicted: **{attr['pred_val']:.1f} {unit}**")
 
