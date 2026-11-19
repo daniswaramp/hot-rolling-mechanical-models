@@ -14,3 +14,8 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 openpyxl>=3.1.0
 python-calamine>=0.2.0
+# Serverless compute for the three heavy app calculations (recipe search, batch scoring,
+# capability). Called only from an explicit button press; see app/remote_compute.py and
+# modal_app.py. Unpinned above 0.60: the client looks the deployed app up by name, and the
+# app falls back to local compute when this package or its credentials are absent.
+modal>=0.60

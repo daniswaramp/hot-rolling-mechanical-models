@@ -97,6 +97,14 @@ try:
 except Exception:
     pass
 
+# Heavy calculation dispatch (Modal when configured, this process otherwise). Importing it is
+# free: the modal package inside it is only imported when a calculation is actually asked for.
+import remote_compute  # noqa: E402
+try:
+    importlib.reload(remote_compute)
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -1968,8 +1976,152 @@ def template_bytes(mill):
     return buf.getvalue()
 
 
+def capability_resample(mill, raw, target, lsl, usl, samples, bands,
+                        engine="Champion GBDT (Recommended)"):
+    """Monte-Carlo capability study over the drifting band, as one plain result dict.
+
+    Resamples each named input uniformly inside ± band, scores every sampled schedule
+    through the mill's feature module, and returns the capability summary. It is pure
+    apart from score_frame (no Streamlit calls), so the Capability tab and the Modal
+    function in modal_app.py run this same body: the reported Cp/Cpk cannot drift between
+    the local and the remote path. The RNG is seeded, so the sampled schedule is identical
+    wherever the study runs.
+
+    Keys: error (str or None), points (the sampled inputs that scored, one column per
+    band), scored (the scored values), mean, sd, cp, cpk, oos (out-of-spec percent),
+    sigma_model, cpk_total, target, unit, lsl, usl, bands, n_points.
+    """
+    label, unit = TARGET_LABEL[mill].get(target, (target, ""))
+    bands = {str(key): float(band) for key, band in (bands or {}).items()}
+    samples = max(int(samples), 1)
+    lsl, usl = float(lsl), float(usl)
+    blank = {"error": None, "points": pd.DataFrame(), "scored": np.array([], dtype=float),
+             "mean": np.nan, "sd": np.nan, "cp": np.nan, "cpk": np.nan, "oos": np.nan,
+             "sigma_model": np.nan, "cpk_total": np.nan, "target": target, "unit": unit,
+             "lsl": lsl, "usl": usl, "bands": dict(bands), "n_points": 0}
+
+    rng = np.random.default_rng(42)
+    frame = pd.DataFrame([dict(raw) for _ in range(samples)])
+    for key, band in bands.items():
+        centre = float(raw[key])
+        frame[key] = rng.uniform(centre - band, centre + band, samples)
+    scored_frame = score_frame(mill, frame, engine=engine)
+    if target not in scored_frame.columns:
+        return dict(blank, error=f"{label} cannot be scored with the {engine} engine "
+                                 "(no linear fit clears the R² floor for it). Switch engine "
+                                 "or property.")
+    scored_all = np.asarray(pd.to_numeric(scored_frame[target], errors="coerce"), dtype=float)
+    keep = np.isfinite(scored_all)
+    scored = scored_all[keep]
+    if scored.size < 30:
+        return dict(blank, error="Too few scoring points came back: widen the band or "
+                                 "change property.")
+    points = frame.loc[keep, [key for key in bands if key in frame.columns]].reset_index(drop=True)
+
+    mean, sd = float(np.mean(scored)), float(np.std(scored, ddof=1))
+    cp = (usl - lsl) / (6 * sd) if sd > 0 else float("inf")
+    cpk = min(usl - mean, mean - lsl) / (3 * sd) if sd > 0 else float("inf")
+    oos = float(np.mean((scored < lsl) | (scored > usl)) * 100)
+    # the sampled band only carries process drift; the model's own residual is a separate
+    # source of spread and belongs in a certification decision
+    sigma_model = get_target_interval_half(mill, target) / 1.96
+    sigma_total = float(np.sqrt(sd ** 2 + sigma_model ** 2))
+    cpk_total = min(usl - mean, mean - lsl) / (3 * sigma_total) if sigma_total > 0 else float("inf")
+
+    return {"error": None, "points": points, "scored": scored, "mean": mean, "sd": sd,
+            "cp": float(cp), "cpk": float(cpk), "oos": oos, "sigma_model": float(sigma_model),
+            "cpk_total": float(cpk_total), "target": target, "unit": unit,
+            "lsl": lsl, "usl": usl, "bands": dict(bands), "n_points": int(scored.size)}
+
+
+def _render_capability_result(mill, res, source):
+    """Render one capability outcome: the source caption, metrics, histogram and band fits.
+
+    Renders from the stored result alone and never recomputes, so the button path and a
+    plain rerun that replays st.session_state[f"cp_result_{mill}"] produce identical
+    output. Limits and bands come from the result rather than the live widgets, because
+    those are the values the numbers were computed for.
+    """
+    if res.get("error"):
+        st.error(res["error"])
+        return
+    target = res["target"]
+    unit = res.get("unit") or TARGET_LABEL[mill][target][1]
+    lsl, usl, bands = res["lsl"], res["usl"], res["bands"]
+    scored = np.asarray(res["scored"], dtype=float)
+    points = res["points"]
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Cp", f"{res['cp']:.2f}")
+    m2.metric("Cpk", f"{res['cpk']:.2f}")
+    m3.metric("Cpk incl. model σ", f"{res['cpk_total']:.2f}")
+    m4.metric("mean", f"{res['mean']:.1f} {unit}")
+    m5.metric("out of spec", f"{res['oos']:.1f} %")
+    st.caption(remote_compute.source_label(source))
+    st.caption(f"process σ {res['sd']:.2f} {unit} · model σ {res['sigma_model']:.2f} {unit} · "
+               f"{res['n_points']} scored points · band "
+               + ", ".join(f"{spec_map(mill)[k][2]} ±{bands[k]:g}" for k in bands))
+    st.caption("Cp and Cpk describe the sampled process band only. Cpk incl. model σ adds the "
+               "model's residual spread: use that one before promising a certification limit.")
+
+    fig = go.Figure(go.Histogram(x=scored, nbinsx=45, marker_color=ACCENT_RAMP[4],
+                                 marker_line_color=ACCENT, marker_line_width=.6))
+    for value, label in ((lsl, "LSL"), (usl, "USL")):
+        fig.add_vline(x=value, line_color=WARN_LINE, line_width=1.4, line_dash="dash",
+                      annotation_text=label, annotation_position="top", annotation_font_size=10)
+    fig.add_vline(x=res["mean"], line_color="#111418", line_width=1)
+    fig.update_layout(height=290, margin=dict(l=10, r=10, t=20, b=10), plot_bgcolor="white",
+                      paper_bgcolor="white", bargap=.04,
+                      xaxis=dict(title=f"{TARGET_LABEL[mill][target][0]} [{unit}]", showline=True,
+                                 linecolor=HAIR, gridcolor="#f4f5f7"),
+                      yaxis=dict(title="count", showline=False, gridcolor="#f4f5f7"))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    section("linear band per input")
+    st.caption("Property against each drifting input, with a fitted line and a ±3σ band on the "
+               "scatter. A steep slope here is the band width that costs you capability.")
+    for key in bands:
+        if key not in points.columns:
+            continue
+        x = pd.to_numeric(points[key], errors="coerce").values
+        ok = np.isfinite(x)
+        if ok.sum() < 2:
+            continue
+        slope, intercept = np.polyfit(x[ok], scored[ok], 1)
+        resid_sd = float(np.std(scored[ok] - (slope * x[ok] + intercept)))
+        grid = np.linspace(x[ok].min(), x[ok].max(), 60)
+        band_fig = go.Figure()
+        band_fig.add_trace(go.Scatter(x=x[ok], y=scored[ok], mode="markers",
+                                      marker=dict(size=4, color=ACCENT_RAMP[3], opacity=.45),
+                                      name="sampled"))
+        band_fig.add_trace(go.Scatter(x=grid, y=slope * grid + intercept, mode="lines",
+                                      line=dict(color=ACCENT, width=1.6), name="fit"))
+        band_fig.add_trace(go.Scatter(x=np.concatenate([grid, grid[::-1]]),
+                                      y=np.concatenate([slope * grid + intercept + 3 * resid_sd,
+                                                        (slope * grid + intercept - 3 * resid_sd)[::-1]]),
+                                      fill="toself", fillcolor=_rgba(ACCENT, .10),
+                                      line=dict(width=0), name="±3σ"))
+        for value, label in ((lsl, "LSL"), (usl, "USL")):
+            band_fig.add_hline(y=value, line_color=WARN_LINE, line_width=1, line_dash="dash")
+        band_fig.update_layout(height=250, margin=dict(l=10, r=10, t=26, b=10), plot_bgcolor="white",
+                               paper_bgcolor="white", showlegend=False,
+                               title=dict(text=f"{spec_map(mill)[key][2]}: {slope:+.2f} "
+                                               f"{unit} per {spec_map(mill)[key][3]}",
+                                          font=dict(size=11), x=0),
+                               xaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
+                               yaxis=dict(title=unit, showline=False, gridcolor="#f4f5f7"))
+        st.plotly_chart(band_fig, use_container_width=True, config={"displayModeBar": False})
+
+
 def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
-    """Cp/Cpk over a band the user defines, resampled through the mill's feature module."""
+    """Cp/Cpk over a band the user defines, resampled through the mill's feature module.
+
+    Nothing is resampled while the operator is setting the limits: the "Calculate
+    capability" button is the only gate, and its outcome is kept in
+    st.session_state[f"cp_result_{mill}"] so later reruns replay the study instead of
+    spending Modal credits (or local CPU) on it again. The compute body lives in
+    capability_resample, which is what the Modal function calls too.
+    """
     section("process capability")
     st.markdown('<div class="note">Set the specification limits, then say how far two or three '
                 'inputs may drift. The app resamples that band, scores every point and reports '
@@ -2012,97 +2164,114 @@ def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
                                       value=float(round(span, 3)), step=float(row[7]),
                                       key=f"cp_b_{mill}_{key}")
 
-    if not st.button("Run capability study", type="primary", key=f"cp_go_{mill}"):
-        st.caption(f"Reference schedule predicts {base:.1f} {unit}; limits default to ±{tolerance:g}.")
-        return
-
-    with st.spinner("Running capability study..."):
-        rng = np.random.default_rng(42)
-        frame = pd.DataFrame([dict(raw) for _ in range(samples)])
-        for key, band in bands.items():
-            centre = float(raw[key])
-            frame[key] = rng.uniform(centre - band, centre + band, samples)
-        scored_frame = score_frame(mill, frame, engine=engine)
-        if target not in scored_frame.columns:
-            st.error(f"{TARGET_LABEL[mill][target][0]} cannot be scored with the {engine} engine "
-                     "(no linear fit clears the R² floor for it). Switch engine or property.")
+    result_key = f"cp_result_{mill}"
+    clicked = st.button("Calculate capability", type="primary", key=f"cp_go_{mill}")
+    if clicked:
+        where = " on Modal" if remote_compute.remote_ready() else ""
+        with st.spinner(f"Running capability study{where}..."):
+            try:
+                res, source = remote_compute.capability(
+                    mill, raw, target, lsl, usl, samples, bands, engine=engine)
+            except Exception as exc:  # noqa: BLE001 - a failed study must not kill the tab
+                st.error(f"Capability study failed: {type(exc).__name__}: {exc}")
+                return
+        st.session_state[result_key] = {"res": res, "source": source}
+    else:
+        stored = st.session_state.get(result_key)
+        if not stored:
+            st.caption(f"Reference schedule predicts {base:.1f} {unit}; limits default to "
+                       f"±{tolerance:g}. Press Calculate capability to run the study.")
             return
-        scored_all = scored_frame[target].values
-        keep = np.isfinite(scored_all)
-        frame = frame.loc[keep].reset_index(drop=True)
-        scored = scored_all[keep]
-        if scored.size < 30:
-            st.error("Too few scoring points came back: widen the band or change property.")
-            return
+        st.caption("Shown from your last calculation. Press Calculate capability to run again "
+                   "with the current inputs.")
+        res, source = stored["res"], stored["source"]
 
-        mean, sd = float(np.mean(scored)), float(np.std(scored, ddof=1))
-        cp = (usl - lsl) / (6 * sd) if sd > 0 else float("inf")
-        cpk = min(usl - mean, mean - lsl) / (3 * sd) if sd > 0 else float("inf")
-        oos = float(np.mean((scored < lsl) | (scored > usl)) * 100)
-        # the sampled band only carries process drift; the model's own residual is a
-        # separate source of spread and belongs in a certification decision
-        sigma_model = get_target_interval_half(mill, target) / 1.96
-        sigma_total = float(np.sqrt(sd ** 2 + sigma_model ** 2))
-        cpk_total = min(usl - mean, mean - lsl) / (3 * sigma_total) if sigma_total > 0 else float("inf")
+    _render_capability_result(mill, res, source)
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Cp", f"{cp:.2f}")
-    m2.metric("Cpk", f"{cpk:.2f}")
-    m3.metric("Cpk incl. model σ", f"{cpk_total:.2f}")
-    m4.metric("mean", f"{mean:.1f} {unit}")
-    m5.metric("out of spec", f"{oos:.1f} %")
-    st.caption(f"process σ {sd:.2f} {unit} · model σ {sigma_model:.2f} {unit} · "
-               f"{scored.size} scored points · band "
-               + ", ".join(f"{spec_map(mill)[k][2]} ±{bands[k]:g}" for k in bands))
-    st.caption("Cp and Cpk describe the sampled process band only. Cpk incl. model σ adds the "
-               "model's residual spread: use that one before promising a certification limit.")
 
-    fig = go.Figure(go.Histogram(x=scored, nbinsx=45, marker_color=ACCENT_RAMP[4],
-                                 marker_line_color=ACCENT, marker_line_width=.6))
-    for value, label in ((lsl, "LSL"), (usl, "USL")):
-        fig.add_vline(x=value, line_color=WARN_LINE, line_width=1.4, line_dash="dash",
-                      annotation_text=label, annotation_position="top", annotation_font_size=10)
-    fig.add_vline(x=mean, line_color="#111418", line_width=1)
-    fig.update_layout(height=290, margin=dict(l=10, r=10, t=20, b=10), plot_bgcolor="white",
-                      paper_bgcolor="white", bargap=.04,
-                      xaxis=dict(title=f"{TARGET_LABEL[mill][target][0]} [{unit}]", showline=True,
-                                 linecolor=HAIR, gridcolor="#f4f5f7"),
-                      yaxis=dict(title="count", showline=False, gridcolor="#f4f5f7"))
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+def _upload_key(uploaded):
+    """Stable identity for one uploaded file: its name, size and (when present) file_id.
 
-    section("linear band per input")
-    st.caption("Property against each drifting input, with a fitted line and a ±3σ band on the "
-               "scatter. A steep slope here is the band width that costs you capability.")
-    for key in bands:
-        x = pd.to_numeric(frame[key], errors="coerce").values
-        ok = np.isfinite(x)
-        slope, intercept = np.polyfit(x[ok], scored[ok], 1)
-        resid_sd = float(np.std(scored[ok] - (slope * x[ok] + intercept)))
-        grid = np.linspace(x[ok].min(), x[ok].max(), 60)
-        band_fig = go.Figure()
-        band_fig.add_trace(go.Scatter(x=x[ok], y=scored[ok], mode="markers",
-                                      marker=dict(size=4, color=ACCENT_RAMP[3], opacity=.45),
-                                      name="sampled"))
-        band_fig.add_trace(go.Scatter(x=grid, y=slope * grid + intercept, mode="lines",
-                                      line=dict(color=ACCENT, width=1.6), name="fit"))
-        band_fig.add_trace(go.Scatter(x=np.concatenate([grid, grid[::-1]]),
-                                      y=np.concatenate([slope * grid + intercept + 3 * resid_sd,
-                                                        (slope * grid + intercept - 3 * resid_sd)[::-1]]),
-                                      fill="toself", fillcolor=_rgba(ACCENT, .10),
-                                      line=dict(width=0), name="±3σ"))
-        for value, label in ((lsl, "LSL"), (usl, "USL")):
-            band_fig.add_hline(y=value, line_color=WARN_LINE, line_width=1, line_dash="dash")
-        band_fig.update_layout(height=250, margin=dict(l=10, r=10, t=26, b=10), plot_bgcolor="white",
-                               paper_bgcolor="white", showlegend=False,
-                               title=dict(text=f"{spec_map(mill)[key][2]}: {slope:+.2f} "
-                                               f"{unit} per {spec_map(mill)[key][3]}",
-                                          font=dict(size=11), x=0),
-                               xaxis=dict(showline=True, linecolor=HAIR, gridcolor="#f4f5f7"),
-                               yaxis=dict(title=unit, showline=False, gridcolor="#f4f5f7"))
-        st.plotly_chart(band_fig, use_container_width=True, config={"displayModeBar": False})
+    Used to decide whether a stored batch result still belongs to the sheet in the
+    uploader: the same file keeps its table, any other file clears it.
+    """
+    parts = [str(getattr(uploaded, "name", "") or ""), str(getattr(uploaded, "size", "") or "")]
+    file_id = getattr(uploaded, "file_id", None)
+    if file_id:
+        parts.append(str(file_id))
+    return "|".join(parts)
+
+
+def _batch_frame_notes(mill, frame):
+    """Input-level notices for an uploaded sheet: rows outside the envelope, rows with no chemistry.
+
+    Returned as (level, text) pairs so a rerun can replay the same warnings from session
+    state without re-reading the sheet. Neither notice depends on the scores.
+    """
+    notes = []
+    domain = explainer.get_applicability_domain().get(mill, {})
+    if domain:
+        outside = pd.Series(0, index=frame.index)
+        for param, bounds in domain.items():
+            if param not in frame.columns:
+                continue
+            p01, p99 = bounds.get("p01"), bounds.get("p99")
+            if p01 is None or p99 is None:
+                continue
+            values = pd.to_numeric(frame[param], errors="coerce")
+            outside = outside + ((values < p01) | (values > p99)).fillna(False).astype(int)
+        ood_rows = int((outside > 0).sum())
+        if ood_rows:
+            notes.append(("warning", f"{ood_rows:,} of {len(frame):,} rows sit outside the "
+                                     f"historical P01–P99 envelope on at least one input: those "
+                                     f"predictions are extrapolation and should be read as such."))
+
+    chem_cols = [c for c in frame.columns if c.startswith("Chem_")]
+    if chem_cols:
+        blank_chem = int(frame[chem_cols].isna().all(axis=1).sum())
+        if blank_chem:
+            notes.append(("warning", f"{blank_chem:,} row(s) carry no chemistry at all: every "
+                                     f"element was imputed, so those predictions describe a "
+                                     f"hypothetical heat, not one you measured. Fill the "
+                                     f"chemistry columns before certifying anything."))
+    return notes
+
+
+def _render_batch_notes(notes):
+    for level, text in notes or []:
+        if level == "warning":
+            st.warning(text)
+        else:
+            st.info(text)
+
+
+def _render_batch_result(mill, stored, replay):
+    """Render a stored batch outcome: source caption, warnings, preview and download."""
+    st.caption(f"{stored['n_rows']:,} rows · Scoring engine: {stored.get('engine', '')}")
+    st.caption(remote_compute.source_label(stored.get("source", "local")))
+    if replay:
+        st.caption("Shown from this upload's last calculation. Press Calculate scores to "
+                   "re-score it.")
+    _render_batch_notes(stored.get("notes"))
+    table = stored["table"]
+    st.dataframe(table.head(200), use_container_width=True, height=320)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        table.to_excel(writer, index=False, sheet_name="scored")
+    st.download_button("Download scored sheet", buf.getvalue(),
+                       file_name=f"{mill.lower()}_scored.xlsx", type="primary",
+                       key=f"batch_dl_{mill}")
 
 
 def view_batch(mill, engine="Champion GBDT (Recommended)"):
+    """Score an uploaded sheet, and only when the operator asks for it.
+
+    The upload is validated as soon as it arrives, but nothing is scored until the
+    "Calculate scores" button is pressed: batch scoring is the heavy calculation on this
+    tab and, with Modal configured, a paid one. The scored table and its source are kept
+    in st.session_state[f"batch_result_{mill}"] keyed by the upload, so a rerun replays the
+    table instead of re-scoring it, and a different upload clears it.
+    """
     section("upload a schedule")
     st.markdown('<div class="note">Download the template, fill one row per plate or coil, upload it '
                 'back. Every row is scored through the same feature module the simulator uses.</div>',
@@ -2112,8 +2281,22 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
                       file_name=f"{mill.lower()}_template.xlsx", use_container_width=True)
     uploaded = b.file_uploader("Filled sheet", type=["xlsx", "csv"], key=f"up_{mill}",
                                label_visibility="collapsed")
+    state_key = f"batch_result_{mill}"
     if uploaded is None:
+        st.session_state.pop(state_key, None)
         return
+
+    upload_key = _upload_key(uploaded)
+    stored = st.session_state.get(state_key)
+    if stored is not None and stored.get("upload_key") != upload_key:
+        st.session_state.pop(state_key, None)
+        stored = None
+
+    clicked = st.button("Calculate scores", type="primary", key=f"batch_go_{mill}")
+    if not clicked and stored is not None:
+        _render_batch_result(mill, stored, replay=True)
+        return
+
     frame = (pd.read_excel(uploaded) if uploaded.name.lower().endswith("xlsx")
              else pd.read_csv(uploaded))
     st.caption(f"{len(frame):,} rows read · Scoring engine: {engine}")
@@ -2128,9 +2311,17 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
         st.error(f"{len(frame):,} rows is above the 20,000-row limit; split the sheet and "
                  "upload twice so the browser does not run out of memory.")
         return
+    notes = _batch_frame_notes(mill, frame)
+
+    if not clicked:
+        _render_batch_notes(notes)
+        st.caption("Nothing is scored until you press Calculate scores.")
+        return
+
     try:
-        with st.spinner(f"Scoring {len(frame):,} rows..."):
-            scored = score_frame(mill, frame, engine=engine)
+        where = " on Modal" if remote_compute.remote_ready() else ""
+        with st.spinner(f"Scoring {len(frame):,} rows{where}..."):
+            scored, source = remote_compute.score_batch(mill, frame, engine=engine)
     except Exception as exc:
         st.error(f"Scoring failed: {type(exc).__name__}: {exc}")
         st.markdown('<div class="note">To recover, check in order: <b>1.</b> every column header '
@@ -2149,36 +2340,10 @@ def view_batch(mill, engine="Champion GBDT (Recommended)"):
         table[f"pred_{key}_lo"] = (table[f"pred_{key}"] - half).round(2)
         table[f"pred_{key}_hi"] = (table[f"pred_{key}"] + half).round(2)
 
-    domain = explainer.get_applicability_domain().get(mill, {})
-    if domain:
-        outside = pd.Series(0, index=frame.index)
-        for param, bounds in domain.items():
-            if param not in frame.columns:
-                continue
-            p01, p99 = bounds.get("p01"), bounds.get("p99")
-            if p01 is None or p99 is None:
-                continue
-            values = pd.to_numeric(frame[param], errors="coerce")
-            outside = outside + ((values < p01) | (values > p99)).fillna(False).astype(int)
-        ood_rows = int((outside > 0).sum())
-        if ood_rows:
-            st.warning(f"{ood_rows:,} of {len(frame):,} rows sit outside the historical "
-                       f"P01–P99 envelope on at least one input: those predictions are "
-                       f"extrapolation and should be read as such.")
-
-    chem_cols = [c for c in frame.columns if c.startswith("Chem_")]
-    if chem_cols:
-        blank_chem = int(frame[chem_cols].isna().all(axis=1).sum())
-        if blank_chem:
-            st.warning(f"{blank_chem:,} row(s) carry no chemistry at all: every element was "
-                       f"imputed, so those predictions describe a hypothetical heat, not one "
-                       f"you measured. Fill the chemistry columns before certifying anything.")
-    st.dataframe(table.head(200), use_container_width=True, height=320)
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        table.to_excel(writer, index=False, sheet_name="scored")
-    st.download_button("Download scored sheet", buf.getvalue(), file_name=f"{mill.lower()}_scored.xlsx",
-                       type="primary")
+    stored = {"upload_key": upload_key, "table": table, "notes": notes,
+              "n_rows": int(len(frame)), "source": source, "engine": engine}
+    st.session_state[state_key] = stored
+    _render_batch_result(mill, stored, replay=False)
 
 
 def retrain_template_bytes(mill):
@@ -3154,6 +3319,8 @@ def main():
                  "OLS / Linear is only offered where a linear family was actually fitted."
         )
         st.markdown("---")
+        st.caption("Simulator predictions run locally; recipe search, batch and capability "
+                   "calculations run on Modal when configured.")
         st.caption("Data: Gunung Raja Paksi production logs. Models private; app public.")
         with st.expander("build and self-test", expanded=False):
             st.caption(f"build {BUILD}")

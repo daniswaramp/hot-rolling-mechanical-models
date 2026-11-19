@@ -41,7 +41,7 @@ Whenever modifying or extending this codebase, maintain these design constraints
 1. **Root Directory Discipline**:
    - The root holds the batch runners plus a fixed application tree: `app/`, `Plate/`, `HRC/`, `models/`,
      `notebooks/`, `.streamlit/`, `graphify-out/`, `push-to-GH/`, and the top-level `AGENTS.md`,
-     `README.md` and `requirements.txt`.
+     `README.md`, `requirements.txt` and the deployment stub `modal_app.py`.
    - Do not drop loose Python scripts, temporary `.joblib` files, or CSVs in the root. Scratch work
      belongs in a subfolder or a temp directory.
 2. **Python Code Placement**:
@@ -54,6 +54,12 @@ Whenever modifying or extending this codebase, maintain these design constraints
    - Heavy training, hyperparameter optimization, and 100-iteration bootstrapping must **NEVER run on the local machine**.
    - Cloud execution is handled via `python -m modal run <module>\script\ml\modal_runner.py` (spawning remote Debian containers with 4-8 vCPUs and up to 16 GB RAM).
    - Local fallback is disabled to protect local CPU/RAM.
+   - The **app's** heavy calculations (recipe search, batch scoring, capability study) take a second,
+     separate Modal path: `modal_app.py` deploys the app `hrcm-compute`, `app\remote_compute.py`
+     dispatches to it. Those calls are spent only from an explicit button press ("Calculate recipe",
+     "Calculate scores", "Calculate capability") — never on a rerun and never at boot — and they fall
+     back to local compute whenever the package, the credentials or the deployed app is missing, so
+     the public demo keeps working. Per-keystroke simulator predictions stay local.
 5. **Zero Data Leakage Group Splitting**:
    - Multiple plates or coils are cut from the same melt heat.
    - **Never use random k-fold or train_test_split**.
@@ -107,6 +113,7 @@ Whenever modifying or extending this codebase, maintain these design constraints
 | `model_loader.py` | Loads the per-target joblib bundles, reads the conformal and bootstrap reports, computes the physical indicators, and applies the plate normalising coupling. |
 | `spec_checker.py` | Reads `specification-list\SPECIFICATION LIST.xlsx`, matches a spec/grade/thickness tier, and evaluates gauge, chemistry and mechanical compliance. |
 | `optimizer.py` | Inverse setpoint solver. Sweeps a discretised schedule inside the permitted window, keeps candidates that clear the spec at the 95 % conformal bound, and ranks the survivors with one or more objectives. |
+| `remote_compute.py` | Dispatches the three heavy calculations (recipe search, batch scoring, capability study) to the Modal app `hrcm-compute` when it is configured, and to this process otherwise. Imports `modal` lazily; every call returns `(result, source)` so the UI can caption where the numbers came from. Deployed by the root `modal_app.py`. |
 | `constraints.py` | Permitted temperature window (seeded from the trained P01-P99 envelope) plus the CE_IIW and P_cm caps. Shared by the optimizer and the surface. |
 | `training_stats.py` | Sidebar statistics. Reads the cleaned CSV when it is on disk and `models\training_stats.json` when it is not. |
 | `build_stats_bundle.py` | Regenerates that bundle from both cleaned tables. Run it after any ETL refresh. |

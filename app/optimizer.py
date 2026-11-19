@@ -26,6 +26,9 @@ import spec_checker as sc
 import constraints as cons
 import grade_templates as gt
 import physics as ph
+# Heavy-calculation dispatch (Modal when configured, this process otherwise). Importing this
+# module does not import modal; see app/remote_compute.py.
+import remote_compute
 
 
 def route_for(mill: str, finish_temp: float, headers: float) -> str:
@@ -996,7 +999,8 @@ def _rejected_band_notes(df, active, k, mill, finish_col, max_bands=3):
     return notes
 
 
-def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elapsed):
+def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elapsed,
+                             source: str = "local"):
     """
     Renders one solved (or failed) optimizer outcome: the extrapolation warning, recipe
     card, alternative-recipe ladder, rejection notes and the CSV download.
@@ -1010,11 +1014,15 @@ def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elaps
     The few scalars the card needs that are not part of the search result (spec name, grade,
     thickness, rolling type) travel in res["_meta"], which keeps this signature free of the
     widget state.
+
+    ``source`` is where the search actually ran ("modal" or "local"): it is captioned under
+    the recipe card so the operator can see whether those numbers came off Modal.
     """
     entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
 
     if res.get("error"):
         st.error(res["error"])
+        st.caption(remote_compute.source_label(source))
         return
 
     meta = res.get("_meta") or {}
@@ -1032,6 +1040,7 @@ def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elaps
                  "grade, or relax the specification.")
         for note in res["rejected"]:
             st.markdown(f"- {note}")
+        st.caption(remote_compute.source_label(source))
         return
 
     if chosen.get("_extrapolated"):
@@ -1104,6 +1113,7 @@ def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elaps
                f"Overpower deprioritises (never hides) any candidate whose margin on a property "
                f"exceeds {OVERPOWER_CAP_INTERVALS:.0f} × its interval (cap = "
                f"{OVERPOWER_CAP_INTERVALS:.0f} × conformal half-width, fixed constant).")
+    st.caption(remote_compute.source_label(source))
 
     # ---- rejection ladder -----------------------------------------------------------------
     st.markdown("#### Rejection ladder: next hottest feasible alternatives")
@@ -1192,8 +1202,10 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     property non-marginal (margin >= k × 95% conformal interval), with a rejection ladder.
 
     Every input lives inside one st.form, so touching a widget never reruns the script and
-    nothing is scored until "Search recipes" is submitted. The submitted outcome is kept in
-    st.session_state[f"opt_result_{mill}"] and simply re-rendered on later reruns.
+    nothing is scored until "Calculate recipe" is submitted. The submitted outcome (with the
+    source it came from - Modal or this process) is kept in
+    st.session_state[f"opt_result_{mill}"] and simply re-rendered on later reruns, so a
+    rerun never spends another Modal call.
     """
     raw = dict(raw)
     st.markdown('<div class="section"><span>inverse setpoint search</span><i></i></div>',
@@ -1306,19 +1318,20 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                        "carries the cooling, applied symmetrically to top and bottom.")
 
         st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
-        submitted = st.form_submit_button("Search recipes", type="primary",
+        submitted = st.form_submit_button("Calculate recipe", type="primary",
                                           use_container_width=True)
 
     # ---- idle path: replay the last submitted outcome, or do nothing ---------------------
     if not submitted:
         stored = st.session_state.get(result_key)
         if not stored:
-            st.caption("Set the constraints, then press Search recipes.")
+            st.caption("Set the constraints, then press Calculate recipe.")
             return
-        st.caption("Shown from your last search. Press Search recipes to run again with the "
-                   "current inputs.")
+        st.caption("Shown from your last calculation. Press Calculate recipe to run again with "
+                   "the current inputs.")
         _render_optimizer_result(mill, stored["res"], stored["requirements"],
-                                 stored["k"], stored["elapsed"])
+                                 stored["k"], stored["elapsed"],
+                                 source=stored.get("source", "local"))
         return
 
     if slab_choice == AUTO_CHEMISTRY:
@@ -1349,10 +1362,13 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     search_raw = dict(raw)
     search_raw["Rolling_Type"] = rolling_type
 
-    with st.spinner("Scoring the entry × finish × cooling × chemistry grid against the "
-                    "specification at the conformal bound..."):
+    # The submit above is the only gate: this search runs on Modal when it is configured and
+    # falls back to this process when it is not, and remote_compute reports which one answered.
+    where = " on Modal" if remote_compute.remote_ready() else ""
+    with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid against the "
+                    f"specification at the conformal bound{where}..."):
         t0 = time.time()
-        res = run_recipe_search(
+        res, source = remote_compute.recipe_search(
             mill, search_raw, thickness, requirements, chemistries,
             entry_range, finish_range, cooling=cooling, headers_range=headers_range,
             ct_range=ct_range, k=k)
@@ -1372,7 +1388,8 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                   "thickness": float(thickness), "rolling_type": rolling_type},
     }
     st.session_state[result_key] = {"res": stored_res, "requirements": requirements,
-                                    "k": float(k), "elapsed": elapsed_text}
+                                    "k": float(k), "elapsed": elapsed_text, "source": source}
 
     # the submit path and the replay path render through the same helper
-    _render_optimizer_result(mill, stored_res, requirements, float(k), elapsed_text)
+    _render_optimizer_result(mill, stored_res, requirements, float(k), elapsed_text,
+                             source=source)
