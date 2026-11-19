@@ -685,6 +685,138 @@ def lean_chemistries():
     return [(name, chem) for _ce, _ma, name, chem in items]
 
 
+DERIVED_CHEMISTRY_NAME = "derived (clamped to constraints)"
+CHEM_CONSTRAINT_EPS = 1e-9
+MN_FLOOR_WT = 0.20  # the app's Chem_Mn minimum: the CE lever's floor
+
+
+def _within_window(value, lo, hi, eps=CHEM_CONSTRAINT_EPS):
+    """True when `value` sits inside an optional [lo, hi] window (None = open side)."""
+    if lo is not None and value < float(lo) - eps:
+        return False
+    if hi is not None and value > float(hi) + eps:
+        return False
+    return True
+
+
+def apply_chemistry_constraints(chemistries, ce_min=None, ce_max=None, pcm_min=None,
+                                pcm_max=None, nb_max=None, v_max=None, ti_max=None):
+    """Optional ranged chemistry filter for the auto (leanest-first) slab search.
+
+    Pure and model-free: given the template list in lean-first order and up to six
+    optional limits (CE_IIW window, Pcm window, Nb/V/Ti caps), returns
+    ``(filtered, derived, error)``:
+
+      * every template that satisfies all set limits, in the input order, when at least
+        one passes — ``derived`` and ``error`` are then both None;
+      * when no template passes, ONE synthetic chemistry derived from the leanest
+        template (lowest CE_IIW, then lowest microalloy total): Nb/V/Ti clamped to
+        their caps, then Mn walked (it is the CE lever — CE_IIW is linear in Mn, so the
+        Mn that lands exactly on the CE bound is solved directly and floored at
+        0.20 wt%, the app's Chem_Mn minimum) until CE_IIW and Pcm both sit inside their
+        windows. It is named ``DERIVED_CHEMISTRY_NAME`` and the caller appends it LAST,
+        so an in-range template always beats the synthetic one;
+      * when not even the derivation can land inside the windows (e.g. a CE max below
+        what the Mn floor allows), ``error`` states that the constraints are mutually
+        infeasible.
+
+    All-None limits short-circuit to the input list unchanged (same order), so an
+    unchecked box is bit-for-bit today's behaviour.
+    """
+    if all(v is None for v in (ce_min, ce_max, pcm_min, pcm_max, nb_max, v_max, ti_max)):
+        return list(chemistries), None, None
+    if not chemistries:
+        return [], None, None
+
+    eps = CHEM_CONSTRAINT_EPS
+
+    def passes(chem):
+        if not _within_window(chemistry_ce_iiw(chem), ce_min, ce_max, eps):
+            return False
+        if not _within_window(chemistry_pcm(chem), pcm_min, pcm_max, eps):
+            return False
+        for key, cap in (("Chem_Nb", nb_max), ("Chem_V", v_max), ("Chem_Ti", ti_max)):
+            if cap is not None and float(chem.get(key, 0.0)) > float(cap) + eps:
+                return False
+        return True
+
+    filtered = [(name, chem) for name, chem in chemistries if passes(chem)]
+    if filtered:
+        return filtered, None, None
+
+    # No template passes: derive a clamped chemistry from the leanest one.
+    _lean_name, lean_chem = min(
+        chemistries,
+        key=lambda item: (chemistry_ce_iiw(item[1]), chemistry_microalloy(item[1])))
+    chem = {key: float(val) for key, val in lean_chem.items()}
+    for key, cap in (("Chem_Nb", nb_max), ("Chem_V", v_max), ("Chem_Ti", ti_max)):
+        if cap is not None and chem.get(key, 0.0) > float(cap):
+            chem[key] = float(cap)
+
+    def mn_for_ce(target):
+        # CE_IIW = C + Mn/6 + (Cr+Mo+V)/5 + (Ni+Cu)/15  ->  Mn = 6 * (CE - rest)
+        rest = (chem.get("Chem_C", 0.0)
+                + (chem.get("Chem_Cr", 0.0) + chem.get("Chem_Mo", 0.0)
+                   + chem.get("Chem_V", 0.0)) / 5.0
+                + (chem.get("Chem_Ni", 0.0) + chem.get("Chem_Cu", 0.0)) / 15.0)
+        return 6.0 * (float(target) - rest)
+
+    def mn_for_pcm(target):
+        # Pcm = C + Si/30 + (Mn+Cu+Cr)/20 + Ni/60 + Mo/15 + V/10 + 5B
+        rest = (chem.get("Chem_C", 0.0) + chem.get("Chem_Si", 0.0) / 30.0
+                + (chem.get("Chem_Cu", 0.0) + chem.get("Chem_Cr", 0.0)) / 20.0
+                + chem.get("Chem_Ni", 0.0) / 60.0 + chem.get("Chem_Mo", 0.0) / 15.0
+                + chem.get("Chem_V", 0.0) / 10.0 + 5.0 * chem.get("Chem_B", 0.0))
+        return 20.0 * (float(target) - rest)
+
+    infeasible = "constraints are mutually infeasible: no chemistry can satisfy them"
+
+    # Step 1: land CE_IIW inside its window with Mn (the only free lever).
+    if ce_max is not None and chemistry_ce_iiw(chem) > float(ce_max) + eps:
+        chem["Chem_Mn"] = max(MN_FLOOR_WT, mn_for_ce(ce_max))
+        if chemistry_ce_iiw(chem) > float(ce_max) + eps:
+            return [], None, infeasible  # even the Mn floor keeps CE above the max
+    if ce_min is not None and chemistry_ce_iiw(chem) < float(ce_min) - eps:
+        chem["Chem_Mn"] = max(MN_FLOOR_WT, mn_for_ce(ce_min))
+        if chemistry_ce_iiw(chem) < float(ce_min) - eps:
+            return [], None, infeasible
+
+    # Step 2: land Pcm inside its window, walking Mn again if needed.
+    if pcm_max is not None and chemistry_pcm(chem) > float(pcm_max) + eps:
+        chem["Chem_Mn"] = max(MN_FLOOR_WT, mn_for_pcm(pcm_max))
+        if chemistry_pcm(chem) > float(pcm_max) + eps:
+            return [], None, infeasible
+    if pcm_min is not None and chemistry_pcm(chem) < float(pcm_min) - eps:
+        chem["Chem_Mn"] = max(MN_FLOOR_WT, mn_for_pcm(pcm_min))
+        if chemistry_pcm(chem) < float(pcm_min) - eps:
+            return [], None, infeasible
+
+    # Step 3: the Pcm walk moved CE too — both windows must hold simultaneously.
+    if not (_within_window(chemistry_ce_iiw(chem), ce_min, ce_max, eps)
+            and _within_window(chemistry_pcm(chem), pcm_min, pcm_max, eps)):
+        return [], None, infeasible
+
+    return [], (DERIVED_CHEMISTRY_NAME, chem), None
+
+
+def chemistry_constraints_text(ce_min=None, ce_max=None, pcm_min=None, pcm_max=None,
+                               nb_max=None, v_max=None, ti_max=None):
+    """One-line echo of the applied auto-search chemistry limits (recipe card + CSV)."""
+    parts = []
+    if ce_min is not None or ce_max is not None:
+        lo = "—" if ce_min is None else f"{float(ce_min):.2f}"
+        hi = "—" if ce_max is None else f"{float(ce_max):.2f}"
+        parts.append(f"CE {lo}–{hi}")
+    if pcm_min is not None or pcm_max is not None:
+        lo = "—" if pcm_min is None else f"{float(pcm_min):.2f}"
+        hi = "—" if pcm_max is None else f"{float(pcm_max):.2f}"
+        parts.append(f"Pcm {lo}–{hi}")
+    for label, cap in (("Nb", nb_max), ("V", v_max), ("Ti", ti_max)):
+        if cap is not None:
+            parts.append(f"{label} ≤ {float(cap):.3f}")
+    return ", ".join(parts)
+
+
 def ood_mask(mill, frame, keys):
     """True where a swept parameter leaves the historical P01-P99 envelope.
 
@@ -692,7 +824,7 @@ def ood_mask(mill, frame, keys):
     path stays cheap, and a missing envelope excludes nothing.
     """
     try:
-        import explainer
+        import explainer as expl
         domain = expl.get_applicability_domain().get(mill, {})
     except Exception:
         domain = {}
@@ -1639,6 +1771,10 @@ def _render_recipe_card(mill, chosen, requirements, k, meta, elapsed_text, n_eva
         f"Nb {chosen.get('Chem_Nb', 0.0):.4f} % · "
         f"CE_IIW {chosen.get('ce_iiw', 0.0):.3f} · microalloys "
         f"{chosen.get('microalloy_total', 0.0):.4f} %")
+    if meta.get("chemistry_constraints"):
+        note = (" — synthetic derivation, not a rolled grade"
+                if str(chosen.get("_chemistry", "")).startswith("derived") else "")
+        st.caption(f"chemistry constrained: {meta['chemistry_constraints']}{note}")
 
     pred_rows = []
     for req in requirements:
@@ -1676,7 +1812,7 @@ def _render_recipe_card(mill, chosen, requirements, k, meta, elapsed_text, n_eva
                f"{OVERPOWER_CAP_INTERVALS:.0f} × conformal half-width, fixed constant).")
 
 
-def _recipe_csv_row(mill, chosen, requirements, k):
+def _recipe_csv_row(mill, chosen, requirements, k, meta=None):
     """One recipe row reduced to the columns a CSV export should carry."""
     entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
     recipe_keys = (["_chemistry"] + [c for c in chosen if str(c).startswith("Chem_")]
@@ -1693,6 +1829,9 @@ def _recipe_csv_row(mill, chosen, requirements, k):
     csv_row = {key: chosen.get(key) for key in dict.fromkeys(recipe_keys) if key in chosen}
     csv_row["k"] = k
     csv_row["ood"] = bool(chosen.get("ood", False))
+    constraints = (meta or {}).get("chemistry_constraints")
+    if constraints:
+        csv_row["chemistry_constraints"] = constraints
     return csv_row
 
 
@@ -1786,7 +1925,7 @@ def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elaps
         st.caption("Nothing was rejected: every evaluated candidate cleared the margin rule.")
 
     # ---- CSV download -----------------------------------------------------------------------
-    csv_row = _recipe_csv_row(mill, chosen, requirements, k)
+    csv_row = _recipe_csv_row(mill, chosen, requirements, k, meta)
     st.download_button(
         "Download recipe (CSV)",
         data=pd.DataFrame([csv_row]).to_csv(index=False).encode("utf-8"),
@@ -1839,6 +1978,8 @@ def _render_pareto_result(mill: str, res: dict, requirements, k: float, elapsed,
         "schedule is at least as lean, at least as lightly cooled *and* at least as "
         "comfortable at once. Read it as a price list — the frontier never hides a cheaper or "
         "hotter option behind one blended score.")
+    if meta.get("chemistry_constraints"):
+        st.caption(f"chemistry constrained: {meta['chemistry_constraints']}")
 
     tail = ""
     if res.get("n_truncated"):
@@ -1909,6 +2050,9 @@ def _render_pareto_result(mill: str, res: dict, requirements, k: float, elapsed,
         for rid, value in (row.get("margin_ratios") or {}).items():
             record[f"margin_ratio_{rid}"] = value
         export.append(record)
+    if meta.get("chemistry_constraints"):
+        for record in export:
+            record["chemistry_constraints"] = meta["chemistry_constraints"]
     spec_name = str(meta.get("spec", "spec")).replace(" ", "_")
     st.download_button(
         "Download frontier (CSV)",
@@ -2003,9 +2147,9 @@ def _render_robust_result(mill: str, res: dict, requirements, k: float, elapsed,
     else:
         st.caption("The shortlist held a single feasible candidate, so there are no runners.")
 
-    export = [_recipe_csv_row(mill, chosen, requirements, k)]
+    export = [_recipe_csv_row(mill, chosen, requirements, k, meta)]
     for alt in runners:
-        export.append(_recipe_csv_row(mill, alt, requirements, k))
+        export.append(_recipe_csv_row(mill, alt, requirements, k, meta))
     for position, record in enumerate(export):
         record["role"] = "chosen" if position == 0 else "runner"
     spec_name = str(meta.get("spec", "spec")).replace(" ", "_")
@@ -2167,6 +2311,56 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
             if band_text:
                 st.caption(band_text)
 
+        # ---- 3a. optional ranged chemistry constraints on the auto-search ---------------
+        # Only offered for the auto search: a pinned slab grade rolls exactly that
+        # chemistry, so there is nothing to constrain. The six limits pre-filter the
+        # grade templates before the candidate grid; run_recipe_search, pareto_frontier
+        # and robust_recipe all take the resulting chemistries list unchanged, so one
+        # filter here covers all three calculation modes.
+        chem_constraints = None
+        auto_templates = lean_chemistries() if slab_choice == AUTO_CHEMISTRY else []
+        if slab_choice == AUTO_CHEMISTRY:
+            with st.expander("Constrain the auto-search (optional)"):
+                apply_chem = st.checkbox(
+                    "Apply CE / Pcm / Nb / V / Ti constraints", key=f"opt_chemgate_{mill}",
+                    help="Pre-filter the grade templates the auto search sweeps: a CE_IIW "
+                         "window, a Pcm window and Nb, V, Ti caps. When no template passes, "
+                         "the leanest template is clamped onto the limits synthetically.")
+                if apply_chem:
+                    cc1, cc2 = st.columns(2)
+                    ce_min = cc1.number_input("CE_IIW min", min_value=0.0, max_value=3.0,
+                                              value=0.0, step=0.01, key=f"opt_cce_lo_{mill}")
+                    ce_max = cc2.number_input("CE_IIW max", min_value=0.0, max_value=3.0,
+                                              value=0.45, step=0.01, key=f"opt_cce_hi_{mill}")
+                    pcm_min = cc1.number_input("Pcm min", min_value=0.0, max_value=1.0,
+                                               value=0.0, step=0.01, key=f"opt_cpcm_lo_{mill}")
+                    pcm_max = cc2.number_input("Pcm max", min_value=0.0, max_value=1.0,
+                                               value=0.25, step=0.01, key=f"opt_cpcm_hi_{mill}")
+                    nb_max = cc1.number_input("Nb max (wt%)", min_value=0.0, max_value=1.0,
+                                              value=0.06, step=0.005, key=f"opt_cnb_{mill}")
+                    v_max = cc2.number_input("V max (wt%)", min_value=0.0, max_value=1.0,
+                                             value=0.10, step=0.005, key=f"opt_cv_{mill}")
+                    ti_max = cc1.number_input("Ti max (wt%)", min_value=0.0, max_value=1.0,
+                                              value=0.06, step=0.005, key=f"opt_cti_{mill}")
+                    if ce_max < ce_min:
+                        st.warning("CE_IIW: max below min, swapping the two bounds.")
+                        ce_min, ce_max = ce_max, ce_min
+                    if pcm_max < pcm_min:
+                        st.warning("Pcm: max below min, swapping the two bounds.")
+                        pcm_min, pcm_max = pcm_max, pcm_min
+                    chem_constraints = {
+                        "ce_min": float(ce_min), "ce_max": float(ce_max),
+                        "pcm_min": float(pcm_min), "pcm_max": float(pcm_max),
+                        "nb_max": float(nb_max), "v_max": float(v_max), "ti_max": float(ti_max)}
+                    preview, _preview_derived, _preview_err = apply_chemistry_constraints(
+                        auto_templates, **chem_constraints)
+                    note = ""
+                    if not preview and auto_templates:
+                        note = (" — no template passes: the search will derive a clamped "
+                                "chemistry from the leanest one")
+                    st.caption(f"{len(preview)} templates pass: {len(preview)} of "
+                               f"{len(auto_templates)}{note}")
+
         def band_inputs(key, label):
             """lo/hi number inputs bounded by the mill spec row; default the row's full range."""
             row = {r[1]: r for r in (spec_rows or [])}.get(key)
@@ -2221,11 +2415,26 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         _render_stored_result(mill, stored)
         return
 
+    derived_chemistry = False
     if slab_choice == AUTO_CHEMISTRY:
-        chemistries = lean_chemistries()
+        chemistries = auto_templates
         if not chemistries:
             chemistries = [("simulator chemistry",
                             {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
+        if chem_constraints:
+            filtered, derived, err = apply_chemistry_constraints(chemistries, **chem_constraints)
+            if err:
+                st.error(err)
+                return
+            chemistries = list(filtered)
+            if derived is not None:
+                # Appended LAST: an in-range template always beats the synthetic one.
+                chemistries.append(derived)
+                derived_chemistry = True
+                st.caption(f"No grade template satisfies the chemistry limits: the search runs "
+                           f"on \"{DERIVED_CHEMISTRY_NAME}\" — a synthetic derivation "
+                           f"(microalloys clamped, Mn walked onto the CE/Pcm windows), not a "
+                           f"rolled grade.")
     else:
         chem = gt.chemistry(slab_choice) or {}
         if chem:
@@ -2255,6 +2464,10 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
     where = " on Modal" if remote_compute.remote_ready() else ""
     mode_meta = {"spec": chosen_spec, "grade": chosen_grade, "thickness": float(thickness),
                  "rolling_type": rolling_type}
+    if chem_constraints:
+        mode_meta["chemistry_constraints"] = chemistry_constraints_text(**chem_constraints)
+    if derived_chemistry:
+        mode_meta["derived_chemistry"] = True
 
     if calc_mode == PARETO_MODE:
         with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid and building "

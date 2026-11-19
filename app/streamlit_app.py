@@ -120,6 +120,14 @@ try:
 except Exception:
     pass
 
+# Pass schedule recrystallization & penetration screening. Importing it is free: the tab is
+# closed-form numpy behind its own submit button and imports precipitation read-only.
+import pass_schedule  # noqa: E402
+try:
+    importlib.reload(pass_schedule)
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -1726,6 +1734,56 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
                     unsafe_allow_html=True)
 
 
+def iso_line_value(mill, label, target, thickness, rolling_type="AR"):
+    """Spec-required minimum for `target` at a merged spec+grade tier (pure helper).
+
+    Resolves the picker label ("ASTM A 572 50") through spec_checker.spec_grade_options and
+    reads the tier's requirements via optimizer.spec_requirements (chemistry=None: the limit
+    itself does not depend on the candidate chemistry). Returns float(required) for the
+    FIRST min-type requirement of the drawn target, or None when the tier is unmatched or
+    carries no min-type requirement for it. Max-type ceilings (CE, S, P, and range specs'
+    upper TS bounds) are deliberately skipped: an iso-line of a ceiling is drawn as a
+    "keep-out" region, not a spec floor, and the overlay targets floor compliance only.
+    """
+    _labels, lookup = sc.spec_grade_options()
+    pair = lookup.get(label)
+    if pair is None:
+        return None
+    spec, grade = pair
+    try:
+        reqs, _info = optimizer.spec_requirements(spec, grade, float(thickness), mill,
+                                                  rolling_type=rolling_type, chemistry=None)
+    except Exception:  # noqa: BLE001 - a malformed workbook row must never break the surface
+        return None
+    for req in reqs:
+        if req.get("key") == target and req.get("direction") == "min":
+            try:
+                val = float(req.get("required"))
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(val):
+                return val
+    return None
+
+
+def surface_ood_mask(mill, xs, ys, x_key, y_key, base):
+    """Out-of-envelope boolean mask over the 2-D contour grid (pure helper).
+
+    True where a grid point sweeps either axis outside the historical P01-P99 envelope of
+    models/applicability_domain.json — the same source view_simulator checks through
+    explainer.check_applicability_domain / optimizer.ood_mask. All-False when the domain
+    carries no usable entry for the swept axes, so callers can skip the shading silently.
+    """
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    nx, ny = len(xs), len(ys)
+    frame = pd.DataFrame([dict(base) for _ in range(nx * ny)])
+    frame[x_key] = np.repeat(xs, ny)
+    frame[y_key] = np.tile(ys, nx)
+    mask = optimizer.ood_mask(mill, frame, [x_key, y_key])
+    return mask.to_numpy(dtype=bool).reshape(nx, ny)
+
+
 def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     limits = cons.get_limits(mill, SPECS[mill])
     keys = surface_keys(mill)
@@ -1788,12 +1846,63 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
         return
 
     if view == "2D contour":
+        # --- spec iso-line overlay (2D branch only): min-type mechanical requirements ------
+        ovr_labels, _ovr_lookup = sc.spec_grade_options()
+        overlay = st.selectbox("Overlay spec limit", ["None"] + ovr_labels, key=f"ovr_{mill}",
+                               help="Draws the chosen tier's minimum requirement for the "
+                                    "plotted property as a labelled contour line at the "
+                                    "current gauge.")
+        thickness = float(raw.get("Plate_T_mm" if mill == "Plate" else "Coil_T_mm",
+                                  16.0 if mill == "Plate" else 6.0))
+        iso_val = (None if overlay == "None"
+                   else iso_line_value(mill, overlay, target, thickness,
+                                       rolling_type=str(raw.get("Rolling_Type", "AR"))))
+        iso_caption, ood_caption = None, None
+
         fig = go.Figure()
         fig.add_trace(go.Contour(
             x=xs, y=ys, z=z, colorscale="Blues", contours=dict(showlabels=True,
             labelfont=dict(size=9, color="white")), line=dict(width=.4, color="rgba(255,255,255,.6)"),
             hovertemplate=f"{sx[2]}: %{{x:.1f}}<br>{sy[2]}: %{{y:.1f}}<br>{label}: %{{z:.1f}} {unit}<extra></extra>",
         ))
+        if iso_val is not None:
+            zf = z[np.isfinite(z)]
+            z_lo, z_hi = (float(zf.min()), float(zf.max())) if zf.size else (None, None)
+            if z_lo is not None and z_lo <= iso_val <= z_hi:
+                # Constant-z contours never render (marching squares has no crossings in a
+                # flat field), so draw the line from a +-eps band field: the contour level
+                # iso_val then falls exactly where z crosses the requirement, and the
+                # contour label still prints the required value.
+                eps = max(1e-6, 1e-3 * abs(iso_val))
+                band = np.where(z >= iso_val, iso_val + eps, iso_val - eps)
+                fig.add_trace(go.Contour(
+                    x=xs, y=ys, z=band,
+                    contours=dict(start=iso_val, end=iso_val, size=eps, coloring="lines",
+                                  showlabels=True, labelfont=dict(size=10, color=INK)),
+                    line=dict(color="#b91c1c", width=2.2, dash="dash"),
+                    showscale=False, hoverinfo="skip"))
+                iso_caption = (f"Dashed red line: {overlay} minimum {label} ≥ {iso_val:.0f} "
+                               f"{unit} at {thickness:.1f} mm gauge.")
+            else:
+                rng = (f"the plotted range ({z_lo:.0f}–{z_hi:.0f} {unit})"
+                       if z_lo is not None else "the plotted range")
+                iso_caption = (f"{overlay} requires {label} ≥ {iso_val:.0f} {unit}, which lies "
+                               f"outside {rng}; no iso-line drawn.")
+        elif overlay != "None":
+            iso_caption = f"No requirement for this property in {overlay}."
+
+        # --- out-of-envelope shading (2D branch only) ---------------------------------------
+        ood = surface_ood_mask(mill, xs, ys, x_key, y_key, raw)
+        if ood.any():
+            xx = np.repeat(xs, grid).reshape(grid, grid)
+            yy = np.tile(ys, grid).reshape(grid, grid)
+            fig.add_trace(go.Scatter(x=xx[ood], y=yy[ood], mode="markers",
+                                     name="outside historical envelope",
+                                     marker=dict(size=4, color="#9ca3af", opacity=0.35),
+                                     hoverinfo="skip"))
+            ood_caption = ("grey points lie outside the mill's historical P01-P99 envelope; "
+                           "treat them as extrapolation")
+
         fig.add_trace(go.Scatter(x=[point[x_key]], y=[point[y_key]], mode="markers",
                                  marker=dict(size=13, color=INK, line=dict(color="white", width=2.5)),
                                  hovertemplate=f"this schedule<br>{label}: {here:.1f} {unit}<extra></extra>",
@@ -1814,6 +1923,10 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
                                      camera=dict(eye=dict(x=1.5, y=-1.5, z=1.0))),
                           paper_bgcolor="white")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
+    if view == "2D contour":
+        for cap in (iso_caption, ood_caption):
+            if cap:
+                st.caption(cap)
     st.markdown(f'<div class="note">Surface held on the mill\'s own feature engineering, not a proxy: '
                 f'every node is a full pass through the {mill} pipeline. The marker is the current '
                 f'schedule at {here:.1f} {unit}.</div>', unsafe_allow_html=True)
@@ -3347,7 +3460,8 @@ def main():
 
     tabs = st.tabs(["Simulator", "Specification check", "Inverse Optimizer", "Response surface",
                     "Precipitation & Solubility", "Capability",
-                    "Batch", "Retrain", "Diagnostics", "Atlas", "Shadow", "About"])
+                    "Batch", "Retrain", "Diagnostics", "Atlas", "Shadow", "Pass schedule",
+                    "About"])
     with tabs[0]:
         view_simulator(mill, raw, engine)
     with tabs[1]:
@@ -3371,6 +3485,8 @@ def main():
     with tabs[10]:
         shadow.view_shadow(mill, raw)
     with tabs[11]:
+        pass_schedule.view_pass_schedule(mill, raw)
+    with tabs[12]:
         view_about()
 
 

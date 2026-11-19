@@ -72,6 +72,9 @@ Given target specification limits (e.g. ASTM A 572 Gr 50, JIS G 3101 SS400, SM49
 ### 5. Applicability Domain & Out-Of-Distribution (OOD) Monitor
 A continuous envelope monitor checks input parameters against historical P01–P99 mill percentiles across 20 Plate and 21 Steckel features, preventing hazardous extrapolation.
 
+### 6. Pass Schedule Recrystallization & Penetration Screening
+The **Pass schedule** tab classifies every pass of a drafted sequence into its softening regime — dynamic (DRX, metadynamic folded in), full static (SRX), partial (PRX) or none (NRX) — with a Sellars-type chain (Zener–Hollomon, peak/critical strain, solute- and Nb(C,N)-pinning-retarded interpass recrystallization) and flags whether each draft penetrates the full thickness via the contact-length rule of thumb. It runs locally in milliseconds behind its own "Analyze schedule" button and replays from session state.
+
 ---
 
 ## Artifacts & Verification

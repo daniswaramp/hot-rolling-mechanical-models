@@ -8,6 +8,7 @@ Plate route.
 
 import inspect
 import os
+import re
 import sys
 
 import numpy as np
@@ -482,3 +483,125 @@ def test_robust_recipe_runs_on_a_small_grid(boosted_models):
     assert res["noise_description"], "the noise model must be described"
     assert "entry ±20" in res["noise_description"]
     assert res["deterministic"] is not None
+
+
+# ----------------------------------------------------------- ranged chemistry constraints
+def _chem(c=0.06, mn=1.0, si=0.25, nb=0.0, v=0.0, ti=0.0):
+    """Synthetic chemistry with the Chem_* keys the helpers read.
+
+    With the other alloying elements at zero: CE_IIW = C + Mn/6 and
+    Pcm = C + Si/30 + Mn/20 + V/10.
+    """
+    return {"Chem_C": c, "Chem_Mn": mn, "Chem_Si": si, "Chem_Nb": nb, "Chem_V": v,
+            "Chem_Ti": ti, "Chem_Cr": 0.0, "Chem_Mo": 0.0, "Chem_Ni": 0.0,
+            "Chem_Cu": 0.0, "Chem_B": 0.0}
+
+
+def test_constraint_filter_drops_ce_and_nb_violators():
+    """CE above the max and Nb above the cap are dropped; combined limits keep one."""
+    chems = [
+        ("LEAN", _chem(c=0.06, mn=1.44)),            # CE 0.30, Nb 0
+        ("HOTCE", _chem(c=0.18, mn=1.92)),           # CE 0.50 > 0.45 max
+        ("RICHNB", _chem(c=0.06, mn=1.44, nb=0.08)), # CE 0.30 but Nb 0.08 > 0.06 cap
+        ("OKRICH", _chem(c=0.12, mn=1.20, nb=0.03)), # CE 0.32, Nb 0.03: the intended one
+    ]
+    filtered, derived, err = opt.apply_chemistry_constraints(
+        chems, ce_min=None, ce_max=0.45, pcm_min=None, pcm_max=None,
+        nb_max=0.06, v_max=None, ti_max=None)
+    assert err is None and derived is None
+    assert [name for name, _ in filtered] == ["LEAN", "OKRICH"], "input order preserved"
+
+
+def test_constraint_derivation_from_leanest_template():
+    """No template passes: exactly one derived chemistry, appended last, inside the limits."""
+    chems = [("RICH", _chem(c=0.18, mn=1.50, nb=0.08))]   # CE 0.43, Nb 0.08
+    filtered, derived, err = opt.apply_chemistry_constraints(
+        chems, ce_max=0.40, nb_max=0.03)
+    assert err is None and filtered == []
+    assert derived is not None
+    name, chem = derived
+    assert name == "derived (clamped to constraints)"
+    assert chem["Chem_Nb"] <= 0.03 + 1e-9, "microalloy clamped to its cap"
+    # Mn solved directly onto the CE bound, floored at the app's Chem_Mn minimum
+    assert opt.chemistry_ce_iiw(chem) == pytest.approx(0.40, abs=1e-6)
+    assert opt.chemistry_ce_iiw(chem) <= 0.40 + 1e-6
+    assert chem["Chem_Mn"] >= 0.20 - 1e-9
+    # the view composes filtered + [derived]; here filtered is empty, so it is last
+    composed = filtered + [derived]
+    assert len(composed) == 1 and composed[-1][0] == "derived (clamped to constraints)"
+
+
+def test_constraint_derivation_walks_mn_for_pcm_then_rechecks_ce():
+    """Pcm over its cap walks Mn further down; the resulting CE must re-enter its window."""
+    chems = [("P", _chem(c=0.18, mn=1.60, v=0.08))]  # CE 0.463, Pcm 0.276
+    filtered, derived, err = opt.apply_chemistry_constraints(
+        chems, ce_max=0.45, pcm_max=0.25)
+    assert err is None and filtered == []
+    name, chem = derived
+    assert name == "derived (clamped to constraints)"
+    assert opt.chemistry_pcm(chem) <= 0.25 + 1e-6
+    assert opt.chemistry_ce_iiw(chem) <= 0.45 + 1e-6
+    assert opt.chemistry_ce_iiw(chem) >= 0.0 - 1e-9
+
+
+def test_constraint_infeasible_reports_error_sentinel():
+    """CE max below what the Mn floor can reach: no derivation is fabricated."""
+    chems = [("ANY", _chem(c=0.10, mn=1.0))]  # CE floor at Mn 0.20 is 0.1333
+    filtered, derived, err = opt.apply_chemistry_constraints(chems, ce_max=0.05)
+    assert filtered == [] and derived is None
+    assert err and "infeasible" in err, err
+
+
+def test_constraint_off_returns_input_unchanged():
+    """All-None limits: the input list comes back unchanged, same order (checkbox off)."""
+    chems = [("B", _chem(c=0.12, mn=1.0)), ("A", _chem(c=0.06, mn=0.8))]
+    out, derived, err = opt.apply_chemistry_constraints(chems)
+    assert out == chems
+    assert derived is None and err is None
+    out2, d2, e2 = opt.apply_chemistry_constraints(
+        chems, None, None, None, None, None, None, None)
+    assert out2 == chems and d2 is None and e2 is None
+
+
+def test_constraint_filter_keeps_lean_first_order_on_real_templates():
+    """On the shipped templates the filter preserves the lean-first CE ordering."""
+    chems = opt.lean_chemistries()
+    if not chems:
+        pytest.skip("models/grade_templates.json missing")
+    filtered, derived, err = opt.apply_chemistry_constraints(
+        chems, ce_max=0.45, pcm_max=0.25, nb_max=0.06, v_max=0.10, ti_max=0.06)
+    assert err is None and derived is None
+    assert 0 < len(filtered) <= len(chems)
+    ces = [opt.chemistry_ce_iiw(chem) for _, chem in filtered]
+    assert ces == sorted(ces), "lean-first order preserved"
+
+
+def test_view_optimizer_renders_template_count_caption_when_enabled(monkeypatch):
+    """Bare-mode render with the gate forced on: no exception, the live count is captioned.
+
+    The checkbox cannot be preseeded in bare mode, so st.checkbox is patched to True
+    (view_optimizer has no other checkbox) and st.caption records its calls.
+    """
+    import streamlit as st
+
+    chems = opt.lean_chemistries()
+    if not chems:
+        pytest.skip("models/grade_templates.json missing")
+
+    raw = {"Plate_T_mm": 16.0, "Chem_C": 0.10, "Chem_Mn": 1.0, "Chem_Si": 0.20}
+    for key in [k for k in list(st.session_state.keys()) if str(k).startswith("opt_")]:
+        del st.session_state[key]
+
+    real_caption = st.caption
+    seen = []
+    # checkbox off (default): the live count must not appear
+    monkeypatch.setattr(st, "caption", lambda text, *a, **k: seen.append(str(text)))
+    opt.view_optimizer("Plate", raw, "Champion GBDT (Recommended)", spec_rows=None)
+    assert not any("templates pass" in s for s in seen)
+
+    # checkbox forced on: the caption appears and names the count
+    monkeypatch.setattr(st, "checkbox", lambda *a, **k: True)
+    seen.clear()
+    opt.view_optimizer("Plate", raw, "Champion GBDT (Recommended)", spec_rows=None)
+    assert any("templates pass" in s for s in seen), seen
+    assert any(re.search(r"templates pass: \d+ of \d+$", s) for s in seen), seen

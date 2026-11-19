@@ -359,5 +359,8 @@ def test_tabs_register_atlas_and_shadow_before_about():
     assert "Atlas" in labels and "Shadow" in labels
     assert labels[-1] == "About", f"About must stay the last tab, got {labels[-1]!r}"
     assert labels.index("Atlas") + 1 == labels.index("Shadow"), "Atlas and Shadow are adjacent"
-    assert labels.index("Shadow") + 1 == labels.index("About")
+    # The Pass schedule tab now sits between Shadow and About; the invariant these tabs
+    # care about is that both still register before About.
+    assert labels.index("Shadow") < labels.index("About")
+    assert labels[labels.index("Shadow") + 1] == "Pass schedule"
     assert "atlas.view_atlas(" in source and "shadow.view_shadow(" in source
