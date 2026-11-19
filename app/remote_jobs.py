@@ -182,9 +182,9 @@ def grid_spec(mill, axes, grid_sizes):
     Read on both paths (here and inside ``modal_jobs.build_atlas``) so the remote grid and a
     local fallback cover identical geometry.
     """
-    import streamlit_app  # noqa: PLC0415 - the heavy module, imported only when a build runs
+    import app_ref  # noqa: PLC0415 - the heavy module, resolved only when a build runs
 
-    rows = {row[1]: row for row in streamlit_app.SPECS[mill]}
+    rows = {row[1]: row for row in app_ref.get_app_module().SPECS[mill]}
     axes = [str(key) for key in axes]
     sizes = [int(size) for size in grid_sizes]
     if len(sizes) != len(axes):
@@ -211,8 +211,9 @@ def atlas_frame(mill, raw, axes, grid_sizes, engine=DEFAULT_ENGINE):
     """
     import itertools  # noqa: PLC0415
 
-    import streamlit_app  # noqa: PLC0415
+    import app_ref  # noqa: PLC0415
 
+    app_module = app_ref.get_app_module()
     spec = grid_spec(mill, axes, grid_sizes)
     keys = list(spec)
     values = [np.linspace(lo, hi, n) for lo, hi, n in spec.values()]
@@ -220,9 +221,9 @@ def atlas_frame(mill, raw, axes, grid_sizes, engine=DEFAULT_ENGINE):
     frame = pd.DataFrame([dict(raw) for _ in combinations])
     for position, key in enumerate(keys):
         frame[key] = [combination[position] for combination in combinations]
-    scored = streamlit_app.score_frame(mill, frame, engine=engine)
+    scored = app_module.score_frame(mill, frame, engine=engine)
     out = frame[keys].copy()
-    for target in streamlit_app.TARGET_LABEL[mill]:
+    for target in app_module.TARGET_LABEL[mill]:
         if target in scored.columns:
             out[target] = np.asarray(pd.to_numeric(scored[target], errors="coerce"), dtype=float)
     return out
@@ -309,7 +310,7 @@ def shadow_calibration(mill, csv_bytes, engine=DEFAULT_ENGINE):
     the predictions. Models are read, never written: this is a measurement of bias, not a
     refit.
     """
-    import streamlit_app  # noqa: PLC0415
+    import app_ref  # noqa: PLC0415
 
     frame = pd.read_csv(io.BytesIO(csv_bytes))
     if frame.empty:
@@ -318,7 +319,7 @@ def shadow_calibration(mill, csv_bytes, engine=DEFAULT_ENGINE):
     if not measured:
         raise ValueError("the uploaded sheet carries no Measured_* column")
 
-    scored = streamlit_app.score_frame(mill, frame, engine=engine)
+    scored = app_ref.get_app_module().score_frame(mill, frame, engine=engine)
     residuals, used = {}, {}
     for target, column in measured.items():
         if target not in scored.columns:

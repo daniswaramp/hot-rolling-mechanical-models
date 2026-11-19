@@ -251,8 +251,8 @@ def score_batch(mill, frame, engine="Champion GBDT (Recommended)"):
             return pd.read_parquet(io.BytesIO(scored)), "modal"
         except Exception as exc:  # noqa: BLE001
             _fallback(exc)
-    import streamlit_app
-    return streamlit_app.score_frame(mill, frame, engine=engine), "local"
+    import app_ref
+    return app_ref.get_app_module().score_frame(mill, frame, engine=engine), "local"
 
 
 def capability(mill, raw, target, lsl, usl, samples, bands,
@@ -281,5 +281,5 @@ def capability(mill, raw, target, lsl, usl, samples, bands,
             return _remote(CAPABILITY_FN, payload), "modal"
         except Exception as exc:  # noqa: BLE001
             _fallback(exc)
-    import streamlit_app
-    return streamlit_app.capability_resample(**payload), "local"
+    import app_ref
+    return app_ref.get_app_module().capability_resample(**payload), "local"

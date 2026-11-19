@@ -28,6 +28,52 @@ for p in [REPO_ROOT, APP_DIR, PLATE_DIR, os.path.join(HRC_DIR, "script")]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
+
+# --------------------------------------------------------------------------- app_ref
+def test_app_ref_resolves_running_main_module(monkeypatch):
+    """Regression: `streamlit run` executes the entry as __main__, so a tab module must
+    reuse that module instead of re-importing streamlit_app (which re-runs
+    st.set_page_config and raises StreamlitSetPageConfigMustBeFirstCommandError)."""
+    import types
+
+    import app_ref
+
+    fake_main = types.ModuleType("__main__")
+    fake_main.SPECS = {"Plate": []}
+    monkeypatch.delitem(sys.modules, "streamlit_app", raising=False)
+    monkeypatch.setitem(sys.modules, "__main__", fake_main)
+    assert app_ref.get_app_module() is fake_main
+
+
+def test_app_ref_prefers_imported_module_over_bare_main(monkeypatch):
+    import types
+
+    import streamlit_app  # noqa: F401
+
+    import app_ref
+
+    monkeypatch.setitem(sys.modules, "__main__", types.ModuleType("__main__"))
+    assert app_ref.get_app_module() is streamlit_app
+
+
+def test_app_ref_never_imports_streamlit_app_when_present(monkeypatch):
+    import app_ref
+
+    calls = []
+
+    real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+
+    def spy(name, *args, **kwargs):
+        if name == "streamlit_app":
+            calls.append(name)
+        return real_import(name, *args, **kwargs)
+
+    import streamlit_app  # noqa: F401  (ensure present so no import is needed)
+
+    monkeypatch.setattr("builtins.__import__", spy)
+    app_ref.get_app_module()
+    assert calls == [], "get_app_module re-imported streamlit_app"
+
 import atlas
 import remote_jobs
 import shadow

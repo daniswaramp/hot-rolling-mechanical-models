@@ -49,9 +49,13 @@ SOURCE_CAPTIONS = {"modal": "calibrated on Modal", "local": "calibrated locally"
 
 
 def _app():
-    """The Streamlit app module, imported on first use (it imports this module at boot)."""
-    import streamlit_app  # noqa: PLC0415 - avoids the import cycle
-    return streamlit_app
+    """The Streamlit app module, resolved on first use (it imports this module at boot).
+
+    Resolved through app_ref so a `streamlit run` entry (the script executes as
+    __main__) is reused instead of re-imported and re-executed.
+    """
+    import app_ref  # noqa: PLC0415 - avoids the import cycle
+    return app_ref.get_app_module()
 
 
 def template_frame(mill):
