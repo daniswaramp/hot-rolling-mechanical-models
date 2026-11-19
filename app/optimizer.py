@@ -2114,21 +2114,17 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                                    "of outcomes'.")
 
         # ---- 1. end specification -------------------------------------------------------
-        specs = sc.get_available_specs()
-        use_workbook = bool(specs)
-        if use_workbook:
-            preferred = [s for s in specs if "JIS" in s.upper()]
-            default_idx = specs.index(preferred[0]) if (mill == "HRC" and preferred) else 0
-            chosen_spec = st.selectbox("End specification standard", specs, index=default_idx,
-                                       key=f"opt_spec_{mill}")
-            grades = sc.get_available_grades(chosen_spec) or ["-"]
-            grade_idx = 0
-            if mill == "HRC":
-                jis_grades = [g for g in grades if "SS400" in g.upper()]
-                if jis_grades:
-                    grade_idx = grades.index(jis_grades[0])
-            chosen_grade = st.selectbox("Grade", grades, index=grade_idx,
-                                        key=f"opt_grade_{mill}")
+        labels, lookup = sc.spec_grade_options()
+        if labels:
+            preferred_key = ("JISG3101SS400" if mill == "HRC" else "ASTMA57250")
+            preferred = next((label for label in labels
+                              if sc.norm_key(label) == preferred_key),
+                             next((label for label in labels
+                                   if ("JIS G 3101" in label if mill == "HRC" else "A 572" in label)),
+                                  labels[0]))
+            chosen_label = st.selectbox("End specification + grade", labels,
+                                        index=labels.index(preferred), key=f"opt_sg_{mill}")
+            chosen_spec, chosen_grade = lookup[chosen_label]
         else:
             st.warning("The GRP specification workbook is unavailable: using the built-in preset "
                        "grades (YS/TS/EL minima only).")
@@ -2238,14 +2234,14 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
             chemistries = [("simulator chemistry",
                             {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
 
-    if use_workbook:
+    if labels:
         requirements, info = spec_requirements(chosen_spec, chosen_grade, thickness, mill,
                                                rolling_type, chemistries[0][1])
         if info.get("status") == "out_of_gauge":
             st.warning(info.get("message", "Thickness outside the standard range."))
         if not requirements:
             st.error("This specification tier carries no readable YS/TS/EL/CE limits: "
-                     "pick another standard/grade.")
+                     "pick another specification + grade.")
             return
     else:
         requirements = preset_requirements(mill, chosen_spec)

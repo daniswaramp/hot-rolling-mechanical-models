@@ -111,6 +111,34 @@ def get_available_grades(spec):
     return grades
 
 
+def norm_key(text):
+    """Whitespace-insensitive, case-insensitive key so pickers can match
+    "SS400" against the workbook's "SS 400" without rewriting the grade."""
+    return "".join(str(text).split()).upper()
+
+
+def spec_grade_options():
+    """``(labels, lookup)`` for the merged specification+grade picker.
+
+    Labels read like "JIS G 3101 SS400": the edition/year suffix in parentheses is
+    stripped for display, and a label that would collide (same base name and grade
+    in two editions) keeps the full specification name so the lookup stays unique.
+    Every label maps back to the exact ``(spec, grade)`` pair the workbook carries.
+    """
+    labels, lookup = [], {}
+    for spec in get_available_specs():
+        base = re.sub(r"\s*\([^)]*\)\s*$", "", spec).strip()
+        for grade in get_available_grades(spec):
+            label = f"{base} {grade}".strip()
+            if label in lookup:
+                label = f"{spec} {grade}".strip()
+                if label in lookup:
+                    continue
+            lookup[label] = (spec, grade)
+            labels.append(label)
+    return labels, lookup
+
+
 def find_matching_spec_row(spec, grade, thickness):
     """Find the exact tier row matching SPEC, GRADE, and THICK MIN <= thickness <= THICK MAX.
 

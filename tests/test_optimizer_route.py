@@ -250,6 +250,26 @@ def test_view_optimizer_has_no_zip_over_band():
     assert "zip(*gt.band(" not in src
 
 
+# --------------------------------------------------------------------------- merged spec picker
+def test_spec_grade_options_labels_and_roundtrip():
+    """The merged picker shows one "SPEC GRADE" label per workbook tier and every
+    label maps back to the exact (spec, grade) pair. The workbook writes the JIS
+    grade as "SS 400", so the label reads "JIS G 3101 SS 400" and norm_key() is
+    what lets a picker default match "SS400"."""
+    import spec_checker as sc
+
+    labels, lookup = sc.spec_grade_options()
+    assert labels, "no spec+grade options built from the shipped workbook"
+    assert len(labels) == len(lookup), "duplicate label would silently drop a tier"
+    assert "JIS G 3101 SS 400" in labels
+    spec, grade = lookup["JIS G 3101 SS 400"]
+    assert spec.startswith("JIS G 3101") and grade == "SS 400"
+    assert sc.norm_key("JIS G 3101 SS 400") == sc.norm_key("JIS G 3101 SS400")
+    # every label's mapped tier really exists in the workbook
+    for label, (spec, grade) in lookup.items():
+        assert grade in sc.get_available_grades(spec), label
+
+
 # --------------------------------------------------------------------------- Pareto mode
 def test_pareto_rows_are_non_dominated_and_all_feasible():
     """The frontier keeps only margin-feasible, mutually non-dominated candidates.

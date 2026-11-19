@@ -1527,8 +1527,8 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
 
 
 def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
-    specs = sc.get_available_specs()
-    if not specs:
+    labels, lookup = sc.spec_grade_options()
+    if not labels:
         st.error("No specifications could be loaded from specification-list/SPECIFICATION LIST.xlsx. "
                  "The workbook ships with the repository and is looked up relative to the app "
                  "package, so confirm the file is still at that path in this checkout; if you are "
@@ -1536,23 +1536,19 @@ def view_spec_check(mill, raw, engine="Champion GBDT (Recommended)"):
                  "uploaded beside app/. Then rerun this tab.")
         return
 
-    # Choose smart defaults
-    default_spec = "ASTM A 572 (21e1)" if mill == "Plate" else "JIS G 3101 (2022)"
-    if default_spec not in specs:
-        default_spec = "ASTM A 36 (2019)" if "ASTM A 36 (2019)" in specs else specs[0]
-    spec_idx = specs.index(default_spec) if default_spec in specs else 0
+    # Smart defaults: A 572 Gr 50 for plate, JIS G 3101 SS400 for coil.
+    preferred_key = ("ASTMA57250" if mill == "Plate" else "JISG3101SS400")
+    if sc.norm_key(preferred_key) not in map(sc.norm_key, labels):
+        preferred = next((label for label in labels
+                          if ("A 572" in label if mill == "Plate" else "JIS G 3101" in label)),
+                         labels[0])
+    else:
+        preferred = next(label for label in labels if sc.norm_key(label) == preferred_key)
 
-    c1, c2, c3 = st.columns([2.5, 1.8, 1.7], vertical_alignment="bottom")
-    chosen_spec = c1.selectbox("Specification Standard", specs, index=spec_idx, key=f"sc_spec_{mill}")
-
-    grades = sc.get_available_grades(chosen_spec)
-    if not grades:
-        grades = ["-"]
-        st.caption(f"{chosen_spec} carries no grade rows in the shipped specification workbook, "
-                   "so no tier can be matched for it.")
-    default_grade = "50" if "50" in grades else (grades[0] if grades else "-")
-    grade_idx = grades.index(default_grade) if default_grade in grades else 0
-    chosen_grade = c2.selectbox("Grade", grades, index=grade_idx, key=f"sc_gr_{mill}")
+    c1, c3 = st.columns([4.3, 1.7], vertical_alignment="bottom")
+    chosen_label = c1.selectbox("Specification + grade", labels,
+                                index=labels.index(preferred), key=f"sc_sg_{mill}")
+    chosen_spec, chosen_grade = lookup[chosen_label]
 
     t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
     thickness = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
