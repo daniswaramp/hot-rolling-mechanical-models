@@ -169,7 +169,7 @@ def _fallback(exc):
 
 
 def recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
-                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                   k=1.0):
     """Hottest-feasible-first recipe search, remote when configured.
 
@@ -190,7 +190,7 @@ def recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
 
 
 def pareto_search(mill, raw, thickness, requirements, chemistries, entry_range,
-                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                   k=1.0, step=10.0, max_points=40):
     """The non-dominated recipe frontier, remote when configured.
 
@@ -214,7 +214,7 @@ def pareto_search(mill, raw, thickness, requirements, chemistries, entry_range,
 
 
 def robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range,
-                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                   k=1.0, step=10.0, alpha=0.10, n_samples=200, seed=42, n_candidates=40):
     """The robust (Monte-Carlo CVaR) recipe, remote when configured.
 

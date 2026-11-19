@@ -92,7 +92,7 @@ def _enter_repo():
 # rejected by the installed client, so the deploy would fail with a TypeError).
 @app.function(image=image, cpu=2.0, memory=2048, timeout=600, scaledown_window=600)
 def recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
-                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                   k=1.0):
     """The inverse-optimizer recipe search, running the local selection math verbatim."""
     _enter_repo()
@@ -105,7 +105,7 @@ def recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
 
 @app.function(image=image, cpu=2.0, memory=2048, timeout=600, scaledown_window=600)
 def pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range,
-                    finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                    finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                     k=1.0, step=10.0, max_points=40):
     """The non-dominated recipe frontier, running the local frontier math verbatim."""
     _enter_repo()
@@ -119,7 +119,7 @@ def pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range
 
 @app.function(image=image, cpu=2.0, memory=2048, timeout=600, scaledown_window=600)
 def robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range,
-                  finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                  finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                   k=1.0, step=10.0, alpha=0.10, n_samples=200, seed=42, n_candidates=40):
     """The robust (Monte-Carlo CVaR) recipe, running the local study math verbatim."""
     _enter_repo()

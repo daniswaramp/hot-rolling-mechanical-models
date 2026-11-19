@@ -181,7 +181,7 @@ PLATE_SPEC = [
     ("Finishing mill", "FM_Temp_Before_Rolling", "Entry temperature", "C", 850.0, 1150.0, 985.0, 1.0),
     ("Finishing mill", "FM_Finish_Temp", "Finishing temperature", "C", 700.0, 1050.0, 832.0, 1.0),
     ("Finishing mill", "FM_Last_Pass_Drafting", "Last pass drafting", "mm", 0.5, 25.0, 4.0, 0.5),
-    ("Cooling", "ACC_Laminar_Header", "Laminar headers", "count", 0.0, 20.0, 8.0, 1.0),
+    ("Cooling", "ACC_Laminar_Header", "Laminar headers", "count", 0.0, 8.0, 8.0, 1.0),
     ("Cooling", "ACC_Temp_Post_Laminar", "Post-laminar temperature", "C", 200.0, 850.0, 744.0, 1.0),
     ("Chemistry", "Chem_C", "C", "wt%", 0.02, 0.35, 0.177, 0.005),
     ("Chemistry", "Chem_Mn", "Mn", "wt%", 0.2, 2.0, 0.613, 0.01),

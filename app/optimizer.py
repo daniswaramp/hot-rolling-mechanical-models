@@ -728,7 +728,7 @@ def _temp_grid(lo, hi, step=10.0):
 
 
 def _schedule_grid(mill, raw, thickness, chemistries, entry_range, finish_range,
-                   cooling="air", headers_range=(4, 12), ct_range=None, step=10.0):
+                   cooling="air", headers_range=(4, 8), ct_range=None, step=10.0):
     """Build the entry × finish × cooling × chemistry candidate grid, before any scoring.
 
     Pure and model-free: every calculation mode sweeps this same grid, so the recipe search,
@@ -863,7 +863,7 @@ def _score_schedule_frame(mill, cand_df, mech_keys):
 
 
 def _scored_candidates(mill, raw, thickness, requirements, chemistries, entry_range,
-                       finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                       finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                        step=10.0):
     """Grid + scoring builder shared by the recipe search, the Pareto frontier and the
     robust study: the one place the search space and its predictions are defined.
@@ -887,7 +887,7 @@ def _scored_candidates(mill, raw, thickness, requirements, chemistries, entry_ra
 
 
 def run_recipe_search(mill, raw, thickness, requirements, chemistries,
-                      entry_range, finish_range, cooling="air", headers_range=(4, 12),
+                      entry_range, finish_range, cooling="air", headers_range=(4, 8),
                       ct_range=None, k=1.0, step=10.0):
     """Hottest-feasible-first recipe search. Pure: no Streamlit calls, safe to drive from tests.
 
@@ -1298,7 +1298,7 @@ def _mode_meta(mill, thickness, k, step, cooling, headers_range, entry_range, fi
 
 
 def pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range,
-                    finish_range, cooling="air", headers_range=(4, 12), ct_range=None,
+                    finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                     k=1.0, step=10.0, max_points=40):
     """The non-dominated recipe frontier. Pure: no Streamlit calls, safe to drive from tests.
 
@@ -1499,7 +1499,7 @@ def _perturbation_draws(mill, pool, thickness, n_samples, seed, cooling, headers
 
 
 def robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range, finish_range,
-                  cooling="air", headers_range=(4, 12), ct_range=None, k=1.0, step=10.0,
+                  cooling="air", headers_range=(4, 8), ct_range=None, k=1.0, step=10.0,
                   alpha=0.10, n_samples=200, seed=42, n_candidates=40):
     """Robust recipe: the deterministic shortlist re-ranked on downside risk. Pure.
 
@@ -2192,9 +2192,9 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
             finish_range = band_inputs("FM_Finish_Temp", "Finish rolling temperature")
             cooling_label = st.radio("Cooling", ["Air cool", "Laminar headers"], horizontal=True)
             cooling = "air" if cooling_label == "Air cool" else "laminar"
-            headers_range = (4, 12)
+            headers_range = (4, 8)
             if cooling == "laminar":
-                headers_range = st.slider("Laminar header count range", 0, 20, (4, 12), step=1,
+                headers_range = st.slider("Laminar header count range", 0, 20, (4, 8), step=1,
                                           key=f"opt_hdr_{mill}")
             ct_range = None
         else:

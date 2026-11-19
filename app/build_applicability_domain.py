@@ -52,7 +52,7 @@ COLUMNS = {
 }
 
 # a count, not a temperature: the mill never runs more headers than this
-HARDWARE_CAPS = {"ACC_Laminar_Header": 20.0}
+HARDWARE_CAPS = {"ACC_Laminar_Header": 8.0}
 
 
 def percentiles(values):
