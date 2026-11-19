@@ -996,168 +996,35 @@ def _rejected_band_notes(df, active, k, mill, finish_col, max_bands=3):
     return notes
 
 
-def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)",
-                   spec_rows=None):
+def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elapsed):
     """
-    Renders the redesigned Inverse Optimizer: a hottest-feasible-first recipe search.
+    Renders one solved (or failed) optimizer outcome: the extrapolation warning, recipe
+    card, alternative-recipe ladder, rejection notes and the CSV download.
 
-    The user picks the end specification, target thickness and rolling process, then
-    constrains the slab grade, entry/finish temperature bands and cooling; the app searches
-    the constraint space and proposes the hottest recipe that keeps every spec-required
-    property non-marginal (margin >= k × 95% conformal interval), with a rejection ladder.
+    It renders from the search result alone and never recomputes, so the submit path and a
+    plain rerun that replays st.session_state[f"opt_result_{mill}"] produce identical output.
+    The failure states (res["error"] and chosen is None) are handled here too, so a stored
+    failure replays exactly as it was reported.
+
+    ``elapsed`` is the short elapsed string ("812 ms"); a float number of seconds is accepted.
+    The few scalars the card needs that are not part of the search result (spec name, grade,
+    thickness, rolling type) travel in res["_meta"], which keeps this signature free of the
+    widget state.
     """
-    raw = dict(raw)
-    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
-    st.markdown('<div class="section"><span>inverse setpoint search</span><i></i></div>',
-                unsafe_allow_html=True)
-    st.markdown('<div class="note">Hottest feasible recipe search against the spec at the 95% '
-                'conformal bound: the hottest entry and finish temperatures that keep every '
-                'spec-required property non-marginal, with the leanest chemistry that gets there.</div>',
-                unsafe_allow_html=True)
-
-    # ---- 1. end specification -----------------------------------------------------------
-    specs = sc.get_available_specs()
-    use_workbook = bool(specs)
-    if use_workbook:
-        preferred = [s for s in specs if "JIS" in s.upper()]
-        default_idx = specs.index(preferred[0]) if (mill == "HRC" and preferred) else 0
-        chosen_spec = st.selectbox("End specification standard", specs, index=default_idx,
-                                   key=f"opt_spec_{mill}")
-        grades = sc.get_available_grades(chosen_spec) or ["-"]
-        grade_idx = 0
-        if mill == "HRC":
-            jis_grades = [g for g in grades if "SS400" in g.upper()]
-            if jis_grades:
-                grade_idx = grades.index(jis_grades[0])
-        chosen_grade = st.selectbox("Grade", grades, index=grade_idx, key=f"opt_grade_{mill}")
-    else:
-        st.warning("The GRP specification workbook is unavailable: using the built-in preset "
-                   "grades (YS/TS/EL minima only).")
-        preset_names = list(PRESET_GRADES[mill].keys())
-        chosen_spec = st.selectbox("End specification standard (preset)", preset_names,
-                                   key=f"opt_spec_{mill}")
-        chosen_grade = chosen_spec
-
-    # ---- 2. target thickness + rolling process -----------------------------------------
-    t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
-    spec_row = {row[1]: row for row in (spec_rows or [])}.get(t_key)
-    gauge_lo = cons.spec_float(spec_row, 4, 6.0 if mill == "Plate" else 1.8)
-    gauge_hi = cons.spec_float(spec_row, 5, 120.0 if mill == "Plate" else 16.0)
-    if not gauge_hi > gauge_lo:
-        gauge_lo, gauge_hi = (6.0, 120.0) if mill == "Plate" else (1.8, 16.0)
-    cur_t = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
-    cur_t = min(max(cur_t, gauge_lo), gauge_hi)
-    thickness = st.number_input("Target thickness", min_value=gauge_lo,
-                                max_value=gauge_hi, value=cur_t, step=1.0,
-                                help="Finish gauge in millimetres.")
-
-    rolling_type = "AR"
-    if mill == "Plate":
-        process = st.radio("Rolling process", PROCESS_CHOICES, index=0, horizontal=True)
-        rolling_type = ROLLING_TYPE_MAP[process]
-        st.caption("Process mapping: " + " · ".join(PROCESS_HELP[p] for p in PROCESS_CHOICES))
-    else:
-        st.caption("Rolling_Type is not a feature of the Steckel HRC model, so the coil route "
-                   "offers no process selector.")
-
-    # ---- 3. constraints -----------------------------------------------------------------
-    start_choices = [AUTO_CHEMISTRY] + gt.names()
-    slab_choice = st.selectbox(
-        "Slab grade", start_choices, key=f"opt_slab_{mill}",
-        help="Pick an internal grade template to roll exactly that chemistry, or 'auto' to "
-             "search every template lean-first (lowest CE_IIW, then lowest microalloy total) "
-             "and return the leanest chemistry whose recipe stays feasible.")
-    if slab_choice != AUTO_CHEMISTRY:
-        st.caption(" · ".join(f"{el}: {lo:.3f}–{hi:.3f}"
-                              for el, (lo, hi) in zip(*gt.band(slab_choice)) if hi > lo)
-                   if gt.get(slab_choice) else "")
-
-    def band_inputs(key, label):
-        """lo/hi number inputs bounded by the mill spec row; default the row's full range."""
-        row = {r[1]: r for r in (spec_rows or [])}.get(key)
-        lo = cons.spec_float(row, 4, None)
-        hi = cons.spec_float(row, 5, None)
-        if lo is None or hi is None or not hi > lo:
-            lo, hi = (850.0, 1150.0) if key == ENTRY_COL[mill] else (700.0, 1050.0)
-        c1, c2 = st.columns(2)
-        band_lo = c1.number_input(f"{label} min (°C)", min_value=lo, max_value=hi,
-                                  value=float(lo), step=10.0, key=f"opt_{key}_lo_{mill}")
-        band_hi = c2.number_input(f"{label} max (°C)", min_value=lo, max_value=hi,
-                                  value=float(hi), step=10.0, key=f"opt_{key}_hi_{mill}")
-        if band_hi < band_lo:
-            st.warning(f"{label}: max below min, using the full row band.")
-            band_lo, band_hi = lo, hi
-        return float(band_lo), float(band_hi)
-
-    k = st.slider("required margin: k × 95% interval (non-marginal without overpower)",
-                  min_value=0.5, max_value=2.0, value=1.0, step=0.1, key=f"opt_k_{mill}")
-
-    if mill == "Plate":
-        entry_range = band_inputs("FM_Temp_Before_Rolling", "FM entry temperature")
-        finish_range = band_inputs("FM_Finish_Temp", "Finish rolling temperature")
-        cooling_label = st.radio("Cooling", ["Air cool", "Laminar headers"], horizontal=True)
-        cooling = "air" if cooling_label == "Air cool" else "laminar"
-        headers_range = (4, 12)
-        if cooling == "laminar":
-            headers_range = st.slider("Laminar header count range", 0, 20, (4, 12), step=1,
-                                      key=f"opt_hdr_{mill}")
-        ct_range = None
-    else:
-        entry_range = band_inputs("Temp_Transfer_Bar_C", "Transfer bar temperature")
-        finish_range = band_inputs("Temp_FT_Avg_C", "Finishing temperature")
-        ct_range = band_inputs("Temp_CT_Top_C", "Coiling temperature")
-        cooling = "rot"
-        headers_range = (0, 0)
-        st.caption("No header choice on the Steckel runout table: the coiling temperature "
-                   "carries the cooling, applied symmetrically to top and bottom.")
-
-    st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
-
-    if not st.button("Search recipes", type="primary", use_container_width=True):
-        return
-
-    if slab_choice == AUTO_CHEMISTRY:
-        chemistries = lean_chemistries()
-        if not chemistries:
-            chemistries = [("simulator chemistry",
-                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
-    else:
-        chem = gt.chemistry(slab_choice) or {}
-        if chem:
-            chemistries = [(slab_choice, chem)]
-        else:
-            chemistries = [("simulator chemistry",
-                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
-
-    if use_workbook:
-        requirements, info = spec_requirements(chosen_spec, chosen_grade, thickness, mill,
-                                               rolling_type, chemistries[0][1])
-        if info.get("status") == "out_of_gauge":
-            st.warning(info.get("message", "Thickness outside the standard range."))
-        if not requirements:
-            st.error("This specification tier carries no readable YS/TS/EL/CE limits: "
-                     "pick another standard/grade.")
-            return
-    else:
-        requirements = preset_requirements(mill, chosen_spec)
-
-    search_raw = dict(raw)
-    search_raw["Rolling_Type"] = rolling_type
-
-    with st.spinner("Scoring the entry × finish × cooling × chemistry grid against the "
-                    "specification at the conformal bound..."):
-        t0 = time.time()
-        res = run_recipe_search(
-            mill, search_raw, thickness, requirements, chemistries,
-            entry_range, finish_range, cooling=cooling, headers_range=headers_range,
-            ct_range=ct_range, k=k)
-        elapsed = time.time() - t0
+    entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
 
     if res.get("error"):
         st.error(res["error"])
         return
 
-    chosen = res["chosen"]
+    meta = res.get("_meta") or {}
+    chosen_spec = meta.get("spec", "")
+    chosen_grade = meta.get("grade", "")
+    thickness = float(meta.get("thickness", 0.0))
+    rolling_type = meta.get("rolling_type", "AR")
+    elapsed_text = elapsed if isinstance(elapsed, str) else f"{float(elapsed) * 1000:.0f} ms"
+
+    chosen = res.get("chosen")
     if chosen is None:
         st.error(f"No feasible recipe in {res['n_evaluated']:,} evaluated candidates at "
                  f"k = {k:.1f}× the 95% interval. Nothing is proposed: widen a temperature "
@@ -1173,7 +1040,7 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                    "an extrapolated candidate was used: treat the predictions as extrapolation.")
 
     # ---- recipe card ---------------------------------------------------------------------
-    st.markdown(f"#### Recipe card: solved in {elapsed * 1000:.0f} ms "
+    st.markdown(f"#### Recipe card: solved in {elapsed_text} "
                 f"({res['n_evaluated']:,} candidates scored)")
     if mill == "Plate":
         entry, frt = float(chosen[entry_col]), float(chosen[finish_col])
@@ -1294,3 +1161,200 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         file_name=f"recipe_{mill}_{chosen_spec.replace(' ', '_')}_{chosen_grade}.csv",
         mime="text/csv",
         use_container_width=True)
+
+
+def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)",
+                   spec_rows=None):
+    """
+    Renders the redesigned Inverse Optimizer: a hottest-feasible-first recipe search.
+
+    The user picks the end specification, target thickness and rolling process, then
+    constrains the slab grade, entry/finish temperature bands and cooling; the app searches
+    the constraint space and proposes the hottest recipe that keeps every spec-required
+    property non-marginal (margin >= k × 95% conformal interval), with a rejection ladder.
+
+    Every input lives inside one st.form, so touching a widget never reruns the script and
+    nothing is scored until "Search recipes" is submitted. The submitted outcome is kept in
+    st.session_state[f"opt_result_{mill}"] and simply re-rendered on later reruns.
+    """
+    raw = dict(raw)
+    st.markdown('<div class="section"><span>inverse setpoint search</span><i></i></div>',
+                unsafe_allow_html=True)
+    st.markdown('<div class="note">Hottest feasible recipe search against the spec at the 95% '
+                'conformal bound: the hottest entry and finish temperatures that keep every '
+                'spec-required property non-marginal, with the leanest chemistry that gets there.</div>',
+                unsafe_allow_html=True)
+
+    result_key = f"opt_result_{mill}"
+
+    # Every input sits inside one st.form: widget changes stay client-side (no rerun, no
+    # mid-search interaction) and nothing is scored until the operator submits the form.
+    with st.form(key=f"opt_form_{mill}"):
+        # ---- 1. end specification -------------------------------------------------------
+        specs = sc.get_available_specs()
+        use_workbook = bool(specs)
+        if use_workbook:
+            preferred = [s for s in specs if "JIS" in s.upper()]
+            default_idx = specs.index(preferred[0]) if (mill == "HRC" and preferred) else 0
+            chosen_spec = st.selectbox("End specification standard", specs, index=default_idx,
+                                       key=f"opt_spec_{mill}")
+            grades = sc.get_available_grades(chosen_spec) or ["-"]
+            grade_idx = 0
+            if mill == "HRC":
+                jis_grades = [g for g in grades if "SS400" in g.upper()]
+                if jis_grades:
+                    grade_idx = grades.index(jis_grades[0])
+            chosen_grade = st.selectbox("Grade", grades, index=grade_idx,
+                                        key=f"opt_grade_{mill}")
+        else:
+            st.warning("The GRP specification workbook is unavailable: using the built-in preset "
+                       "grades (YS/TS/EL minima only).")
+            preset_names = list(PRESET_GRADES[mill].keys())
+            chosen_spec = st.selectbox("End specification standard (preset)", preset_names,
+                                       key=f"opt_spec_{mill}")
+            chosen_grade = chosen_spec
+
+        # ---- 2. target thickness + rolling process --------------------------------------
+        t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+        spec_row = {row[1]: row for row in (spec_rows or [])}.get(t_key)
+        gauge_lo = cons.spec_float(spec_row, 4, 6.0 if mill == "Plate" else 1.8)
+        gauge_hi = cons.spec_float(spec_row, 5, 120.0 if mill == "Plate" else 16.0)
+        if not gauge_hi > gauge_lo:
+            gauge_lo, gauge_hi = (6.0, 120.0) if mill == "Plate" else (1.8, 16.0)
+        cur_t = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
+        cur_t = min(max(cur_t, gauge_lo), gauge_hi)
+        thickness = st.number_input("Target thickness", min_value=gauge_lo,
+                                    max_value=gauge_hi, value=cur_t, step=1.0,
+                                    help="Finish gauge in millimetres.")
+
+        rolling_type = "AR"
+        if mill == "Plate":
+            process = st.radio("Rolling process", PROCESS_CHOICES, index=0, horizontal=True)
+            rolling_type = ROLLING_TYPE_MAP[process]
+            st.caption("Process mapping: " + " · ".join(PROCESS_HELP[p] for p in PROCESS_CHOICES))
+        else:
+            st.caption("Rolling_Type is not a feature of the Steckel HRC model, so the coil route "
+                       "offers no process selector.")
+
+        # ---- 3. constraints -------------------------------------------------------------
+        start_choices = [AUTO_CHEMISTRY] + gt.names()
+        slab_choice = st.selectbox(
+            "Slab grade", start_choices, key=f"opt_slab_{mill}",
+            help="Pick an internal grade template to roll exactly that chemistry, or 'auto' to "
+                 "search every template lean-first (lowest CE_IIW, then lowest microalloy total) "
+                 "and return the leanest chemistry whose recipe stays feasible.")
+        if slab_choice != AUTO_CHEMISTRY:
+            st.caption(" · ".join(f"{el}: {lo:.3f}–{hi:.3f}"
+                                  for el, (lo, hi) in zip(*gt.band(slab_choice)) if hi > lo)
+                       if gt.get(slab_choice) else "")
+
+        def band_inputs(key, label):
+            """lo/hi number inputs bounded by the mill spec row; default the row's full range."""
+            row = {r[1]: r for r in (spec_rows or [])}.get(key)
+            lo = cons.spec_float(row, 4, None)
+            hi = cons.spec_float(row, 5, None)
+            if lo is None or hi is None or not hi > lo:
+                lo, hi = (850.0, 1150.0) if key == ENTRY_COL[mill] else (700.0, 1050.0)
+            c1, c2 = st.columns(2)
+            band_lo = c1.number_input(f"{label} min (°C)", min_value=lo, max_value=hi,
+                                      value=float(lo), step=10.0, key=f"opt_{key}_lo_{mill}")
+            band_hi = c2.number_input(f"{label} max (°C)", min_value=lo, max_value=hi,
+                                      value=float(hi), step=10.0, key=f"opt_{key}_hi_{mill}")
+            if band_hi < band_lo:
+                st.warning(f"{label}: max below min, using the full row band.")
+                band_lo, band_hi = lo, hi
+            return float(band_lo), float(band_hi)
+
+        k = st.slider("required margin: k × 95% interval (non-marginal without overpower)",
+                      min_value=0.5, max_value=2.0, value=1.0, step=0.1, key=f"opt_k_{mill}")
+
+        if mill == "Plate":
+            entry_range = band_inputs("FM_Temp_Before_Rolling", "FM entry temperature")
+            finish_range = band_inputs("FM_Finish_Temp", "Finish rolling temperature")
+            cooling_label = st.radio("Cooling", ["Air cool", "Laminar headers"], horizontal=True)
+            cooling = "air" if cooling_label == "Air cool" else "laminar"
+            headers_range = (4, 12)
+            if cooling == "laminar":
+                headers_range = st.slider("Laminar header count range", 0, 20, (4, 12), step=1,
+                                          key=f"opt_hdr_{mill}")
+            ct_range = None
+        else:
+            entry_range = band_inputs("Temp_Transfer_Bar_C", "Transfer bar temperature")
+            finish_range = band_inputs("Temp_FT_Avg_C", "Finishing temperature")
+            ct_range = band_inputs("Temp_CT_Top_C", "Coiling temperature")
+            cooling = "rot"
+            headers_range = (0, 0)
+            st.caption("No header choice on the Steckel runout table: the coiling temperature "
+                       "carries the cooling, applied symmetrically to top and bottom.")
+
+        st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
+        submitted = st.form_submit_button("Search recipes", type="primary",
+                                          use_container_width=True)
+
+    # ---- idle path: replay the last submitted outcome, or do nothing ---------------------
+    if not submitted:
+        stored = st.session_state.get(result_key)
+        if not stored:
+            st.caption("Set the constraints, then press Search recipes.")
+            return
+        st.caption("Shown from your last search. Press Search recipes to run again with the "
+                   "current inputs.")
+        _render_optimizer_result(mill, stored["res"], stored["requirements"],
+                                 stored["k"], stored["elapsed"])
+        return
+
+    if slab_choice == AUTO_CHEMISTRY:
+        chemistries = lean_chemistries()
+        if not chemistries:
+            chemistries = [("simulator chemistry",
+                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
+    else:
+        chem = gt.chemistry(slab_choice) or {}
+        if chem:
+            chemistries = [(slab_choice, chem)]
+        else:
+            chemistries = [("simulator chemistry",
+                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
+
+    if use_workbook:
+        requirements, info = spec_requirements(chosen_spec, chosen_grade, thickness, mill,
+                                               rolling_type, chemistries[0][1])
+        if info.get("status") == "out_of_gauge":
+            st.warning(info.get("message", "Thickness outside the standard range."))
+        if not requirements:
+            st.error("This specification tier carries no readable YS/TS/EL/CE limits: "
+                     "pick another standard/grade.")
+            return
+    else:
+        requirements = preset_requirements(mill, chosen_spec)
+
+    search_raw = dict(raw)
+    search_raw["Rolling_Type"] = rolling_type
+
+    with st.spinner("Scoring the entry × finish × cooling × chemistry grid against the "
+                    "specification at the conformal bound..."):
+        t0 = time.time()
+        res = run_recipe_search(
+            mill, search_raw, thickness, requirements, chemistries,
+            entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+            ct_range=ct_range, k=k)
+        elapsed = time.time() - t0
+
+    elapsed_text = f"{elapsed * 1000:.0f} ms"
+
+    # Keep only what the card renders: the scored candidate frame and the chemistries are
+    # dropped, so a stored outcome stays small.
+    stored_res = {
+        "error": res.get("error"),
+        "chosen": res.get("chosen"),
+        "ladder": list(res.get("ladder") or []),
+        "rejected": list(res.get("rejected") or []),
+        "n_evaluated": int(res.get("n_evaluated") or 0),
+        "_meta": {"spec": chosen_spec, "grade": chosen_grade,
+                  "thickness": float(thickness), "rolling_type": rolling_type},
+    }
+    st.session_state[result_key] = {"res": stored_res, "requirements": requirements,
+                                    "k": float(k), "elapsed": elapsed_text}
+
+    # the submit path and the replay path render through the same helper
+    _render_optimizer_result(mill, stored_res, requirements, float(k), elapsed_text)
