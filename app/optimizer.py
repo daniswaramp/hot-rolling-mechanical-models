@@ -1163,6 +1163,24 @@ def _render_optimizer_result(mill: str, res: dict, requirements, k: float, elaps
         use_container_width=True)
 
 
+def _slab_band_text(name):
+    """One-line min-max band for a grade template, or "" when the record is unusable.
+
+    gt.band() returns two element-keyed dicts (min, max) and the min side may carry
+    fewer elements than the max side, so the caption iterates their intersection
+    instead of zipping the dicts themselves.
+    """
+    mins, maxs = gt.band(name)
+    parts = []
+    for element, lo in mins.items():
+        hi = maxs.get(element)
+        if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+            continue
+        if hi > lo:
+            parts.append(f"{element}: {lo:.3f}–{hi:.3f}")
+    return " · ".join(parts)
+
+
 def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)",
                    spec_rows=None):
     """
@@ -1244,9 +1262,9 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
                  "search every template lean-first (lowest CE_IIW, then lowest microalloy total) "
                  "and return the leanest chemistry whose recipe stays feasible.")
         if slab_choice != AUTO_CHEMISTRY:
-            st.caption(" · ".join(f"{el}: {lo:.3f}–{hi:.3f}"
-                                  for el, (lo, hi) in zip(*gt.band(slab_choice)) if hi > lo)
-                       if gt.get(slab_choice) else "")
+            band_text = _slab_band_text(slab_choice)
+            if band_text:
+                st.caption(band_text)
 
         def band_inputs(key, label):
             """lo/hi number inputs bounded by the mill spec row; default the row's full range."""

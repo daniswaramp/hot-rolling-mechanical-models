@@ -210,3 +210,39 @@ def test_plate_grid_search_smoke_a572_gr50_16mm():
     assert frt == frt
     assert entry_range[0] - 1e-9 <= entry <= entry_range[1] + 1e-9
     assert finish_range[0] - 1e-9 <= frt <= finish_range[1] + 1e-9
+
+
+# --------------------------------------------------------------------------- slab band caption
+def test_slab_band_caption_every_template_never_raises():
+    """Regression: the old zip(*gt.band(...)) unpacked dict keys and crashed mid-form.
+
+    gt.band returns two element-keyed dicts with mismatched key sets, so the caption
+    must iterate their intersection. Every shipped template must render a string.
+    """
+    import grade_templates as gt
+
+    names = gt.names()
+    assert names, "no grade templates shipped"
+    for name in names:
+        text = opt._slab_band_text(name)
+        assert isinstance(text, str)
+        assert "None" not in text
+        # a template with any widening band must produce at least one element
+        mins, maxs = gt.band(name)
+        if any(maxs.get(el, lo) > lo for el, lo in mins.items()
+               if isinstance(lo, (int, float))):
+            assert text, f"{name}: expected a band caption, got empty string"
+
+
+def test_slab_band_caption_unknown_and_empty_records():
+    assert opt._slab_band_text("no such grade") == ""
+    assert opt._slab_band_text("") == ""
+
+
+def test_view_optimizer_has_no_zip_over_band():
+    """The crashing construct must not return."""
+    import inspect
+
+    from optimizer import _slab_band_text  # noqa: F401  (exists)
+    src = inspect.getsource(opt)
+    assert "zip(*gt.band(" not in src
