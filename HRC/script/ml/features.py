@@ -30,7 +30,9 @@ def engineer_hrc_features(df: pd.DataFrame, is_train: bool = True, spec_map: dic
     w_s = df["Coil_W_mm"] if "Coil_W_mm" in df.columns else pd.Series(1250.0, index=df.index)
     w = pd.to_numeric(w_s, errors='coerce').fillna(1250.0).clip(lower=700.0, upper=2200.0)
     tb_s = df["TB_Thick_mm"] if "TB_Thick_mm" in df.columns else pd.Series(30.0, index=df.index)
-    tb = pd.to_numeric(tb_s, errors='coerce').fillna(30.0).clip(lower=15.0, upper=70.0)
+    # the training-time ceiling on this clip was 70 mm; values above it are extrapolation the
+    # app now surfaces as an applicability-domain warning instead of a silent saturation here
+    tb = pd.to_numeric(tb_s, errors='coerce').fillna(30.0).clip(lower=15.0, upper=105.0)
 
     X["Coil_T_mm"] = t
     X["Coil_W_mm"] = w

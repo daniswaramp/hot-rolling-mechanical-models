@@ -22,6 +22,7 @@ import model_loader as ml
 import spec_checker as sc
 import constraints as cons
 import grade_templates as gt
+import physics as ph
 
 
 def route_for(mill: str, finish_temp: float, headers: float) -> str:
@@ -154,76 +155,88 @@ PRESET_GRADES = {
 }
 
 
-def score_candidates(mill: str, X_all):
-    """Predict TS_BN and YS_BN for a feature frame.
+def score_targets(mill: str, X_all, targets):
+    """Predict an arbitrary set of targets for a feature frame, one model per target.
 
-    Order of preference:
+    Order of preference (identical to the historical score_candidates):
       1. models/boosted_out (CatBoost / XGBoost / LightGBM artefacts + boosted_metrics.json)
       2. the per-mill joblib bundles used by the rest of the app
-    Returns (pred_ts, pred_ys) or None when no model can be loaded.
+    Returns {target: np.ndarray} or None when any target cannot be scored.
     """
+    metrics_cache = {}
 
-    def from_boosted():
+    def from_boosted(mill, target):
         metrics_path = os.path.join(BOOSTED_DIR, "boosted_metrics.json")
         if not os.path.exists(metrics_path):
             return None
-        with open(metrics_path, "r") as fh:
-            metrics = json.load(fh)
-        preds = {}
-        for target, preferred in (("TS_BN", "xgb"), ("YS_BN", "cat")):
-            key = f"{mill}|{target}|{preferred}"
-            if key not in metrics:
-                alternatives = [k for k in metrics if k.startswith(f"{mill}|{target}|")]
-                if not alternatives:
-                    return None
-                key = alternatives[0]
-            cols = metrics.get(key, {}).get("features", [])
-            X = pd.DataFrame({c: (X_all[c] if c in X_all.columns else 0.0) for c in cols},
-                             index=X_all.index)
-            algo = key.rsplit("|", 1)[-1]
-            if algo == "xgb":
-                model = xgb.XGBRegressor()
-                model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_xgb.ubj"))
-            elif algo == "cat":
-                model = CatBoostRegressor()
-                model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_cat.cbm"))
-            else:
-                import lightgbm as lgb
-                model = lgb.Booster(model_file=os.path.join(BOOSTED_DIR, f"{mill}_{target}_lgbm.txt"))
-            preds[target] = np.asarray(model.predict(X)).ravel()
-        return preds["TS_BN"], preds["YS_BN"]
-
-    def from_bundles():
-        preds = {}
-        for target in ("TS_BN", "YS_BN"):
-            ok = False
-            # tuned ensemble first, then the plain best_model (some HRC ensembles fail to
-            # unpickle into the shared StackingEnsemble class and must be skipped)
-            for use_tuned in (True, False):
-                bundle = ml.load_model_bundle(mill, target, use_tuned=use_tuned)
-                if bundle is None:
-                    continue
-                try:
-                    cols = ml.bundle_feature_columns(bundle, X_all)
-                    X = pd.DataFrame({c: (X_all[c] if c in X_all.columns else 0.0) for c in cols},
-                                     index=X_all.index)
-                    preds[target] = np.asarray(bundle["model"].predict(X)).ravel()
-                    ok = True
-                    break
-                except Exception:
-                    continue
-            if not ok:
+        if mill not in metrics_cache:
+            with open(metrics_path, "r") as fh:
+                metrics_cache[mill] = json.load(fh)
+        metrics = metrics_cache[mill]
+        # historical preference: xgb for TS_BN, cat for YS_BN, first available otherwise
+        preferred = {"TS_BN": "xgb", "YS_BN": "cat"}.get(target, "xgb")
+        key = f"{mill}|{target}|{preferred}"
+        if key not in metrics:
+            alternatives = [k for k in metrics if k.startswith(f"{mill}|{target}|")]
+            if not alternatives:
                 return None
-        return preds["TS_BN"], preds["YS_BN"]
+            key = alternatives[0]
+        cols = metrics.get(key, {}).get("features", [])
+        X = pd.DataFrame({c: (X_all[c] if c in X_all.columns else 0.0) for c in cols},
+                         index=X_all.index)
+        algo = key.rsplit("|", 1)[-1]
+        if algo == "xgb":
+            model = xgb.XGBRegressor()
+            model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_xgb.ubj"))
+        elif algo == "cat":
+            model = CatBoostRegressor()
+            model.load_model(os.path.join(BOOSTED_DIR, f"{mill}_{target}_cat.cbm"))
+        else:
+            import lightgbm as lgb
+            model = lgb.Booster(model_file=os.path.join(BOOSTED_DIR, f"{mill}_{target}_lgbm.txt"))
+        return np.asarray(model.predict(X)).ravel()
 
-    for source in (from_boosted, from_bundles):
-        try:
-            result = source()
-        except Exception:
-            result = None
-        if result is not None:
-            return result
-    return None
+    def from_bundle(mill, target):
+        # tuned ensemble first, then the plain best_model (some HRC ensembles fail to
+        # unpickle into the shared StackingEnsemble class and must be skipped)
+        for use_tuned in (True, False):
+            bundle = ml.load_model_bundle(mill, target, use_tuned=use_tuned)
+            if bundle is None:
+                continue
+            try:
+                cols = ml.bundle_feature_columns(bundle, X_all)
+                X = pd.DataFrame({c: (X_all[c] if c in X_all.columns else 0.0) for c in cols},
+                                 index=X_all.index)
+                return np.asarray(bundle["model"].predict(X)).ravel()
+            except Exception:
+                continue
+        return None
+
+    out = {}
+    for target in targets:
+        value = None
+        for source in (from_boosted, from_bundle):
+            try:
+                value = source(mill, target)
+            except Exception:
+                value = None
+            if value is not None:
+                break
+        if value is None:
+            return None
+        out[target] = value
+    return out
+
+
+def score_candidates(mill: str, X_all):
+    """Predict TS_BN and YS_BN for a feature frame (see score_targets).
+
+    Returns (pred_ts, pred_ys) or None when no model can be loaded.
+    """
+    preds = score_targets(mill, X_all, ("TS_BN", "YS_BN"))
+    if preds is None:
+        return None
+    return preds["TS_BN"], preds["YS_BN"]
 
 
 def _raw_ce_iiw(raw):
@@ -499,177 +512,782 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
     }
 
 
+# ---------------------------------------------------------------------------
+# Hottest-feasible-first recipe search (redesigned Inverse Optimizer)
+# ---------------------------------------------------------------------------
+
+# User-facing process codes -> the Rolling_Type values the Plate feature module
+# consumes. Plate/script/ml/features.py one-hots AR / CR / TMCP; the "N" family
+# is the normalised supply condition the spec checker reads.
+PROCESS_CHOICES = ["AR", "NF", "NR", "TMCP", "CR"]
+ROLLING_TYPE_MAP = {"AR": "AR", "TMCP": "TMCP", "CR": "TMCP", "N": "N", "NF": "N", "NR": "N"}
+PROCESS_HELP = {
+    "AR": "AR → Rolling_Type 'AR'",
+    "NF": "NF → Rolling_Type 'N' (normalised supply condition)",
+    "NR": "NR → Rolling_Type 'N' (normalised supply condition)",
+    "TMCP": "TMCP → Rolling_Type 'TMCP'",
+    "CR": "CR → Rolling_Type 'TMCP' (controlled rolled shares the TMCP encoding)",
+}
+
+# Chemistry maxima the optimizer enforces directly on the candidate chemistry.
+CHEM_REQ_KEYS = ("ce_iiw", "pcm", "Chem_S", "Chem_P")
+
+# A candidate whose margin exceeds this many conformal intervals on a property is
+# deprioritised (never hidden): it over-delivers far past the comfortable band.
+OVERPOWER_CAP_INTERVALS = 3.0
+
+AUTO_CHEMISTRY = "auto (find leanest chemistry)"
+
+FINISH_COL = {"Plate": "FM_Finish_Temp", "HRC": "Temp_FT_Avg_C"}
+ENTRY_COL = {"Plate": "FM_Temp_Before_Rolling", "HRC": "Temp_Transfer_Bar_C"}
+CT_COL = {"Plate": None, "HRC": "Temp_CT_Top_C"}
+FINISH_SHORT = {"Plate": "FRT", "HRC": "FT"}
+
+
+def interval_half_widths(mill, keys):
+    """95% conformal interval half-width per target key.
+
+    Reads the app's interval lookup (ml.get_conformal_intervals) and falls back to the
+    TARGET_CONFIG tolerance halved, then to 15.0, so a missing report never stalls the tab.
+    """
+    try:
+        conf = ml.get_conformal_intervals(mill)
+    except Exception:
+        conf = pd.DataFrame()
+    out = {}
+    for key in keys:
+        value = None
+        if not conf.empty and "Target" in conf.columns:
+            row = conf[conf["Target"] == key]
+            if (not row.empty and "Conformal_Half_Width_95" in row.columns
+                    and pd.notna(row["Conformal_Half_Width_95"].values[0])):
+                value = float(row["Conformal_Half_Width_95"].values[0])
+        if value is None:
+            try:
+                value = float(ml.TARGET_CONFIG[mill][key]["tol"]) * 0.5
+            except Exception:
+                value = 15.0
+        out[key] = value
+    return out
+
+
+def spec_requirements(spec, grade, thickness, mill, rolling_type="AR", chemistry=None):
+    """Spec-required properties for the chosen tier, read through spec_checker.
+
+    min-type YS/TS/EL/impact limits carry the 95% conformal half width of their target;
+    max-type CE/S/P chemistry ceilings are deterministic on the candidate chemistry and
+    carry half width 0. Returns (requirements, info); requirements is empty when the
+    workbook or the tier cannot be matched.
+    """
+    row, info = sc.find_matching_spec_row(spec, grade, thickness)
+    if row is None:
+        return [], info
+
+    chemistry = chemistry or {}
+    reqs = []
+
+    mech = sc.evaluate_mechanical(row, {}, mill, rolling_type)
+    mech_keys = [c["key"] for c in mech["checks"] if c.get("key")]
+    halves = interval_half_widths(mill, mech_keys)
+    for chk in mech["checks"]:
+        key = chk.get("key")
+        if not key:
+            continue  # impact at a temperature the models do not cover
+        for direction, limit in (("min", chk.get("limit_min")), ("max", chk.get("limit_max"))):
+            if limit is None:
+                continue
+            reqs.append({
+                "key": key, "kind": "mech", "direction": direction,
+                "required": float(limit), "half": float(halves.get(key, 15.0)),
+                "label": chk.get("property", key), "unit": chk.get("unit", ""),
+            })
+
+    chem_inputs = {k: float(v) for k, v in chemistry.items() if str(k).startswith("Chem_")}
+    chem_inputs["ce_iiw"] = chemistry_ce_iiw(chemistry)
+    chem_inputs["pcm"] = chemistry_pcm(chemistry)
+    chem_eval = sc.evaluate_chemistry(row, chem_inputs, {"ce_iiw": 0.0, "pcm": 0.0}, None)
+    for chk in chem_eval["active_checks"]:
+        if chk.get("max") is None or chk.get("key") not in CHEM_REQ_KEYS:
+            continue
+        reqs.append({
+            "key": chk["key"], "kind": "chem", "direction": "max",
+            "required": float(chk["max"]), "half": 0.0,
+            "label": chk.get("label", chk["key"]),
+            "unit": "" if chk["key"] in ("ce_iiw", "pcm") else "wt%",
+        })
+    return reqs, info
+
+
+def preset_requirements(mill, spec_name):
+    """Fallback requirements from the built-in preset grades when the GRP workbook is absent."""
+    cfg = PRESET_GRADES[mill].get(spec_name) or next(iter(PRESET_GRADES[mill].values()))
+    halves = interval_half_widths(mill, ["YS_BN", "TS_BN", "EL_BN"])
+    return [
+        {"key": "YS_BN", "kind": "mech", "direction": "min", "required": float(cfg["ys_min"]),
+         "half": halves["YS_BN"], "label": "Yield strength (as rolled)", "unit": "MPa"},
+        {"key": "TS_BN", "kind": "mech", "direction": "min", "required": float(cfg["ts_min"]),
+         "half": halves["TS_BN"], "label": "Tensile strength (as rolled)", "unit": "MPa"},
+        {"key": "EL_BN", "kind": "mech", "direction": "min", "required": float(cfg["el_min"]),
+         "half": halves["EL_BN"], "label": "Elongation (as rolled)", "unit": "%"},
+    ]
+
+
+def chemistry_ce_iiw(chem):
+    """Full IIW carbon equivalent of a chemistry dict (Chem_* keys), via the shared physics."""
+    return float(ph.ce_iiw(
+        chem.get("Chem_C", 0.0), chem.get("Chem_Mn", 0.0), chem.get("Chem_Cr", 0.0),
+        chem.get("Chem_Mo", 0.0), chem.get("Chem_V", 0.0), chem.get("Chem_Ni", 0.0),
+        chem.get("Chem_Cu", 0.0)))
+
+
+def chemistry_pcm(chem):
+    """Ito-Bessyo cracking parameter of a chemistry dict (Chem_* keys)."""
+    return float(ph.pcm(
+        chem.get("Chem_C", 0.0), chem.get("Chem_Si", 0.0), chem.get("Chem_Mn", 0.0),
+        chem.get("Chem_Cu", 0.0), chem.get("Chem_Cr", 0.0), chem.get("Chem_Ni", 0.0),
+        chem.get("Chem_Mo", 0.0), chem.get("Chem_V", 0.0), chem.get("Chem_B", 0.0)))
+
+
+def chemistry_microalloy(chem):
+    """Nb + V + Ti total of a chemistry dict (Chem_* keys)."""
+    return float(chem.get("Chem_Nb", 0.0) + chem.get("Chem_V", 0.0) + chem.get("Chem_Ti", 0.0))
+
+
+def lean_chemistries():
+    """Every grade template sorted lean-first: lowest CE_IIW, then lowest microalloy total."""
+    items = []
+    for name in gt.names():
+        chem = gt.chemistry(name)
+        if not chem:
+            continue
+        items.append((chemistry_ce_iiw(chem), chemistry_microalloy(chem), name, chem))
+    items.sort(key=lambda item: (item[0], item[1]))
+    return [(name, chem) for _ce, _ma, name, chem in items]
+
+
+def ood_mask(mill, frame, keys):
+    """True where a swept parameter leaves the historical P01-P99 envelope.
+
+    Uses app/explainer.get_applicability_domain; imported lazily so the pure selection
+    path stays cheap, and a missing envelope excludes nothing.
+    """
+    try:
+        import explainer
+        domain = expl.get_applicability_domain().get(mill, {})
+    except Exception:
+        domain = {}
+    mask = pd.Series(False, index=frame.index)
+    if not domain:
+        return mask
+    for key in keys:
+        block = domain.get(key)
+        if not isinstance(block, dict):
+            continue
+        try:
+            p01, p99 = float(block["p01"]), float(block["p99"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        values = pd.to_numeric(frame[key], errors="coerce")
+        mask = mask | (values < p01) | (values > p99)
+    return mask.fillna(False)
+
+
+def _temp_grid(lo, hi, step=10.0):
+    """Inclusive 10 °C (or `step`) grid between two bounds; swaps a reversed range."""
+    try:
+        lo, hi, step = float(lo), float(hi), float(step)
+    except (TypeError, ValueError):
+        return []
+    if not (np.isfinite(lo) and np.isfinite(hi) and np.isfinite(step)) or step <= 0:
+        return []
+    if hi < lo:
+        lo, hi = hi, lo
+    if hi == lo:
+        return [round(lo, 1)]
+    return [round(v, 1) for v in np.arange(lo, hi + step / 2.0, step)]
+
+
+def run_recipe_search(mill, raw, thickness, requirements, chemistries,
+                      entry_range, finish_range, cooling="air", headers_range=(4, 12),
+                      ct_range=None, k=1.0, step=10.0):
+    """Hottest-feasible-first recipe search. Pure: no Streamlit calls, safe to drive from tests.
+
+    Builds the vectorised candidate grid entry × finish × cooling × chemistry (temperature
+    step `step`, default 10 °C so ±20 °C aims stay representable), scores it through the
+    mill feature module and the shared scoring plumbing, then hands it to select_recipe.
+    """
+    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
+    mech_keys = sorted({r["key"] for r in requirements if r.get("kind") == "mech"})
+    if not mech_keys:
+        return {"error": "no verifiable mechanical requirements for this specification tier",
+                "chosen": None, "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
+
+    base = dict(raw)
+    if mill == "Plate":
+        plate_t = max(float(base.get("Plate_T_mm", thickness)), 1.0)
+        tb = float(base.get("TB_Thickness_mm", plate_t * 2.0))
+        base["TB_Ratio"] = tb / max(float(thickness), 1.0)
+        base.setdefault("FM_Last_Pass_Drafting", float(thickness) * 0.18)
+        base["Rolling_Type"] = ROLLING_TYPE_MAP.get(str(base.get("Rolling_Type", "AR")), "AR")
+
+    entry_grid = _temp_grid(*entry_range, step)
+    finish_grid = _temp_grid(*finish_range, step)
+    if not entry_grid or not finish_grid:
+        return {"error": "empty temperature range", "chosen": None, "ladder": [],
+                "rejected": [], "candidates_df": pd.DataFrame()}
+    ct_grid = _temp_grid(*ct_range, step) if (mill == "HRC" and ct_range) else [None]
+
+    if mill == "Plate":
+        header_values = ([0] if cooling == "air"
+                         else list(range(int(headers_range[0]), int(headers_range[1]) + 1)))
+    else:
+        header_values = [0]  # the Steckel runout table has no header choice
+
+    chemistries = list(chemistries) or [("simulator chemistry", {})]
+    rows = []
+    for chem_label, chem in chemistries:
+        for entry in entry_grid:
+            for finish in finish_grid:
+                for ct in ct_grid:
+                    for hdr in header_values:
+                        row = dict(base)
+                        for chem_key, chem_val in chem.items():
+                            row[chem_key] = float(chem_val)
+                        if mill == "Plate":
+                            row["Plate_T_mm"] = float(thickness)
+                            row["FM_Temp_Before_Rolling"] = entry
+                            row["FM_Finish_Temp"] = finish
+                            row["ACC_Laminar_Header"] = float(hdr)
+                            row["ACC_Headers_n"] = float(hdr)
+                            row["ACC_Active"] = 1.0 if hdr > 0 else 0.0
+                            row["ACC_Temp_Post_Laminar"] = float(
+                                ph.post_laminar_temp(finish, hdr, thickness))
+                        else:
+                            row["Coil_T_mm"] = float(thickness)
+                            row["Temp_Transfer_Bar_C"] = entry
+                            row["Temp_FT_Avg_C"] = finish
+                            if ct is not None:
+                                row["Temp_CT_Top_C"] = ct
+                                row["Temp_CT_Bot_C"] = ct
+                        row["_chemistry"] = chem_label
+                        rows.append(row)
+    cand_df = pd.DataFrame(rows)
+
+    # The mill feature modules expect a complete chemistry row; fill the blanks rather
+    # than letting the module decide what a missing element means.
+    for el in ("C", "Si", "Mn", "P", "S", "Nb", "Cu", "Cr", "Ni", "Mo", "V", "Al", "Ti", "N", "B"):
+        col = f"Chem_{el}"
+        if col not in cand_df.columns:
+            cand_df[col] = 0.0
+    if "Chem_CE" not in cand_df.columns:
+        cand_df["Chem_CE"] = (cand_df["Chem_C"] + cand_df["Chem_Mn"] / 6.0
+                              + (cand_df["Chem_Cr"] + cand_df["Chem_Mo"] + cand_df["Chem_V"]) / 5.0
+                              + (cand_df["Chem_Ni"] + cand_df["Chem_Cu"]) / 15.0)
+
+    try:
+        if mill == "Plate":
+            if ml.engineer_plate_features is None:
+                return {"error": "Plate feature module unavailable", "chosen": None,
+                        "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
+            X_all = ml.engineer_plate_features(cand_df)
+        else:
+            if ml.engineer_hrc_features is None:
+                return {"error": "HRC feature module unavailable", "chosen": None,
+                        "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
+            X_all, _ = ml.engineer_hrc_features(cand_df, is_train=False)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"feature engineering failed: {exc}", "chosen": None, "ladder": [],
+                "rejected": [], "candidates_df": pd.DataFrame()}
+
+    preds = score_targets(mill, X_all, mech_keys)
+    if preds is None:
+        return {"error": "no model could score the candidate grid", "chosen": None,
+                "ladder": [], "rejected": [], "candidates_df": pd.DataFrame()}
+    for key in mech_keys:
+        cand_df[f"pred_{key}"] = np.round(preds[key], 2)
+
+    if mill == "Plate" and any(key.endswith("_AN") for key in mech_keys):
+        # twin of the frame-path normalising coupling in streamlit_app.score_frame
+        try:
+            delta_ts, delta_ys, delta_el = ml.plate_softening_deltas_frame(cand_df)
+            for stem, delta in (("TS", delta_ts), ("YS", delta_ys)):
+                bn, an = f"pred_{stem}_BN", f"pred_{stem}_AN"
+                if bn in cand_df.columns and an in cand_df.columns:
+                    cap = cand_df[bn] - delta
+                    cand_df[an] = cand_df[an].mask(cand_df[an].notna() & (cand_df[an] > cap), cap)
+            if "pred_EL_BN" in cand_df.columns and "pred_EL_AN" in cand_df.columns:
+                floor = cand_df["pred_EL_BN"] + delta_el
+                cand_df["pred_EL_AN"] = cand_df["pred_EL_AN"].mask(
+                    cand_df["pred_EL_AN"].notna() & (cand_df["pred_EL_AN"] < floor), floor)
+        except Exception:
+            pass
+
+    cand_df["ce_iiw"] = np.round(cons.ce_iiw(
+        cand_df["Chem_C"], cand_df["Chem_Mn"], cand_df["Chem_Cr"], cand_df["Chem_Mo"],
+        cand_df["Chem_V"], cand_df["Chem_Ni"], cand_df["Chem_Cu"]), 4)
+    cand_df["pcm"] = np.round(cons.pcm(
+        cand_df["Chem_C"], cand_df["Chem_Si"], cand_df["Chem_Mn"], cand_df["Chem_Cu"],
+        cand_df["Chem_Cr"], cand_df["Chem_Ni"], cand_df["Chem_Mo"], cand_df["Chem_V"],
+        cand_df["Chem_B"]), 4)
+    cand_df["microalloy_total"] = (cand_df["Chem_Nb"] + cand_df["Chem_V"] + cand_df["Chem_Ti"]).round(4)
+
+    ood_keys = [entry_col, finish_col]
+    if mill == "Plate":
+        ood_keys += ["ACC_Laminar_Header", "ACC_Temp_Post_Laminar"]
+    else:
+        ood_keys += ["Temp_CT_Top_C", "Temp_CT_Bot_C"]
+    cand_df["ood"] = ood_mask(mill, cand_df, ood_keys)
+
+    chosen, ladder, rejected = select_recipe(cand_df, requirements, k=k, mill=mill)
+    return {
+        "error": None,
+        "chosen": chosen,
+        "ladder": ladder,
+        "rejected": rejected,
+        "candidates_df": cand_df,
+        "n_evaluated": int(len(cand_df)),
+        "k": float(k),
+        "requirements": requirements,
+        "half_widths": interval_half_widths(mill, mech_keys),
+    }
+
+
+def select_recipe(candidates_df, requirements, k=1.0, mill="Plate"):
+    """Pure hottest-feasible-first selection over a scored candidate frame.
+
+    Feasibility: every spec-required property must clear margin >= k * half_width, where
+    margin = pred - required for min-type and required - pred for max-type, and half_width
+    is the 95% conformal interval of that target (0 for deterministic chemistry ceilings).
+
+    Overpower: mean over the interval-backed properties of max(0, margin - 3*half)/half.
+    Candidates far above the comfortable band are deprioritised, not hidden.
+
+    Selection among feasible candidates, lexicographic:
+      1. minimal overpower
+      2. hottest finish temperature
+      3. hottest entry temperature
+      4. fewest headers (air beats any headers)
+      5. (HRC only) hottest coiling temperature
+      6. leanest chemistry: lowest CE_IIW, then lowest microalloy total
+
+    Candidates outside the historical envelope (an "ood" column of True) are excluded from
+    selection unless nothing else is feasible; the chosen row then carries _extrapolated
+    so the caller can warn.
+
+    Returns (chosen_row_dict_or_None, ladder_rows, rejected_notes).
+    """
+    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
+    df = candidates_df.copy()
+    if df.empty:
+        return None, [], ["no candidates were evaluated"]
+
+    active = []
+    for req in requirements:
+        col = f"pred_{req['key']}" if req.get("kind") == "mech" else req["key"]
+        if col not in df.columns:
+            continue
+        rid = f"{req['key']}|{req['direction']}"
+        values = pd.to_numeric(df[col], errors="coerce")
+        if req["direction"] == "min":
+            df[f"margin_{rid}"] = values - float(req["required"])
+        else:
+            df[f"margin_{rid}"] = float(req["required"]) - values
+        active.append((rid, req))
+
+    if not active:
+        return None, [], ["no requirement could be scored against the candidates"]
+
+    for col in ("ce_iiw", "microalloy_total"):
+        if col not in df.columns:
+            df[col] = 0.0
+    if mill == "Plate" and "ACC_Headers_n" not in df.columns:
+        df["ACC_Headers_n"] = 0.0
+
+    feasible = pd.Series(True, index=df.index)
+    for rid, req in active:
+        need = float(k) * float(req.get("half", 0.0))
+        feasible &= df[f"margin_{rid}"] >= need - 1e-9
+
+    over_parts = []
+    for rid, req in active:
+        half = float(req.get("half", 0.0))
+        if req.get("kind") != "mech" or half <= 0.0:
+            continue  # deterministic chemistry ceilings carry no interval and no overpower
+        cap = OVERPOWER_CAP_INTERVALS * half
+        over_parts.append(np.maximum(0.0, df[f"margin_{rid}"] - cap) / half)
+    df["overpower"] = (pd.concat(over_parts, axis=1).mean(axis=1) if over_parts
+                       else pd.Series(0.0, index=df.index))
+
+    ood = df["ood"].astype(bool) if "ood" in df.columns else pd.Series(False, index=df.index)
+
+    pool = df[feasible & ~ood]
+    extrapolated = False
+    if pool.empty:
+        pool = df[feasible]
+        extrapolated = not pool.empty
+    if pool.empty:
+        return None, [], _rejected_band_notes(df, active, k, mill, finish_col)
+
+    sort_cols = ["overpower", finish_col, entry_col]
+    ascending = [True, False, False]
+    if mill == "Plate":
+        sort_cols.append("ACC_Headers_n")
+        ascending.append(True)
+    else:
+        ct_col = CT_COL[mill]
+        if ct_col and ct_col in pool.columns:
+            sort_cols.append(ct_col)
+            ascending.append(False)
+    sort_cols += ["ce_iiw", "microalloy_total"]
+    ascending += [True, True]
+
+    ranked = pool.sort_values(sort_cols, ascending=ascending, kind="mergesort")
+    chosen = ranked.iloc[0].to_dict()
+    chosen["_extrapolated"] = bool(extrapolated)
+    chosen["_k"] = float(k)
+    ladder = [ranked.iloc[i].to_dict() for i in range(1, min(4, len(ranked)))]
+    return chosen, ladder, _rejected_band_notes(df, active, k, mill, finish_col)
+
+
+def _rejected_band_notes(df, active, k, mill, finish_col, max_bands=3):
+    """For the hottest few rejected finish-temperature bands, name the first failing property.
+
+    Within a band the candidate that came closest to passing (fewest failures, then the
+    highest margin ratio on its first failure) speaks for the band.
+    """
+    notes = []
+    if finish_col not in df.columns or not active:
+        return notes
+
+    margin_mat = pd.concat([df[f"margin_{rid}"] for rid, _ in active], axis=1)
+    margin_mat.columns = [rid for rid, _ in active]
+    need = pd.Series({rid: float(k) * float(req.get("half", 0.0)) for rid, req in active})
+    fail = margin_mat.lt(need - 1e-9, axis=1)
+    n_fail = fail.sum(axis=1)
+    rej = df[n_fail > 0]
+    if rej.empty:
+        return notes
+
+    first_fail = fail.idxmax(axis=1)  # first failing requirement per row
+    ratio = margin_mat.div(need.replace(0.0, np.nan), axis=1)
+
+    short = FINISH_SHORT.get(mill, finish_col)
+    for band in sorted(rej[finish_col].unique(), reverse=True)[:max_bands]:
+        band_rows = rej[rej[finish_col] == band]
+        order = sorted(band_rows.index,
+                       key=lambda i: (int(n_fail.loc[i]), -float(ratio.loc[i, first_fail.loc[i]]
+                                                                 if pd.notna(ratio.loc[i, first_fail.loc[i]]) else -np.inf)))
+        idx = order[0]
+        rid = first_fail.loc[idx]
+        req = next(item for item_id, item in active if item_id == rid)
+        if req.get("kind") == "chem":
+            value = pd.to_numeric(pd.Series([df.loc[idx, req["key"]]]), errors="coerce").iloc[0]
+            notes.append(f"{short} {float(band):.0f} °C band rejected: {req['label']} "
+                         f"{value:.4f} exceeds the {req['required']:.4f} limit")
+        else:
+            r = float(ratio.loc[idx, rid]) if pd.notna(ratio.loc[idx, rid]) else float("-inf")
+            notes.append(f"{short} {float(band):.0f} °C band rejected: {req['label']} "
+                         f"margin {r:.1f}×interval < required {float(k):.1f}×")
+    return notes
+
+
 def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)",
-                   limits: dict = None, spec_rows=None, chem_caps: dict = None):
+                   spec_rows=None):
     """
-    Renders the interactive Inverse Setpoint Optimizer in Streamlit.
+    Renders the redesigned Inverse Optimizer: a hottest-feasible-first recipe search.
+
+    The user picks the end specification, target thickness and rolling process, then
+    constrains the slab grade, entry/finish temperature bands and cooling; the app searches
+    the constraint space and proposes the hottest recipe that keeps every spec-required
+    property non-marginal (margin >= k × 95% conformal interval), with a rejection ladder.
     """
-    if spec_rows:
-        limits, chem_caps = cons.render_editor(mill, spec_rows, st)
-    limits = limits or {}
-    chem_caps = chem_caps or {}
     raw = dict(raw)
+    finish_col, entry_col = FINISH_COL[mill], ENTRY_COL[mill]
     st.markdown('<div class="kicker">Automated Inverse Design</div>', unsafe_allow_html=True)
     st.markdown('<div class="title">Reverse Setpoint Optimizer</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="lede">Solves for the optimal alloy chemistry and thermomechanical rolling setpoints '
-        f'to fulfill target customer specification limits with guaranteed <b>split-conformal 95% confidence bounds (Cpk ≥ 1.33)</b> '
-        f'at minimal Carbon Equivalent (CE_IIW) and alloy cost.</div>',
-        unsafe_allow_html=True
-    )
+        '<div class="lede">Searches the constraint space for the <b>hottest feasible recipe</b>: '
+        'the hottest entry and finish temperatures that keep every spec-required property '
+        'non-marginal at the 95% conformal bound, with the leanest chemistry that gets there. '
+        'Cold corners are chosen only when hotter bands fail the margin rule.</div>',
+        unsafe_allow_html=True)
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
-    # 1. Spec Selection Bar
-    col1, col2, col3 = st.columns([2.5, 1.5, 2.0], vertical_alignment="bottom")
-    presets = PRESET_GRADES[mill]
-    spec_names = list(presets.keys())
-    chosen_spec = col1.selectbox("Target Standard / Grade", spec_names, index=0, key=f"opt_spec_{mill}")
-    spec_cfg = presets[chosen_spec]
+    # ---- 1. end specification -----------------------------------------------------------
+    specs = sc.get_available_specs()
+    use_workbook = bool(specs)
+    if use_workbook:
+        preferred = [s for s in specs if "JIS" in s.upper()]
+        default_idx = specs.index(preferred[0]) if (mill == "HRC" and preferred) else 0
+        chosen_spec = st.selectbox("End specification standard", specs, index=default_idx,
+                                   key=f"opt_spec_{mill}")
+        grades = sc.get_available_grades(chosen_spec) or ["-"]
+        grade_idx = 0
+        if mill == "HRC":
+            jis_grades = [g for g in grades if "SS400" in g.upper()]
+            if jis_grades:
+                grade_idx = grades.index(jis_grades[0])
+        chosen_grade = st.selectbox("Grade", grades, index=grade_idx, key=f"opt_grade_{mill}")
+    else:
+        st.warning("The GRP specification workbook is unavailable — using the built-in preset "
+                   "grades (YS/TS/EL minima only).")
+        preset_names = list(PRESET_GRADES[mill].keys())
+        chosen_spec = st.selectbox("End specification standard (preset)", preset_names,
+                                   key=f"opt_spec_{mill}")
+        chosen_grade = chosen_spec
 
+    # ---- 2. target thickness + rolling process -----------------------------------------
     t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
-    # gauge bounds come from the mill's own spec table; a hardcoded window rejected the Steckel
-    # coil range (1.8-16 mm) and crashed the tab with a StreamlitAPIException
     spec_row = {row[1]: row for row in (spec_rows or [])}.get(t_key)
     gauge_lo = cons.spec_float(spec_row, 4, 6.0 if mill == "Plate" else 1.8)
     gauge_hi = cons.spec_float(spec_row, 5, 120.0 if mill == "Plate" else 16.0)
     if not gauge_hi > gauge_lo:
         gauge_lo, gauge_hi = (6.0, 120.0) if mill == "Plate" else (1.8, 16.0)
-    cur_t = float(raw.get(t_key, 20.0 if mill == "Plate" else 6.0))
+    cur_t = float(raw.get(t_key, 16.0 if mill == "Plate" else 6.0))
     cur_t = min(max(cur_t, gauge_lo), gauge_hi)
-    target_gauge = col2.number_input(f"Target Gauge ({t_key})", min_value=gauge_lo,
-                                     max_value=gauge_hi, value=cur_t, step=1.0)
+    thickness = st.number_input(f"Target thickness ({t_key})", min_value=gauge_lo,
+                                max_value=gauge_hi, value=cur_t, step=1.0)
 
-    start_choices = [gt.SIMULATOR] + gt.names()
-    starting = col3.selectbox(
-        "Starting chemistry (internal grade)", start_choices, key=f"opt_start_{mill}",
-        help="Seeds the solver's base chemistry with the midpoint of an internal grade's "
-             "permitted MIN/MAX band. The solver still varies C, Mn and Nb across its grid.")
-    if starting != gt.SIMULATOR:
-        raw.update(gt.chemistry(starting))
+    rolling_type = "AR"
+    if mill == "Plate":
+        process = st.radio("Rolling process", PROCESS_CHOICES, index=0, horizontal=True)
+        rolling_type = ROLLING_TYPE_MAP[process]
+        st.caption("Process mapping — " + " · ".join(PROCESS_HELP[p] for p in PROCESS_CHOICES))
+    else:
+        st.caption("Rolling_Type is not a feature of the Steckel HRC model, so the coil route "
+                   "offers no process selector.")
 
-    chosen_objectives = st.multiselect(
-        "Optimisation objectives",
-        options=available_objectives(mill),
-        default=["min_ce", "max_margin"],
-        format_func=lambda k: OBJECTIVES[k]["label"],
-        help="Pick one or several. Multiple objectives are normalised across the compliant candidates "
-             "and averaged, so no single objective wins just because its units are larger.")
-    if not chosen_objectives:
-        st.info("Pick at least one objective before solving.")
-        return
-    st.caption(" · ".join(OBJECTIVES[k]["help"] for k in chosen_objectives))
+    # ---- 3. constraints -----------------------------------------------------------------
+    start_choices = [AUTO_CHEMISTRY] + gt.names()
+    slab_choice = st.selectbox(
+        "Slab grade", start_choices, key=f"opt_slab_{mill}",
+        help="Pick an internal grade template to roll exactly that chemistry, or 'auto' to "
+             "search every template lean-first (lowest CE_IIW, then lowest microalloy total) "
+             "and return the leanest chemistry whose recipe stays feasible.")
+    if slab_choice != AUTO_CHEMISTRY:
+        st.caption(" · ".join(f"{el}: {lo:.3f}–{hi:.3f}"
+                              for el, (lo, hi) in zip(*gt.band(slab_choice)) if hi > lo)
+                   if gt.get(slab_choice) else "")
 
-    # Show Target Requirements
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Min Yield Strength (YS)", f"≥ {spec_cfg['ys_min']:.0f} MPa")
-    c2.metric("Min Tensile Strength (TS)", f"≥ {spec_cfg['ts_min']:.0f} MPa")
-    c3.metric("Min Elongation (EL)", f"≥ {spec_cfg['el_min']:.0f} %")
+    def band_inputs(key, label):
+        """lo/hi number inputs bounded by the mill spec row; default the row's full range."""
+        row = {r[1]: r for r in (spec_rows or [])}.get(key)
+        lo = cons.spec_float(row, 4, None)
+        hi = cons.spec_float(row, 5, None)
+        if lo is None or hi is None or not hi > lo:
+            lo, hi = (850.0, 1150.0) if key == ENTRY_COL[mill] else (700.0, 1050.0)
+        c1, c2 = st.columns(2)
+        band_lo = c1.number_input(f"{label} min (°C)", min_value=lo, max_value=hi,
+                                  value=float(lo), step=10.0, key=f"opt_{key}_lo_{mill}")
+        band_hi = c2.number_input(f"{label} max (°C)", min_value=lo, max_value=hi,
+                                  value=float(hi), step=10.0, key=f"opt_{key}_hi_{mill}")
+        if band_hi < band_lo:
+            st.warning(f"{label}: max below min — using the full row band.")
+            band_lo, band_hi = lo, hi
+        return float(band_lo), float(band_hi)
 
-    if limits or chem_caps:
-        st.caption("Solver constraints — " + cons.describe(limits) + " · " + cons.describe_caps(chem_caps))
+    k = st.slider("required margin: k × 95% interval (non-marginal without overpower)",
+                  min_value=0.5, max_value=2.0, value=1.0, step=0.1, key=f"opt_k_{mill}")
+
+    if mill == "Plate":
+        entry_range = band_inputs("FM_Temp_Before_Rolling", "FM entry temperature")
+        finish_range = band_inputs("FM_Finish_Temp", "Finish rolling temperature")
+        cooling_label = st.radio("Cooling", ["Air cool", "Laminar headers"], horizontal=True)
+        cooling = "air" if cooling_label == "Air cool" else "laminar"
+        headers_range = (4, 12)
+        if cooling == "laminar":
+            headers_range = st.slider("Laminar header count range", 0, 20, (4, 12), step=1,
+                                      key=f"opt_hdr_{mill}")
+        ct_range = None
+    else:
+        entry_range = band_inputs("Temp_Transfer_Bar_C", "Transfer bar temperature")
+        finish_range = band_inputs("Temp_FT_Avg_C", "Finishing temperature")
+        ct_range = band_inputs("Temp_CT_Top_C", "Coiling temperature")
+        cooling = "rot"
+        headers_range = (0, 0)
+        st.caption("No header choice on the Steckel runout table — the coiling temperature "
+                   "carries the cooling, applied symmetrically to top and bottom.")
 
     st.markdown('<div style="height:1rem"></div>', unsafe_allow_html=True)
 
-    if st.button("⚡ Solve Optimal Rolling & Chemistry Schedule", type="primary", use_container_width=True):
-        with st.spinner("Evaluating multi-parameter response space with split-conformal verification..."):
-            t0 = time.time()
-            res = run_inverse_optimization(mill, spec_cfg, target_gauge, raw,
-                                           limits=limits, chem_caps=chem_caps,
-                                           objectives=chosen_objectives)
-            elapsed = time.time() - t0
+    if not st.button("⚡ Search hottest feasible recipe", type="primary", use_container_width=True):
+        return
 
-        if not res:
-            st.error("Failed to run optimization solver.")
-            return
-        if res.get("cap_infeasible"):
-            st.error(res.get("message", "Every candidate violated the chemistry caps."))
-            return
-
-        best = res["best_schedule"]
-        is_comp = res["is_compliant"]
-
-        st.markdown('<div style="height:1.2rem"></div>', unsafe_allow_html=True)
-        if is_comp:
-            st.success(f"Optimal schedule solved in {elapsed*1000:.1f} ms! "
-                       f"Found {res['n_compliant']} compliant recipes out of {res['n_evaluated']} evaluated candidates.")
+    if slab_choice == AUTO_CHEMISTRY:
+        chemistries = lean_chemistries()
+        if not chemistries:
+            chemistries = [("simulator chemistry",
+                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
+    else:
+        chem = gt.chemistry(slab_choice) or {}
+        if chem:
+            chemistries = [(slab_choice, chem)]
         else:
-            st.warning(f"No candidate met the rigorous 95% conformal bound across both YS and TS simultaneously. "
-                       f"Showing the nearest schedule with minimal shortfall.")
+            chemistries = [("simulator chemistry",
+                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
 
-        # Display Comparison Table: Current vs Optimized
-        st.markdown("#### 📋 Recommended Aim Setpoints vs Current Simulator Inputs")
-        
-        comp_rows = [
-            {"Parameter": "Carbon (C)", "Current": f"{raw.get('Chem_C', 0.16):.3f} %", "Optimized": f"{best.get('Chem_C'):.3f} %", "Unit": "wt%"},
-            {"Parameter": "Manganese (Mn)", "Current": f"{raw.get('Chem_Mn', 1.20):.3f} %", "Optimized": f"{best.get('Chem_Mn'):.3f} %", "Unit": "wt%"},
-            {"Parameter": "Niobium (Nb)", "Current": f"{raw.get('Chem_Nb', 0.015):.4f} %", "Optimized": f"{best.get('Chem_Nb'):.4f} %", "Unit": "wt%"},
-            {"Parameter": "Carbon Equivalent (CE_IIW)", "Current": f"{_raw_ce_iiw(raw):.3f}", "Optimized": f"{best.get('ce_iiw'):.3f}", "Unit": ""},
-        ]
-        if mill == "Plate":
-            comp_rows.extend([
-                {"Parameter": "Finish Rolling Temp (FRT)", "Current": f"{raw.get('FM_Finish_Temp', 830):.0f} °C", "Optimized": f"{best.get('FM_Finish_Temp'):.0f} °C", "Unit": "°C"},
-                {"Parameter": "ACC Laminar Headers", "Current": f"{raw.get('ACC_Laminar_Header', 6):.0f} H", "Optimized": f"{best.get('ACC_Laminar_Header'):.0f} H", "Unit": "headers"},
-                {"Parameter": "Post-Laminar Water Temp", "Current": f"{raw.get('ACC_Temp_Post_Laminar', 580):.0f} °C", "Optimized": f"{best.get('ACC_Temp_Post_Laminar'):.0f} °C", "Unit": "°C"},
-            ])
+    if use_workbook:
+        requirements, info = spec_requirements(chosen_spec, chosen_grade, thickness, mill,
+                                               rolling_type, chemistries[0][1])
+        if info.get("status") == "out_of_gauge":
+            st.warning(info.get("message", "Thickness outside the standard range."))
+        if not requirements:
+            st.error("This specification tier carries no readable YS/TS/EL/CE limits — "
+                     "pick another standard/grade.")
+            return
+    else:
+        requirements = preset_requirements(mill, chosen_spec)
+
+    search_raw = dict(raw)
+    search_raw["Rolling_Type"] = rolling_type
+
+    with st.spinner("Scoring the entry × finish × cooling × chemistry grid against the "
+                    "specification at the conformal bound..."):
+        t0 = time.time()
+        res = run_recipe_search(
+            mill, search_raw, thickness, requirements, chemistries,
+            entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+            ct_range=ct_range, k=k)
+        elapsed = time.time() - t0
+
+    if res.get("error"):
+        st.error(res["error"])
+        return
+
+    chosen = res["chosen"]
+    if chosen is None:
+        st.error(f"No feasible recipe in {res['n_evaluated']:,} evaluated candidates at "
+                 f"k = {k:.1f}× the 95% interval. Nothing is proposed — widen a temperature "
+                 "band, raise k's tolerance via a lower safety factor, pick a richer slab "
+                 "grade, or relax the specification.")
+        for note in res["rejected"]:
+            st.markdown(f"- {note}")
+        return
+
+    if chosen.get("_extrapolated"):
+        st.warning("⚠️ The selected recipe sits outside the historical P01–P99 envelope on at "
+                   "least one parameter. Every in-domain candidate failed the margin rule, so "
+                   "an extrapolated candidate was used — treat the predictions as extrapolation.")
+
+    # ---- recipe card ---------------------------------------------------------------------
+    st.markdown(f"#### 📇 Recipe card — solved in {elapsed * 1000:.0f} ms "
+                f"({res['n_evaluated']:,} candidates scored)")
+    if mill == "Plate":
+        entry, frt = float(chosen[entry_col]), float(chosen[finish_col])
+        headers = float(chosen.get("ACC_Headers_n", 0.0))
+        cooling_text = (f"**{headers:.0f} headers** (0.5 start bonus per the physics)"
+                        if headers > 0 else "**air cool**")
+        st.markdown(
+            f"- Rolling process: **{rolling_type}** (route {chosen.get('route', 'AR')}) · "
+            f"thickness **{thickness:.1f} mm**\n"
+            f"- FM entry: **{entry:.0f} °C** (aim ± 20 °C)\n"
+            f"- Finish rolling: **{frt:.0f} °C** (aim ± 20 °C)\n"
+            f"- Cooling: {cooling_text} · post-laminar aim "
+            f"**{float(chosen.get('ACC_Temp_Post_Laminar', frt)):.0f} °C**")
+    else:
+        entry, frt = float(chosen[entry_col]), float(chosen[finish_col])
+        ct = float(chosen.get("Temp_CT_Top_C", 0.0))
+        st.markdown(
+            f"- Thickness **{thickness:.1f} mm** coil · no process selector on this route\n"
+            f"- Transfer bar: **{entry:.0f} °C** (aim ± 20 °C)\n"
+            f"- Finishing: **{frt:.0f} °C** (aim ± 20 °C)\n"
+            f"- Coiling: **{ct:.0f} °C** (aim ± 20 °C, top and bottom symmetric)")
+
+    st.markdown(
+        f"- Slab grade: **{chosen.get('_chemistry', '?')}** · "
+        f"C {chosen.get('Chem_C', 0.0):.3f} % · Mn {chosen.get('Chem_Mn', 0.0):.3f} % · "
+        f"Nb {chosen.get('Chem_Nb', 0.0):.4f} % · "
+        f"CE_IIW {chosen.get('ce_iiw', 0.0):.3f} · microalloys "
+        f"{chosen.get('microalloy_total', 0.0):.4f} %")
+
+    pred_rows = []
+    for req in requirements:
+        rid = f"{req['key']}|{req['direction']}"
+        req_symbol = "≥" if req["direction"] == "min" else "≤"
+        if req["kind"] == "mech":
+            pred = float(chosen.get(f"pred_{req['key']}", float("nan")))
+            half = float(req["half"])
+            margin = float(chosen.get(f"margin_{rid}", float("nan")))
+            pred_rows.append({
+                "Property": req["label"],
+                "Required": f"{req_symbol} {req['required']:.1f} {req['unit']}",
+                "Predicted": f"{pred:.1f} {req['unit']}",
+                "95% interval": f"{pred - half:.1f} – {pred + half:.1f}",
+                "Margin": f"{margin:+.1f} {req['unit']}",
+                "Margin (×interval)": f"{margin / half:.2f}×" if half > 0 else "—",
+                "Verdict": "PASS" if margin >= k * half - 1e-9 else "FAIL",
+            })
         else:
-            comp_rows.extend([
-                {"Parameter": "Finishing Temp (FT)", "Current": f"{raw.get('Temp_FT_Avg_C', 850):.0f} °C", "Optimized": f"{best.get('Temp_FT_Avg_C'):.0f} °C", "Unit": "°C"},
-                {"Parameter": "Coiling Temp (CT)", "Current": f"{raw.get('Temp_CT_Top_C', 580):.0f} °C", "Optimized": f"{best.get('Temp_CT_Top_C'):.0f} °C", "Unit": "°C"},
-            ])
+            value = float(chosen.get(req["key"], float("nan")))
+            margin = float(chosen.get(f"margin_{rid}", float("nan")))
+            pred_rows.append({
+                "Property": req["label"],
+                "Required": f"{req_symbol} {req['required']:.4f}",
+                "Predicted": f"{value:.4f}",
+                "95% interval": "deterministic",
+                "Margin": f"{margin:+.4f}",
+                "Margin (×interval)": "—",
+                "Verdict": "PASS" if margin >= -1e-9 else "FAIL",
+            })
+    st.dataframe(pd.DataFrame(pred_rows), hide_index=True, use_container_width=True)
+    st.caption(f"Feasibility rule: margin ≥ k × 95% conformal interval with k = {k:.1f}. "
+               f"Overpower deprioritises (never hides) any candidate whose margin on a property "
+               f"exceeds {OVERPOWER_CAP_INTERVALS:.0f} × its interval (cap = "
+               f"{OVERPOWER_CAP_INTERVALS:.0f} × conformal half-width, fixed constant).")
 
-        comp_rows.insert(4, {"Parameter": "Rolling route", "Current": str(raw.get("Rolling_Type", "AR")),
-                             "Optimized": str(best.get("route", "AR")), "Unit": ""})
-        st.dataframe(pd.DataFrame(comp_rows), hide_index=True, use_container_width=True)
+    # ---- rejection ladder -----------------------------------------------------------------
+    st.markdown("#### 🪜 Rejection ladder — next hottest feasible alternatives")
+    if res["ladder"]:
+        ladder_rows = []
+        for rank, alt in enumerate(res["ladder"], start=2):
+            ratios = [float(alt.get(f"margin_{r['key']}|{r['direction']}", float("nan"))) /
+                      float(r["half"])
+                      for r in requirements
+                      if r.get("kind") == "mech" and float(r.get("half", 0.0)) > 0]
+            ratios = [v for v in ratios if np.isfinite(v)]
+            worst = min(ratios) if ratios else float("nan")
+            if mill == "Plate":
+                thermal = (f"entry {float(alt[entry_col]):.0f} °C · FRT {float(alt[finish_col]):.0f} °C · "
+                           + ("air" if float(alt.get('ACC_Headers_n', 0)) == 0
+                              else f"{float(alt['ACC_Headers_n']):.0f} headers"))
+            else:
+                thermal = (f"entry {float(alt[entry_col]):.0f} °C · FT {float(alt[finish_col]):.0f} °C · "
+                           f"CT {float(alt.get('Temp_CT_Top_C', 0)):.0f} °C")
+            ladder_rows.append({
+                "Rank": rank,
+                "Chemistry": alt.get("_chemistry", "?"),
+                "Setpoints": thermal,
+                "CE_IIW": f"{float(alt.get('ce_iiw', 0)):.3f}",
+                "Worst margin": f"{worst:.2f}×interval" if np.isfinite(worst) else "—",
+                "Overpower": f"{float(alt.get('overpower', 0)):.2f}",
+            })
+        st.dataframe(pd.DataFrame(ladder_rows), hide_index=True, use_container_width=True)
+    else:
+        st.caption("No hotter feasible alternative — the selected recipe is the only feasible point.")
 
-        if res.get("clamped"):
-            st.warning("Schedule clamped into the permitted window: " + "; ".join(res.get("violations", [])))
-            st.caption("The strength figures above were computed on the recommended setpoints "
-                       "before this clamp; run the simulator on the clamped values for the "
-                       "numbers to certify against.")
+    st.markdown("#### 🚫 Why the app stepped down — hottest rejected bands")
+    if res["rejected"]:
+        for note in res["rejected"]:
+            st.markdown(f"- {note}")
+    else:
+        st.caption("Nothing was rejected: every evaluated candidate cleared the margin rule.")
 
-        window = res.get("window") or {}
-        if window:
-            ys_lo, ys_hi = window["ys_range"]
-            ts_lo, ts_hi = window["ts_range"]
-            band1, band2, band3 = st.columns(3)
-            band1.metric("Yield reachable in window", f"{ys_lo:.0f} - {ys_hi:.0f} MPa",
-                         delta=f"target {spec_cfg['ys_min']:.0f}",
-                         delta_color="normal" if window["reachable"] else "inverse")
-            band2.metric("Tensile reachable in window", f"{ts_lo:.0f} - {ts_hi:.0f} MPa",
-                         delta=f"target {spec_cfg['ts_min']:.0f}")
-            band3.metric("Candidates inside caps", f"{window['n_inside']:,}",
-                         delta=f"of {res['n_evaluated']:,}")
-            if not window["reachable"]:
-                st.warning("The permitted window cannot reach this specification. "
-                           "Widen the temperature band, relax a chemistry cap, or lower the gauge.")
-
-        if limits or chem_caps or res.get("objectives"):
-            labels = ", ".join(OBJECTIVES[k]["label"] for k in res.get("objectives", []))
-            st.caption("Constraints in force — " + cons.describe(limits) + " · " + cons.describe_caps(chem_caps)
-                       + (" · objectives: " + labels if labels else ""))
-
-        # Verification Metrics Strip
-        st.markdown("#### 🎯 Verified Mechanical Performance (with Split-Conformal 95% Bounds)")
-        m1, m2, m3 = st.columns(3)
-        ys_val = best.get("pred_ys", 0.0)
-        ys_low = best.get("lower_ys", 0.0)
-        ts_val = best.get("pred_ts", 0.0)
-        ts_low = best.get("lower_ts", 0.0)
-
-        m1.metric(
-            label="Predicted Yield Strength",
-            value=f"{ys_val:.1f} MPa",
-            delta=f"95% lower: {ys_low:.1f} MPa (req ≥ {spec_cfg['ys_min']:.0f})"
-        )
-        m2.metric(
-            label="Predicted Tensile Strength",
-            value=f"{ts_val:.1f} MPa",
-            delta=f"95% lower: {ts_low:.1f} MPa (req ≥ {spec_cfg['ts_min']:.0f})"
-        )
-        ce_delta = round(best.get("ce_iiw") - _raw_ce_iiw(raw), 3)
-        m3.metric(
-            label="Carbon Equivalent Change (ΔCE)",
-            value=f"{best.get('ce_iiw'):.3f}",
-            delta=f"{ce_delta:+.3f} CE {'(Leaner / Cost Saving)' if ce_delta <= 0 else '(Added strength)'}",
-            delta_color="normal" if ce_delta <= 0 else "inverse"
-        )
+    # ---- CSV download -----------------------------------------------------------------------
+    recipe_keys = (["_chemistry"] + [c for c in chosen if str(c).startswith("Chem_")]
+                   + [entry_col, finish_col]
+                   + (["ACC_Laminar_Header", "ACC_Headers_n", "ACC_Active",
+                       "ACC_Temp_Post_Laminar"] if mill == "Plate" else
+                      ["Temp_CT_Top_C", "Temp_CT_Bot_C"])
+                   + ["ce_iiw", "pcm", "microalloy_total", "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"]
+                   + (["route"] if mill == "Plate" else [])
+                   + [f"pred_{r['key']}" for r in requirements if r.get("kind") == "mech"]
+                   + [f"margin_{r['key']}|{r['direction']}" for r in requirements])
+    csv_row = {key: chosen.get(key) for key in dict.fromkeys(recipe_keys) if key in chosen}
+    csv_row["k"] = k
+    csv_row["ood"] = bool(chosen.get("ood", False))
+    st.download_button(
+        "⬇️ Download recipe (CSV)",
+        data=pd.DataFrame([csv_row]).to_csv(index=False).encode("utf-8"),
+        file_name=f"recipe_{mill}_{chosen_spec.replace(' ', '_')}_{chosen_grade}.csv",
+        mime="text/csv",
+        use_container_width=True)

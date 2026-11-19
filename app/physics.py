@@ -43,7 +43,7 @@ PLATE_BOUNDS = {
 HRC_BOUNDS = {
     "Coil_T_mm": (1.5, 25.0),
     "Coil_W_mm": (700.0, 2200.0),
-    "TB_Thick_mm": (15.0, 70.0),
+    "TB_Thick_mm": (15.0, 105.0),
     "Temp_Transfer_Bar_C": (750.0, 1100.0),
     "Temp_FT_Avg_C": (700.0, 980.0),
     "Temp_CT_Top_C": (400.0, 750.0),
@@ -93,6 +93,22 @@ def plate_cooling_rate(frt, t_post, plate_t, headers):
     """Laminar accelerated-cooling rate proxy, MPa-equivalent driving force."""
     drop = max(0.0, frt - t_post)
     return (drop * (headers + 0.5)) / max(plate_t, 1.0)
+
+
+# Calibrated so the app defaults reproduce exactly: frt=832 C, 8 headers, 16 mm plate
+# -> drop of 88 C -> post-laminar 744 C.  drop = k * headers / plate_t with k = 176.
+LAMINAR_K = 176.0
+
+
+def post_laminar_temp(frt, headers, plate_t):
+    """Physically-coupled post-laminar temperature: more headers, deeper drop.
+
+    Accepts scalars or Series/arrays elementwise, so a sweep frame can pass whole
+    columns; the scalar result is unchanged.
+    """
+    drop = LAMINAR_K * np.maximum(0.0, np.asarray(headers, dtype=float)) \
+        / np.maximum(1.0, np.asarray(plate_t, dtype=float))
+    return np.maximum(200.0, np.asarray(frt, dtype=float) - drop)
 
 
 def hrc_cooling_rate(ft, ct_top, ct_bot, coil_t):

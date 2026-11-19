@@ -29,7 +29,9 @@ def compute_metallurgical_features(df):
     slab_t = _get_series(df, "Slab_T_mm", 220.0).clip(lower=100.0, upper=350.0)
     plate_t = _get_series(df, "Plate_T_mm", 16.0).clip(lower=4.0, upper=160.0)
     plate_w = _get_series(df, "Plate_W_mm", 2000.0).clip(lower=800.0, upper=4500.0)
-    tb_ratio = _get_series(df, "TB_Ratio", 2.0).clip(lower=1.05, upper=6.0)
+    # the training-time ceiling on this clip was 6.0; ratios above it (transfer bar thicker than
+    # 96 mm on 16 mm plate) are extrapolation the app now warns about instead of saturating here
+    tb_ratio = _get_series(df, "TB_Ratio", 2.0).clip(lower=1.05, upper=8.0)
     last_draft = _get_series(df, "FM_Last_Pass_Drafting", 2.0).clip(lower=0.1, upper=15.0)
 
     X["Slab_T_mm"] = slab_t

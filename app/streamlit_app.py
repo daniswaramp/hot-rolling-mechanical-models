@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy.optimize import isotonic_regression
 import streamlit as st
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,6 +71,18 @@ try:
 except Exception:
     pass
 
+import physics  # noqa: E402
+try:
+    importlib.reload(physics)
+except Exception:
+    pass
+
+import precipitation  # noqa: E402
+try:
+    importlib.reload(precipitation)
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -92,7 +105,7 @@ PLATE_SPEC = [
     ("Geometry", "Slab_T_mm", "Slab thickness", "mm", 120.0, 320.0, 218.0, 1.0),
     ("Geometry", "Plate_T_mm", "Plate thickness", "mm", 6.0, 120.0, 16.0, 0.5),
     ("Geometry", "Plate_W_mm", "Plate width", "mm", 1000.0, 4000.0, 1889.0, 10.0),
-    ("Geometry", "TB_Thickness_mm", "Transfer bar thickness", "mm", 15.0, 80.0, 41.0, 0.5),
+    ("Geometry", "TB_Thickness_mm", "Transfer bar thickness", "mm", 15.0, 120.0, 41.0, 0.5),
     ("Finishing mill", "FM_Temp_Before_Rolling", "Entry temperature", "C", 850.0, 1150.0, 985.0, 1.0),
     ("Finishing mill", "FM_Finish_Temp", "Finishing temperature", "C", 700.0, 1050.0, 832.0, 1.0),
     ("Finishing mill", "FM_Last_Pass_Drafting", "Last pass drafting", "mm", 0.5, 25.0, 4.0, 0.5),
@@ -117,7 +130,7 @@ PLATE_SPEC = [
 HRC_SPEC = [
     ("Geometry", "Coil_T_mm", "Coil thickness", "mm", 1.8, 16.0, 6.0, 0.1),
     ("Geometry", "Coil_W_mm", "Coil width", "mm", 700.0, 1600.0, 1200.0, 10.0),
-    ("Geometry", "TB_Thick_mm", "Transfer bar thickness", "mm", 15.0, 70.0, 24.8, 0.5),
+    ("Geometry", "TB_Thick_mm", "Transfer bar thickness", "mm", 15.0, 105.0, 24.8, 0.5),
     ("Steckel mill", "Temp_Transfer_Bar_C", "Transfer bar temperature", "C", 850.0, 1150.0, 937.0, 1.0),
     ("Steckel mill", "Temp_FT_Avg_C", "Finishing temperature", "C", 750.0, 1000.0, 835.0, 1.0),
     ("Cooling", "Temp_CT_Top_C", "Coiling temperature, top", "C", 400.0, 750.0, 595.0, 1.0),
@@ -1151,9 +1164,23 @@ def schedule_inputs(mill):
                 except (TypeError, ValueError):
                     value = float(default)
                 value = min(max(value, float(lo)), float(hi))
+                auto_post = False
+                if mill == "Plate" and key == "ACC_Temp_Post_Laminar":
+                    auto_post = st.checkbox(
+                        "Derive post-laminar T from headers (physical coupling)",
+                        key=f"{mill}_post_laminar_auto", value=True)
+                    st.caption("Sweeping laminar headers now moves the end temperature, like the "
+                               "mill actually runs.")
+                    if auto_post:
+                        derived = physics.post_laminar_temp(values["FM_Finish_Temp"],
+                                                            values["ACC_Laminar_Header"],
+                                                            values["Plate_T_mm"])
+                        value = min(max(derived, float(lo)), float(hi))
+                        st.session_state[widget_key] = value
                 values[key] = st.number_input(f"{label} [{shown_unit}]", min_value=float(lo),
                                               max_value=float(hi), step=float(step), format=fmt,
-                                              key=widget_key, value=value)
+                                              key=widget_key, value=value,
+                                              disabled=auto_post)
     if mill == "Plate":
         st.markdown('<div class="note">Delivery route</div>', unsafe_allow_html=True)
         values["Rolling_Type"] = st.selectbox(
@@ -1528,6 +1555,16 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
         return
     z = scored[target].values.reshape(grid, grid)
 
+    # grid rows run along x (axis 0) and columns along y (axis 1), both ascending, so the
+    # header guardrail is a running max/min along whichever axis carries the headers.
+    if mill == "Plate" and target in HEADER_SWEEP_SIGN:
+        hdr_axis = 0 if x_key == "ACC_Laminar_Header" else \
+            (1 if y_key == "ACC_Laminar_Header" else None)
+        if hdr_axis is not None:
+            sign = HEADER_SWEEP_SIGN[target]
+            z = (np.maximum.accumulate(z, axis=hdr_axis) if sign > 0
+                 else np.minimum.accumulate(z, axis=hdr_axis))
+
     label, unit = TARGET_LABEL[mill][target]
     point = cons.clamp_raw(mill, raw, limits)[0]
     here, here_err = single_target(mill, point, engine, target)
@@ -1567,12 +1604,35 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
                 f'schedule at {here:.1f} {unit}.</div>', unsafe_allow_html=True)
 
 
+HEADER_SWEEP_SIGN = {"TS_BN": 1, "YS_BN": 1, "EL_BN": -1, "TS_AN": -1, "YS_AN": -1,
+                     "EL_AN": 1, "Impact_0C": 1, "Impact_m20C": 1, "Impact_m40C": 1}
+
+
+def monotone_guardrail(scores, x_key, mill):
+    """Isotonic correction of a header sweep: residual GBDT tree noise removed per
+    physically-defensible sign. Targets with an ambiguous sign are left untouched."""
+    if mill != "Plate" or x_key != "ACC_Laminar_Header":
+        return scores
+    out = scores.copy()
+    for key, sign in HEADER_SWEEP_SIGN.items():
+        if key not in out.columns:
+            continue
+        y = pd.to_numeric(out[key], errors="coerce").to_numpy(dtype=float)
+        fit = isotonic_regression(y, increasing=(sign > 0))
+        out[key] = fit.x if hasattr(fit, "x") else fit
+    return out
+
+
 @st.cache_data(show_spinner=False)
-def _slice_scores(mill, x_key, xs, engine, raw_tuple):
+def _slice_scores(mill, x_key, xs, engine, raw_tuple, couple_post=False):
     """One vectorised pass: sweep X, hold everything else, score every target."""
     frame = pd.DataFrame([dict(raw_tuple) for _ in range(len(xs))])
     frame[x_key] = np.asarray(xs, dtype=float)
-    return score_frame(mill, frame, engine=engine)
+    if mill == "Plate" and couple_post and x_key == "ACC_Laminar_Header":
+        frame["ACC_Temp_Post_Laminar"] = physics.post_laminar_temp(
+            frame["FM_Finish_Temp"], frame[x_key], frame["Plate_T_mm"])
+    scores = score_frame(mill, frame, engine=engine)
+    return monotone_guardrail(scores, x_key, mill)
 
 
 def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
@@ -1593,7 +1653,10 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
     xs = np.linspace(lo, hi, n)
     point = cons.clamp_raw(mill, raw, limits)[0]
     try:
-        scores = _slice_scores(mill, x_key, tuple(xs), engine, tuple(sorted(dict(raw).items())))
+        scores = _slice_scores(mill, x_key, tuple(xs), engine,
+                               tuple(sorted(dict(raw).items())),
+                               couple_post=bool(st.session_state.get(
+                                   f"{mill}_post_laminar_auto", True)))
     except Exception as exc:  # noqa: BLE001
         st.error(f"Sweep failed: {exc}")
         return
@@ -1677,6 +1740,10 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
     fig.update_layout(height=280 * len(units) + 90, margin=dict(l=10, r=10, t=40, b=10),
                       plot_bgcolor="white", legend=dict(orientation="h", y=1.12, x=0))
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
+    if mill == "Plate" and x_key == "ACC_Laminar_Header" \
+            and any(k in HEADER_SWEEP_SIGN for k in y_keys):
+        st.caption("monotone physics guardrail applied to this header sweep (residual tree noise "
+                   "removed); single-schedule predictions remain the raw model.")
 
     show_row = {labels.get(x_key, x_key): round(op_x, 3)}
     for key in y_keys:
@@ -2887,7 +2954,8 @@ def main():
 
     header(mill, len(TARGET_LABEL[mill]))
 
-    tabs = st.tabs(["Simulator", "Specification check", "Inverse Optimizer", "Response surface", "Capability",
+    tabs = st.tabs(["Simulator", "Specification check", "Inverse Optimizer", "Response surface",
+                    "Precipitation & Solubility", "Capability",
                     "Batch", "Retrain", "Diagnostics", "About"])
     with tabs[0]:
         view_simulator(mill, raw, engine)
@@ -2898,14 +2966,16 @@ def main():
     with tabs[3]:
         view_surface(mill, raw, engine)
     with tabs[4]:
-        view_capability(mill, raw, engine)
+        precipitation.view_precipitation(mill, raw)
     with tabs[5]:
-        view_batch(mill, engine)
+        view_capability(mill, raw, engine)
     with tabs[6]:
-        view_retrain(mill)
+        view_batch(mill, engine)
     with tabs[7]:
-        view_diagnostics(mill)
+        view_retrain(mill)
     with tabs[8]:
+        view_diagnostics(mill)
+    with tabs[9]:
         view_about()
 
 

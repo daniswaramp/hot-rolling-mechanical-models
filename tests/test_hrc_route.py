@@ -203,10 +203,10 @@ def test_indicators_clip_like_the_feature_modules():
     # the HRC feature module clips coil thickness to 1.5 mm, so the card must use 1.5 too
     assert ind["true_strain"] == pytest.approx(
         math.log(max(70.0, 1.5 * 1.05) / 1.5), rel=1e-6)
-    # and an over-thick transfer bar is clipped to the same 70 mm ceiling
+    # and an over-thick transfer bar is clipped to the same 105 mm ceiling
     raw = dict(app.defaults("HRC"), TB_Thick_mm=200.0)
     ind = ml.compute_physical_indicators(raw, "HRC")
-    assert ind["true_strain"] == pytest.approx(math.log(70.0 / 6.0), rel=1e-6)
+    assert ind["true_strain"] == pytest.approx(math.log(105.0 / 6.0), rel=1e-6)
 
 
 # --------------------------------------------------------------------------- artifacts

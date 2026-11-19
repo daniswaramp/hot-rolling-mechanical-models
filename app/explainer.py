@@ -43,6 +43,11 @@ def check_applicability_domain(mill: str, raw_inputs: dict) -> tuple[list[dict],
     """
     Checks whether the input schedule extrapolates outside historical 98% mill envelope (P01 - P99).
     Also checks metallurgy domain constraints (e.g. SA 516 Gr 70 boiler domain for Normalized Plate).
+
+    Plate TB_Thickness_mm caveat: the training stats bundle (models/training_stats.json) ships
+    quartiles, not percentiles, so this envelope uses the historical min/max (15.7 - 80 mm) in
+    place of P01/P99. The extrapolation warning therefore fires outside the full historical
+    range, not outside a P01-P99 band.
     """
     domain = get_applicability_domain().get(mill, {})
     warnings = []

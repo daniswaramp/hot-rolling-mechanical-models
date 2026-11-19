@@ -135,4 +135,9 @@ they extrapolate. Toughness and normalised yield carry the widest intervals, and
 after-normalising targets are a different physical problem: the heat treatment does work the rolling
 never did.
 
+The input widgets now accept transfer-bar thickness well beyond each mill's historical envelope
+(Plate up to 120 mm, coil up to 105 mm), and the feature modules no longer saturate silently above
+the old training ceilings. The applicability-domain monitor flags such rows as extrapolation;
+predictions there carry the model's own conformal interval but no training support.
+
 MIT licence.
