@@ -66,11 +66,17 @@ RX_CONSTANTS = {
     "x_drx_k": (0.693, "Avrami ln 2, so X = 0.5 at one characteristic strain (dynamic)"),
     "x_drx_n": (1.5, "dynamic-recrystallization Avrami exponent (typical austenite)"),
     # t_50 = C_srx * eps^-4 * D0^2 * exp(Q_srx/(R T)) * retardation; calibrated:
-    # t_50 = 1.0 s at T = 1000 C, eps = 0.30, D0 = 100 um, no solute retardation.
-    # Prefactor calibrated to typical hot-rolling interpass behaviour, not a plant fit.
-    "C_srx": (3.978e-19, "static-recrystallization prefactor - calibrated so t_50 = 1.0 s "
-                         "at T = 1000 C, eps = 0.30, D0 = 100 um, no retardation "
-                         "(hot-rolling screening calibration, not a plant fit)"),
+    # t_50 = 4.0 s at T = 1000 C, eps = 0.15, D0 = 100 um, no solute retardation.
+    # The anchor is a roughing-representative strain (0.15, not a finishing 0.30):
+    # with the old 0.30 anchor the eps^-4 law over-penalized the 0.09-0.20 drafts
+    # real plate schedules use, calling every roughing pass NRX. With this anchor
+    # C-Mn roughing recrystallizes in ~10-30 s and Nb microalloyed grades below
+    # the Nb(C,N) solution temperature stay unrecrystallized - the classic TMCP
+    # picture. Screening calibration, not a plant fit.
+    "C_srx": (9.835e-20, "static-recrystallization prefactor - calibrated so t_50 = 4.0 s "
+                         "at T = 1000 C, eps = 0.15, D0 = 100 um, no retardation "
+                         "(roughing-representative anchor; hot-rolling screening "
+                         "calibration, not a plant fit)"),
     "srx_eps_exp": (-4.0, "t_50 ~ eps^-4 (Sellars)"),
     "srx_D0_exp": (2.0, "t_50 ~ D0^2 (Sellars)"),
     "Q_srx": (300.0e3, "activation energy for static recrystallization, J/mol (Sellars)"),
@@ -435,6 +441,22 @@ def _render_result(mill, stored):
             'half the mean thickness, so the centre deforms less than the surface and the '
             'through-thickness structure diverges. Smaller drafts per pass, a bigger roll '
             'radius or a thinner bar fixes it.</div>', unsafe_allow_html=True)
+    if s["n_nrx"] == s["n_passes"] and s["n_passes"] > 0:
+        st.markdown(
+            '<div class="note"><b>every pass came out NRX.</b> With light drafts the '
+            'ε⁻⁴ law stretches t₅₀ far past the interpass time — that is the model, not a '
+            'display fault. Heavier early drafts (roughing wants 0.15-0.35 strain per pass), '
+            'longer interpass times, a higher entry temperature or a leaner chemistry move '
+            'passes toward PRX and SRX; a Nb-bearing grade rolled below its Nb(C,N) '
+            'solution temperature will hold NRX by design — that is what pancaking is.'
+            '</div>', unsafe_allow_html=True)
+    elif s["n_nrx"] > 0:
+        st.markdown(
+            f'<div class="note"><b>{s["n_nrx"]} of {s["n_passes"]} passes stay '
+            'unrecrystallized.</b> Passes below the Nb(C,N) solution temperature carry '
+            'pancaked austenite into the next draft — the intended TMCP state for ferrite '
+            'grain refinement, provided the earlier passes fully recrystallized.</div>',
+            unsafe_allow_html=True)
 
     _section("through-thickness strain")
     st.plotly_chart(_strain_contour_fig(rows), use_container_width=True,

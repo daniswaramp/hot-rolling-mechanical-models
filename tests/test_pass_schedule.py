@@ -30,10 +30,23 @@ MILLS = ["Plate", "HRC"]
 
 # ------------------------------------------------------------------ 1. calibration sanity
 def test_t50_calibration_point_in_sanity_window():
-    """t_50 at its anchor (T=1000 C, eps=0.30, D0=100 um, no retardation) lands in [0.5, 20] s."""
+    """t_50 at its anchor (T=1000 C, eps=0.15 roughing-representative, D0=100 um,
+    no retardation) lands in [0.5, 20] s. The roughing anchor matters: with the
+    old finishing-strain anchor (0.30) the eps^-4 law called every light-draft
+    roughing pass NRX, which contradicts plant practice."""
     chem = {"Nb": 0.0, "Ti": 0.0, "C": 0.18, "N": 0.004}
-    t50 = ps.t50_seconds(1000.0 + 273.15, 0.30, 100.0, chem["Nb"], chem["Ti"], False)
+    t50 = ps.t50_seconds(1000.0 + 273.15, 0.15, 100.0, chem["Nb"], chem["Ti"], False)
     assert 0.5 <= t50 <= 20.0, f"t_50 anchor out of window: {t50:.3f} s"
+
+
+def test_light_roughing_draft_is_prx_not_nrx():
+    """A light roughing draft (eps ~ 0.09) at 985 C with 15 s interpass must land
+    in PRX territory (partial softening), not the old model's near-zero X_srx."""
+    chem = {"Nb": 0.002, "Ti": 0.002, "C": 0.18, "N": 0.004}
+    res = ps.compute_schedule(41.0, [3.571], 985.0, 20.0, 15.0, 0.5, 460.0, 100.0, chem)
+    first = res["passes"][0]
+    assert 0.05 <= first["x_srx"] < 0.95, f"x_srx out of PRX band: {first['x_srx']:.3f}"
+    assert first["regime"] == "PRX"
 
 
 def test_peak_strain_calibration_point_in_sanity_window():
