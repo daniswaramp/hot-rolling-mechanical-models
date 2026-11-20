@@ -100,6 +100,10 @@ _maybe_reload(shadow)
 import pass_schedule  # noqa: E402
 _maybe_reload(pass_schedule)
 
+# Furnace normalizing thermal, precipitate dissolution/pinning & Modal-calibrated physics.
+import normalizing  # noqa: E402
+_maybe_reload(normalizing)
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -107,7 +111,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BUILD = "2026-11-20 · 4-pillar upgrade: DBTT 18-col impact · correlated CVaR & capability · ladle triage · shadow EWMA drift · schedule A/B & setup card"
+BUILD = "2026-11-20 · Furnace Normalizing module · Modal-calibrated physics vs AN models"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -3816,7 +3820,7 @@ def main():
     tabs = st.tabs(["Simulator", "Specification check", "Inverse Optimizer", "Response surface",
                     "Precipitation & Solubility", "Capability",
                     "Batch", "Retrain", "Diagnostics", "Atlas", "Shadow", "Pass schedule",
-                    "About"])
+                    "Furnace Normalizing", "About"])
     with tabs[0]:
         view_simulator(mill, raw, engine)
     with tabs[1]:
@@ -3842,6 +3846,8 @@ def main():
     with tabs[11]:
         pass_schedule.view_pass_schedule(mill, raw)
     with tabs[12]:
+        normalizing.view_normalizing(mill, raw, engine)
+    with tabs[13]:
         view_about()
 
 
