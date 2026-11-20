@@ -1,7 +1,7 @@
 {
  "Plate|YS_BN|xgb": {
-  "r2": 0.917,
-  "rmse": 17.332,
+  "r2": 0.9171,
+  "rmse": 17.32,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -47,15 +47,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|YS_BN|lgbm": {
-  "r2": 0.9177,
-  "rmse": 17.249,
+  "r2": 0.9163,
+  "rmse": 17.404,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -101,15 +98,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|YS_BN|cat": {
-  "r2": 0.9204,
-  "rmse": 16.972,
+  "r2": 0.9194,
+  "rmse": 17.075,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -155,15 +149,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|TS_BN|xgb": {
-  "r2": 0.9419,
-  "rmse": 13.687,
+  "r2": 0.9401,
+  "rmse": 13.904,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -209,15 +200,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|TS_BN|lgbm": {
-  "r2": 0.9401,
-  "rmse": 13.901,
+  "r2": 0.9374,
+  "rmse": 14.205,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -263,15 +251,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|TS_BN|cat": {
-  "r2": 0.9419,
-  "rmse": 13.689,
+  "r2": 0.9424,
+  "rmse": 13.626,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -317,15 +302,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|EL_BN|xgb": {
-  "r2": 0.4822,
-  "rmse": 2.851,
+  "r2": 0.4927,
+  "rmse": 2.822,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -371,15 +353,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|EL_BN|lgbm": {
-  "r2": 0.4986,
-  "rmse": 2.805,
+  "r2": 0.4641,
+  "rmse": 2.9,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -425,15 +404,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|EL_BN|cat": {
-  "r2": 0.4971,
-  "rmse": 2.81,
+  "r2": 0.4676,
+  "rmse": 2.891,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -479,15 +455,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|YS_AN|xgb": {
-  "r2": 0.3202,
-  "rmse": 20.286,
+  "r2": 0.3323,
+  "rmse": 20.106,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -533,15 +506,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|YS_AN|lgbm": {
-  "r2": 0.3545,
-  "rmse": 19.768,
+  "r2": 0.3946,
+  "rmse": 19.145,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -587,15 +557,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|YS_AN|cat": {
-  "r2": 0.402,
-  "rmse": 19.027,
+  "r2": 0.3988,
+  "rmse": 19.077,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -641,15 +608,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|TS_AN|xgb": {
-  "r2": 0.5695,
-  "rmse": 17.715,
+  "r2": 0.5559,
+  "rmse": 17.993,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -695,15 +659,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|TS_AN|lgbm": {
-  "r2": 0.5093,
-  "rmse": 18.913,
+  "r2": 0.5239,
+  "rmse": 18.63,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -749,15 +710,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|TS_AN|cat": {
-  "r2": 0.553,
-  "rmse": 18.052,
+  "r2": 0.5629,
+  "rmse": 17.851,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -803,15 +761,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|EL_AN|xgb": {
-  "r2": 0.3366,
-  "rmse": 3.376,
+  "r2": 0.4091,
+  "rmse": 3.186,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -857,15 +812,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|EL_AN|lgbm": {
-  "r2": 0.5709,
-  "rmse": 2.715,
+  "r2": 0.5634,
+  "rmse": 2.738,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -911,15 +863,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|EL_AN|cat": {
-  "r2": 0.5519,
-  "rmse": 2.774,
+  "r2": 0.5609,
+  "rmse": 2.746,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -965,15 +914,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_0C|xgb": {
-  "r2": 0.316,
-  "rmse": 53.542,
+  "r2": 0.285,
+  "rmse": 54.742,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1019,15 +965,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_0C|lgbm": {
-  "r2": 0.2619,
-  "rmse": 55.621,
+  "r2": 0.2565,
+  "rmse": 55.821,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1073,15 +1016,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_0C|cat": {
-  "r2": 0.3533,
-  "rmse": 52.061,
+  "r2": 0.3751,
+  "rmse": 51.178,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1127,15 +1067,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_m20C|xgb": {
-  "r2": 0.2508,
-  "rmse": 62.821,
+  "r2": 0.2634,
+  "rmse": 62.287,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1181,15 +1118,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_m20C|lgbm": {
-  "r2": 0.2012,
-  "rmse": 64.863,
+  "r2": 0.2166,
+  "rmse": 64.235,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1235,15 +1169,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_m20C|cat": {
-  "r2": 0.2983,
-  "rmse": 60.797,
+  "r2": 0.329,
+  "rmse": 59.449,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1289,15 +1220,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_m40C|xgb": {
-  "r2": 0.2613,
-  "rmse": 61.908,
+  "r2": 0.3355,
+  "rmse": 58.717,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1343,15 +1271,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_m40C|lgbm": {
-  "r2": 0.3716,
-  "rmse": 57.101,
+  "r2": 0.4862,
+  "rmse": 51.632,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1397,15 +1322,12 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "Plate|Impact_m40C|cat": {
-  "r2": 0.3237,
-  "rmse": 59.234,
+  "r2": 0.3701,
+  "rmse": 57.169,
   "features": [
    "Slab_T_mm",
    "Plate_T_mm",
@@ -1451,10 +1373,7 @@
    "eps_FM",
    "eps_last_pass",
    "d_alpha_est",
-   "HP_term",
-   "is_AR",
-   "is_CR",
-   "is_TMCP"
+   "HP_term"
   ]
  },
  "HRC|YS_BN|xgb": {

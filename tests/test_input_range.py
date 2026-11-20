@@ -38,15 +38,15 @@ def _tb_row(mill, key):
 
 
 def test_plate_tb_widget_ceiling_is_120():
-    row = _tb_row("Plate", "TB_Thickness_mm")
-    assert row[5] == 120.0
-    assert row[4] == 15.0 and row[6] == 41.0 and row[7] == 0.5
+    row = _tb_row("Plate", "TB_Ratio")
+    assert row[3] == "×"
+    assert row[4] == 1.1 and row[5] == 8.0 and row[6] == 2.56 and row[7] == 0.05
 
 
 def test_hrc_tb_widget_ceiling_is_105():
-    row = _tb_row("HRC", "TB_Thick_mm")
-    assert row[5] == 105.0
-    assert row[4] == 15.0 and row[6] == 24.8 and row[7] == 0.5
+    row = _tb_row("HRC", "TB_Ratio")
+    assert row[3] == "×"
+    assert row[4] == 1.2 and row[5] == 15.0 and row[6] == 4.13 and row[7] == 0.1
 
 
 # --------------------------------------------------------------------------- feature clips
@@ -99,3 +99,44 @@ def test_plate_tb_default_stays_in_distribution():
     raw = app.defaults("Plate")
     warnings, _notices = explainer.check_applicability_domain("Plate", raw)
     assert all(w.get("param") != "TB_Thickness_mm" for w in warnings)
+
+
+def test_tb_ratio_propagates_to_features_indicators_and_ood():
+    """TB_Ratio propagates to Plate X['TB_Ratio'], HRC X['TB_Thick_mm'], indicators, and OOD."""
+    plate_frame = app.prepare_frame("Plate", pd.DataFrame([{"Plate_T_mm": 16.0, "TB_Ratio": 7.5}]))
+    assert float(plate_frame["TB_Thickness_mm"].iloc[0]) == pytest.approx(120.0)
+    X_plate = compute_metallurgical_features(plate_frame)
+    assert float(X_plate["TB_Ratio"].iloc[0]) == pytest.approx(7.5)
+
+    hrc_frame = app.prepare_frame("HRC", pd.DataFrame([{"Coil_T_mm": 6.0, "TB_Ratio": 15.0}]))
+    assert float(hrc_frame["TB_Thick_mm"].iloc[0]) == pytest.approx(90.0)
+    X_hrc, _ = engineer_hrc_features(hrc_frame, is_train=False)
+    assert float(X_hrc["TB_Thick_mm"].iloc[0]) == pytest.approx(90.0)
+
+    # Physical indicators derive TB thickness from TB_Ratio when TB_Thick_mm is absent
+    import math
+    hrc_raw = dict(app.defaults("HRC"), TB_Ratio=10.0, Coil_T_mm=6.0)
+    hrc_raw.pop("TB_Thick_mm", None)
+    ind_hrc = ml.compute_physical_indicators(hrc_raw, "HRC")
+    assert ind_hrc["true_strain"] == pytest.approx(math.log(60.0 / 6.0), rel=1e-6)
+
+    # Plate softening deltas use TB_Ratio directly when present
+    dts, dys, del_ = ml.plate_softening_deltas_frame(
+        pd.DataFrame([{"Plate_T_mm": 16.0, "TB_Ratio": 2.56, "FM_Finish_Temp": 832.0,
+                       "ACC_Temp_Post_Laminar": 744.0, "ACC_Laminar_Header": 8.0}]))
+    assert float(dts.iloc[0]) > 12.0 and float(dys.iloc[0]) > 15.0 and float(del_.iloc[0]) > 1.5
+
+    # OOD alerts fire from TB_Ratio * gauge when TB_Thickness_mm / TB_Thick_mm is omitted
+    plate_ood = dict(app.defaults("Plate"), TB_Ratio=7.0, Plate_T_mm=16.0)
+    plate_ood.pop("TB_Thickness_mm", None)
+    p_warn, _ = explainer.check_applicability_domain("Plate", plate_ood)
+    assert any(w.get("param") == "TB_Thickness_mm" for w in p_warn)
+
+    hrc_ood = dict(app.defaults("HRC"), TB_Ratio=12.0, Coil_T_mm=6.0)
+    hrc_ood.pop("TB_Thick_mm", None)
+    h_warn, _ = explainer.check_applicability_domain("HRC", hrc_ood)
+    assert any(w.get("param") == "TB_Thick_mm" for w in h_warn)
+
+    # Default HRC TB_Ratio stays in distribution (4.13 * 6.0 = 24.78 inside 24.0..26.0)
+    h_def_warn, _ = explainer.check_applicability_domain("HRC", app.defaults("HRC"))
+    assert all(w.get("param") != "TB_Thick_mm" for w in h_def_warn)

@@ -104,6 +104,13 @@ _maybe_reload(pass_schedule)
 import normalizing  # noqa: E402
 _maybe_reload(normalizing)
 
+# Ranged Monte Carlo process feasibility & surface uncertainty deviation bands.
+import feasibility  # noqa: E402
+_maybe_reload(feasibility)
+
+import surface_deviations  # noqa: E402
+_maybe_reload(surface_deviations)
+
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
     page_icon="▦",
@@ -111,7 +118,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BUILD = "2026-11-20 · Furnace Normalizing module · Modal-calibrated physics vs AN models"
+BUILD = "2026-11-20 · Ranged feasibility · surface ± deviations · TB_Ratio · pure-physics route"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -161,7 +168,7 @@ PLATE_SPEC = [
     ("Geometry", "Slab_T_mm", "Slab thickness", "mm", 120.0, 320.0, 218.0, 1.0),
     ("Geometry", "Plate_T_mm", "Plate thickness", "mm", 6.0, 120.0, 16.0, 0.5),
     ("Geometry", "Plate_W_mm", "Plate width", "mm", 1000.0, 4000.0, 1889.0, 10.0),
-    ("Geometry", "TB_Thickness_mm", "Transfer bar thickness", "mm", 15.0, 120.0, 41.0, 0.5),
+    ("Geometry", "TB_Ratio", "Transfer bar ratio", "×", 1.1, 8.0, 2.56, 0.05),
     ("Finishing mill", "FM_Temp_Before_Rolling", "Entry temperature", "C", 850.0, 1150.0, 985.0, 1.0),
     ("Finishing mill", "FM_Finish_Temp", "Finishing temperature", "C", 700.0, 1050.0, 832.0, 1.0),
     ("Finishing mill", "FM_Last_Pass_Drafting", "Last pass drafting", "mm", 0.5, 25.0, 4.0, 0.5),
@@ -186,7 +193,7 @@ PLATE_SPEC = [
 HRC_SPEC = [
     ("Geometry", "Coil_T_mm", "Coil thickness", "mm", 1.8, 16.0, 6.0, 0.1),
     ("Geometry", "Coil_W_mm", "Coil width", "mm", 700.0, 1600.0, 1200.0, 10.0),
-    ("Geometry", "TB_Thick_mm", "Transfer bar thickness", "mm", 15.0, 105.0, 24.8, 0.5),
+    ("Geometry", "TB_Ratio", "Transfer bar ratio", "×", 1.2, 15.0, 4.13, 0.1),
     ("Steckel mill", "Temp_Transfer_Bar_C", "Transfer bar temperature", "C", 850.0, 1150.0, 937.0, 1.0),
     ("Steckel mill", "Temp_FT_Avg_C", "Finishing temperature", "C", 750.0, 1000.0, 835.0, 1.0),
     ("Cooling", "Temp_CT_Top_C", "Coiling temperature, top", "C", 400.0, 750.0, 595.0, 1.0),
@@ -246,8 +253,8 @@ SPECS = {"Plate": _validated_specs(PLATE_SPEC, "Plate"), "HRC": _validated_specs
 
 SURFACE = {
     "Plate": ["FM_Finish_Temp", "ACC_Laminar_Header", "ACC_Temp_Post_Laminar", "Plate_T_mm",
-              "Chem_C", "Chem_Mn", "Chem_Nb", "FM_Temp_Before_Rolling"],
-    "HRC": ["Temp_FT_Avg_C", "Temp_CT_Top_C", "Coil_T_mm", "Temp_Transfer_Bar_C",
+              "TB_Ratio", "Chem_C", "Chem_Mn", "Chem_Nb", "FM_Temp_Before_Rolling"],
+    "HRC": ["Temp_FT_Avg_C", "Temp_CT_Top_C", "Coil_T_mm", "TB_Ratio", "Temp_Transfer_Bar_C",
             "Chem_C", "Chem_Mn", "Chem_Nb"],
 }
 
@@ -302,6 +309,7 @@ FEATURE_LABELS = {
     "ACC_Active": "ACC active flag",
     "Slab_T_mm": "Slab thickness",
     "TB_Thickness_mm": "Transfer bar thickness",
+    "TB_Thick_mm": "Transfer bar thickness",
     "TB_Ratio": "Transfer bar / gauge ratio",
     "FM_Last_Pass_Drafting": "Last pass drafting",
     "Plate_T_mm": "Plate gauge",
@@ -328,7 +336,7 @@ def boot_check(mill):
     try:
         raw = defaults(mill)
         if mill == "Plate":
-            raw["Rolling_Type"] = "AR"
+            raw["Rolling_Type"] = infer_rolling_route(raw)
         out = predict_champion(mill, raw)
         scored = {k: v["pred"] for k, v in out.items()}
         good = sum(1 for v in scored.values() if np.isfinite(v))
@@ -524,13 +532,78 @@ def bundles(mill):
     return {k: ml.load_model_bundle(mill, k) for k in TARGET_LABEL[mill]}
 
 
+def _boratto_tnr(raw):
+    """Boratto austenite non-recrystallisation temperature Tnr (°C) from chemistry."""
+    raw = raw or {}
+
+    def _c(key):
+        try:
+            v = float(raw.get(key, 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, v) if np.isfinite(v) else 0.0
+
+    c = _c("Chem_C")
+    nb = _c("Chem_Nb")
+    v = _c("Chem_V")
+    ti = _c("Chem_Ti")
+    al = _c("Chem_Al")
+    si = _c("Chem_Si")
+    return float(
+        887.0
+        + 464.0 * c
+        + (6445.0 * nb - 644.0 * math.sqrt(nb))
+        + (732.0 * v - 230.0 * math.sqrt(v))
+        + 890.0 * ti
+        + 363.0 * al
+        - 357.0 * si
+    )
+
+
+def infer_rolling_route(raw):
+    """Derive physical Plate rolling route ('AR', 'CR', or 'TMCP') from Tnr, FRT, and ACC."""
+    raw = raw or {}
+
+    def _num(key, default):
+        try:
+            v = float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+        return v if np.isfinite(v) else float(default)
+
+    tnr = _boratto_tnr(raw)
+    hdr = _num("ACC_Laminar_Header", _num("ACC_Headers_n", 0.0))
+    frt = _num("FM_Finish_Temp", 832.0)
+    entry = _num("FM_Temp_Before_Rolling", 985.0)
+    if hdr > 0.0 and frt <= max(tnr, 850.0):
+        return "TMCP"
+    if hdr <= 0.0 and (frt <= max(tnr - 20.0, 860.0) or entry <= 960.0):
+        return "CR"
+    return "AR"
+
+
+def _finite_float(val):
+    try:
+        v = float(val)
+        return v if np.isfinite(v) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def prepared(raw, mill):
     """The cleaned sheet already carries TB_Ratio, drafting and ACC header count; derive them here."""
     out = dict(raw)
     if mill == "Plate":
         plate_t = max(float(out.get("Plate_T_mm", 16.0)), 1.0)
-        tb = float(out.get("TB_Thickness_mm", plate_t * 2))
-        out["TB_Ratio"] = tb / plate_t
+        tb_ratio = _finite_float(out.get("TB_Ratio"))
+        tb_mm = _finite_float(out.get("TB_Thickness_mm"))
+        if tb_ratio is not None:
+            out["TB_Ratio"] = tb_ratio
+            if tb_mm is None:
+                out["TB_Thickness_mm"] = tb_ratio * plate_t
+        else:
+            tb = tb_mm if tb_mm is not None else plate_t * 2.0
+            out["TB_Ratio"] = tb / plate_t
         if "FM_Last_Pass_Drafting" in out:
             out["FM_Last_Pass_Drafting"] = float(out["FM_Last_Pass_Drafting"])
         else:
@@ -538,7 +611,13 @@ def prepared(raw, mill):
         headers = float(out.get("ACC_Laminar_Header", 0.0))
         out["ACC_Headers_n"] = headers
         out["ACC_Active"] = 1.0 if headers > 0 else 0.0
-        out["Rolling_Type"] = str(out.get("Rolling_Type", "AR"))
+        out["Rolling_Type"] = str(out.get("Rolling_Type") or infer_rolling_route(out))
+    else:
+        coil_t = max(float(out.get("Coil_T_mm", 6.0)), 1.0)
+        tb_ratio = _finite_float(out.get("TB_Ratio"))
+        tb_mm = _finite_float(out.get("TB_Thick_mm"))
+        if tb_ratio is not None and tb_mm is None:
+            out["TB_Thick_mm"] = tb_ratio * coil_t
     return out
 
 
@@ -548,7 +627,15 @@ def prepare_frame(mill, frame):
         if "Plate_T_mm" not in frame.columns:
             frame["Plate_T_mm"] = 16.0
         plate_t = pd.to_numeric(frame["Plate_T_mm"], errors="coerce").fillna(16.0).clip(lower=1.0)
-        if "TB_Ratio" not in frame:
+        if "TB_Ratio" in frame.columns:
+            ratio_s = pd.to_numeric(frame["TB_Ratio"], errors="coerce")
+            tb_s = (pd.to_numeric(frame["TB_Thickness_mm"], errors="coerce")
+                    if "TB_Thickness_mm" in frame.columns
+                    else pd.Series(np.nan, index=frame.index))
+            frame["TB_Thickness_mm"] = tb_s.where(tb_s.notna(), ratio_s * plate_t)
+            fallback_tb = frame["TB_Thickness_mm"].fillna(plate_t * 2.0)
+            frame["TB_Ratio"] = ratio_s.where(ratio_s.notna(), fallback_tb / plate_t)
+        else:
             if "TB_Thickness_mm" in frame.columns:
                 tb = pd.to_numeric(frame["TB_Thickness_mm"], errors="coerce").fillna(plate_t * 2)
             else:
@@ -571,6 +658,16 @@ def prepare_frame(mill, frame):
         if "Rolling_Type" not in frame:
             frame["Rolling_Type"] = "AR"
     else:
+        if "Coil_T_mm" not in frame.columns:
+            frame["Coil_T_mm"] = 6.0
+        coil_t = pd.to_numeric(frame["Coil_T_mm"], errors="coerce").fillna(6.0).clip(lower=1.0)
+        if "TB_Ratio" in frame.columns:
+            ratio_s = pd.to_numeric(frame["TB_Ratio"], errors="coerce")
+            if "TB_Thick_mm" not in frame.columns:
+                frame["TB_Thick_mm"] = ratio_s * coil_t
+            else:
+                tb_s = pd.to_numeric(frame["TB_Thick_mm"], errors="coerce")
+                frame["TB_Thick_mm"] = tb_s.where(tb_s.notna(), ratio_s * coil_t)
         # the Steckel feature module reads Chem_<el> for all sixteen elements including CE;
         # a missing one raises rather than defaulting, so fill the blanks before it runs
         for el in ("C", "Si", "Mn", "P", "S", "Nb", "Cu", "Cr", "Ni", "Mo", "V", "Al", "Ti",
@@ -1401,11 +1498,39 @@ def schedule_inputs(mill):
                                               max_value=float(hi), step=float(step), format=fmt,
                                               key=widget_key, value=value,
                                               disabled=auto_post)
+                if key == "TB_Ratio":
+                    gauge_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+                    gauge = float(values.get(gauge_key, 16.0 if mill == "Plate" else 6.0))
+                    tb_mm = float(values["TB_Ratio"]) * gauge
+                    st.caption(f"= {tb_mm:.1f} mm transfer bar (at {gauge:.1f} mm gauge)")
+                    if mill == "Plate":
+                        values["TB_Thickness_mm"] = round(tb_mm, 2)
+                    else:
+                        values["TB_Thick_mm"] = round(tb_mm, 2)
     if mill == "Plate":
-        st.markdown('<div class="note">Delivery route</div>', unsafe_allow_html=True)
-        values["Rolling_Type"] = st.selectbox(
-            "Rolling type", ["AR", "TMCP", "N"], key=f"{mill}_rolling_type",
-            help="AR = as rolled, TMCP = thermomechanically controlled, N = normalised delivery.")
+        tnr = _boratto_tnr(values)
+        route = infer_rolling_route(values)
+        values["Rolling_Type"] = route
+        headers_val = float(values.get("ACC_Laminar_Header", 0.0))
+        frt_val = float(values.get("FM_Finish_Temp", 832.0))
+        route_reason = {
+            "TMCP": f"FRT {frt_val:.0f} °C ≤ max(Tnr {tnr:.0f} °C, 850 °C) & {headers_val:.0f} ACC headers",
+            "CR": f"ACC 0 headers & controlled/sub-Tnr rolling (FRT {frt_val:.0f} °C, Tnr {tnr:.0f} °C)",
+            "AR": f"Hot finish above Tnr (FRT {frt_val:.0f} °C vs Tnr {tnr:.0f} °C)",
+        }[route]
+        st.markdown(
+            f'<div class="note">Physics-derived rolling route: <b>{route}</b> '
+            f'<span style="color:{MUTED};">({route_reason})</span></div>',
+            unsafe_allow_html=True,
+        )
+        delivery_choice = st.radio(
+            "Delivery condition",
+            ["As-Rolled / TMCP (BN)", "Normalised (AN)"],
+            key=f"{mill}_delivery_cond",
+            help="Controls BN vs AN compliance checks and surface iso-lines only; "
+                 "the rolling route above stays derived from FRT vs Tnr and ACC headers.",
+        )
+        values["Delivery_Condition"] = "N" if delivery_choice == "Normalised (AN)" else "AR"
     st.session_state["schedule"] = dict(values)
     st.session_state["schedule_mill"] = mill
 
@@ -1492,11 +1617,18 @@ def build_mill_setup_card_html(mill, raw, preds, ind, engine="Champion GBDT (Rec
             f"<td><b>{html_lib.escape(label)}</b></td>"
             f"<td class=\"num\">{val_str} <span class=\"u\">{html_lib.escape(shown_unit)}</span></td></tr>"
         )
-    if mill == "Plate" and "Rolling_Type" in raw:
-        setpoint_rows.append(
-            f"<tr><td>Route</td><td><b>Delivery condition</b></td>"
-            f"<td class=\"num\">{html_lib.escape(str(raw.get('Rolling_Type', 'AR')))}</td></tr>"
-        )
+    if mill == "Plate":
+        if "Rolling_Type" in raw:
+            setpoint_rows.append(
+                f"<tr><td>Route</td><td><b>Physics rolling route</b></td>"
+                f"<td class=\"num\">{html_lib.escape(str(raw.get('Rolling_Type', 'AR')))}</td></tr>"
+            )
+        if "Delivery_Condition" in raw:
+            dc_label = "Normalised (AN)" if raw.get("Delivery_Condition") == "N" else "As-Rolled / TMCP (BN)"
+            setpoint_rows.append(
+                f"<tr><td>Route</td><td><b>Delivery condition</b></td>"
+                f"<td class=\"num\">{html_lib.escape(dc_label)}</td></tr>"
+            )
 
     # Heat chemistry
     chem_cells = []
@@ -2100,6 +2232,21 @@ def iso_line_value(mill, label, target, thickness, rolling_type="AR"):
     return None
 
 
+def _sync_tb_thickness_frame(mill, frame, swept_keys, raw_has_ratio=False):
+    """Update derived transfer-bar thickness when sweeping TB_Ratio or gauge."""
+    gauge_col = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+    tb_col = "TB_Thickness_mm" if mill == "Plate" else "TB_Thick_mm"
+    swept = set(swept_keys or ())
+    if "TB_Ratio" in frame.columns and gauge_col in frame.columns and (
+        "TB_Ratio" in swept or (gauge_col in swept and raw_has_ratio)
+    ):
+        frame[tb_col] = (
+            pd.to_numeric(frame["TB_Ratio"], errors="coerce")
+            * pd.to_numeric(frame[gauge_col], errors="coerce")
+        )
+    return frame
+
+
 def surface_ood_mask(mill, xs, ys, x_key, y_key, base):
     """Out-of-envelope boolean mask over the 2-D contour grid (pure helper).
 
@@ -2114,8 +2261,23 @@ def surface_ood_mask(mill, xs, ys, x_key, y_key, base):
     frame = pd.DataFrame([dict(base) for _ in range(nx * ny)])
     frame[x_key] = np.repeat(xs, ny)
     frame[y_key] = np.tile(ys, nx)
-    mask = optimizer.ood_mask(mill, frame, [x_key, y_key])
+    has_ratio = "TB_Ratio" in (base or {})
+    _sync_tb_thickness_frame(mill, frame, (x_key, y_key), raw_has_ratio=has_ratio)
+    ood_keys = [x_key, y_key]
+    gauge_col = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+    tb_col = "TB_Thickness_mm" if mill == "Plate" else "TB_Thick_mm"
+    if tb_col in frame.columns and ("TB_Ratio" in (x_key, y_key) or (gauge_col in (x_key, y_key) and has_ratio)):
+        ood_keys.append(tb_col)
+    mask = optimizer.ood_mask(mill, frame, ood_keys)
     return mask.to_numpy(dtype=bool).reshape(nx, ny)
+
+
+_SURFACE_DEV_MODE_MAP = {
+    "Conservative lower bound (P05)": "p05",
+    "Nominal (center)": "nominal",
+    "Upper bound (P95)": "p95",
+    "Uncertainty spread (P95 − P05)": "spread",
+}
 
 
 def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
@@ -2131,8 +2293,15 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     head[2].caption(("Bounded by house limits: " + cons.describe(limits)) if limits
                     else f"Engine: {engine}. Rest of schedule held at sidebar values.")
 
+    dev_on, dev_dict, dev_mode, dev_draws = surface_deviations.render_deviation_controls(
+        mill, SPECS[mill]
+    )
+    active_devs = surface_deviations.active_deviations(dev_dict) if dev_on else {}
+    couple_post = (mill == "Plate") and bool(st.session_state.get(f"{mill}_post_laminar_auto", True))
+
     if view == "1D slice":
-        _surface_slice(mill, raw, engine, keys, labels, limits, axes)
+        _surface_slice(mill, raw, engine, keys, labels, limits, axes,
+                       dev_controls=(dev_on, active_devs, dev_draws))
         return
 
     if not keys:
@@ -2152,29 +2321,52 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
     sx, sy = spec_map(mill)[x_key], spec_map(mill)[y_key]
     xs = np.linspace(*axis_range(mill, x_key, limits), grid)
     ys = np.linspace(*axis_range(mill, y_key, limits), grid)
-    frame = pd.DataFrame([dict(raw) for _ in range(grid * grid)])
-    frame[x_key] = np.repeat(xs, grid)
-    frame[y_key] = np.tile(ys, grid)
-    scored = score_frame(mill, frame, engine=engine)
-    if target not in scored.columns:
-        st.error(f"{TARGET_LABEL[mill][target][0]} could not be scored on this route, so the "
-                 f"surface has nothing to draw. Switch engine or check models/ for {mill}.")
-        return
-    z = scored[target].values.reshape(grid, grid)
+    mode_key = _SURFACE_DEV_MODE_MAP.get(dev_mode, "p05") if active_devs else "nominal"
 
-    # grid rows run along x (axis 0) and columns along y (axis 1), both ascending, so the
-    # header guardrail is a running max/min along whichever axis carries the headers.
-    if mill == "Plate" and target in HEADER_SWEEP_SIGN:
-        hdr_axis = 0 if x_key == "ACC_Laminar_Header" else \
-            (1 if y_key == "ACC_Laminar_Header" else None)
-        if hdr_axis is not None:
-            sign = HEADER_SWEEP_SIGN[target]
-            z = (np.maximum.accumulate(z, axis=hdr_axis) if sign > 0
-                 else np.minimum.accumulate(z, axis=hdr_axis))
+    if active_devs:
+        grid_res = surface_deviations.score_grid_with_deviations(
+            mill, raw, x_key, y_key, xs, ys, target, active_devs,
+            engine=engine, n_draws=dev_draws, couple_post=couple_post,
+        )
+        if not np.isfinite(grid_res["nominal"]).any():
+            st.error(f"{TARGET_LABEL[mill][target][0]} could not be scored on this route, so the "
+                     f"surface has nothing to draw. Switch engine or check models/ for {mill}.")
+            return
+        z = grid_res[mode_key]
+    else:
+        frame = pd.DataFrame([dict(raw) for _ in range(grid * grid)])
+        frame[x_key] = np.repeat(xs, grid)
+        frame[y_key] = np.tile(ys, grid)
+        _sync_tb_thickness_frame(mill, frame, (x_key, y_key), raw_has_ratio=("TB_Ratio" in raw))
+        scored = score_frame(mill, frame, engine=engine)
+        if target not in scored.columns:
+            st.error(f"{TARGET_LABEL[mill][target][0]} could not be scored on this route, so the "
+                     f"surface has nothing to draw. Switch engine or check models/ for {mill}.")
+            return
+        z = scored[target].values.reshape(grid, grid)
+
+        # grid rows run along x (axis 0) and columns along y (axis 1), both ascending, so the
+        # header guardrail is a running max/min along whichever axis carries the headers.
+        if mill == "Plate" and target in HEADER_SWEEP_SIGN:
+            hdr_axis = 0 if x_key == "ACC_Laminar_Header" else \
+                (1 if y_key == "ACC_Laminar_Header" else None)
+            if hdr_axis is not None:
+                sign = HEADER_SWEEP_SIGN[target]
+                z = (np.maximum.accumulate(z, axis=hdr_axis) if sign > 0
+                     else np.minimum.accumulate(z, axis=hdr_axis))
 
     label, unit = TARGET_LABEL[mill][target]
     point = cons.clamp_raw(mill, raw, limits)[0]
-    here, here_err = single_target(mill, point, engine, target)
+    pt_dev = None
+    if active_devs:
+        pt_dev = surface_deviations.evaluate_point_with_deviations(
+            mill, point, target, active_devs,
+            engine=engine, n_draws=max(24, dev_draws), couple_post=couple_post,
+        )
+        here = pt_dev["nominal"]
+        here_err = "missing prediction" if not np.isfinite(here) else None
+    else:
+        here, here_err = single_target(mill, point, engine, target)
     if not np.isfinite(here):
         st.error(f"The current schedule could not be scored for {label} with {engine}: {here_err}")
         return
@@ -2188,16 +2380,18 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
                                     "current gauge.")
         thickness = float(raw.get("Plate_T_mm" if mill == "Plate" else "Coil_T_mm",
                                   16.0 if mill == "Plate" else 6.0))
-        iso_val = (None if overlay == "None"
+        is_spread = (mode_key == "spread")
+        iso_val = (None if (overlay == "None" or is_spread)
                    else iso_line_value(mill, overlay, target, thickness,
-                                       rolling_type=str(raw.get("Rolling_Type", "AR"))))
+                                       rolling_type=str(raw.get("Delivery_Condition") or raw.get("Rolling_Type", "AR"))))
         iso_caption, ood_caption = None, None
+        z_lbl = f"{label} spread" if is_spread else label
 
         fig = go.Figure()
         fig.add_trace(go.Contour(
             x=xs, y=ys, z=z, colorscale="Blues", contours=dict(showlabels=True,
             labelfont=dict(size=9, color="white")), line=dict(width=.4, color="rgba(255,255,255,.6)"),
-            hovertemplate=f"{sx[2]}: %{{x:.1f}}<br>{sy[2]}: %{{y:.1f}}<br>{label}: %{{z:.1f}} {unit}<extra></extra>",
+            hovertemplate=f"{sx[2]}: %{{x:.1f}}<br>{sy[2]}: %{{y:.1f}}<br>{z_lbl}: %{{z:.1f}} {unit}<extra></extra>",
         ))
         if iso_val is not None:
             zf = z[np.isfinite(z)]
@@ -2223,7 +2417,8 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
                 iso_caption = (f"{overlay} requires {label} ≥ {iso_val:.0f} {unit}, which lies "
                                f"outside {rng}; no iso-line drawn.")
         elif overlay != "None":
-            iso_caption = f"No requirement for this property in {overlay}."
+            iso_caption = ("Spec iso-line is omitted in Uncertainty spread (P95 − P05) mode."
+                           if is_spread else f"No requirement for this property in {overlay}.")
 
         # --- out-of-envelope shading (2D branch only) ---------------------------------------
         ood = surface_ood_mask(mill, xs, ys, x_key, y_key, raw)
@@ -2237,23 +2432,40 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
             ood_caption = ("grey points lie outside the mill's historical P01-P99 envelope; "
                            "treat them as extrapolation")
 
+        if pt_dev is not None and np.isfinite(pt_dev.get("p05", np.nan)):
+            pt_hover = (f"this schedule<br>Nominal: {pt_dev['nominal']:.1f} {unit}<br>"
+                        f"P05: {pt_dev['p05']:.1f} {unit}<br>P95: {pt_dev['p95']:.1f} {unit}<extra></extra>")
+            pt_ann = (f"<b>{pt_dev['nominal']:.1f} {unit}</b><br>"
+                      f"<span style='font-size:9px'>P05 {pt_dev['p05']:.1f} · P95 {pt_dev['p95']:.1f}</span>")
+        else:
+            pt_hover = f"this schedule<br>{label}: {here:.1f} {unit}<extra></extra>"
+            pt_ann = f"<b>{here:.1f} {unit}</b>"
+
         fig.add_trace(go.Scatter(x=[point[x_key]], y=[point[y_key]], mode="markers",
                                  marker=dict(size=13, color=INK, line=dict(color="white", width=2.5)),
-                                 hovertemplate=f"this schedule<br>{label}: {here:.1f} {unit}<extra></extra>",
+                                 hovertemplate=pt_hover,
                                  showlegend=False))
-        fig.add_annotation(x=point[x_key], y=point[y_key], text=f"<b>{here:.1f} {unit}</b>",
+        fig.add_annotation(x=point[x_key], y=point[y_key], text=pt_ann,
                            showarrow=True, arrowhead=0, ax=0, ay=-30, bgcolor="white",
                            bordercolor=INK, borderwidth=1, font=dict(size=11, family="JetBrains Mono"))
         fig.update_xaxes(title=sx[2], **axes); fig.update_yaxes(title=sy[2], **axes)
         fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white")
     else:
+        pt_z = (pt_dev.get(mode_key, here) if pt_dev is not None and np.isfinite(pt_dev.get(mode_key, np.nan))
+                else here)
+        z_title = f"{label} spread [{unit}]" if mode_key == "spread" else f"{label} [{unit}]"
+        pt_hover = (f"this schedule<br>Nominal: {pt_dev['nominal']:.1f} {unit}<br>"
+                    f"P05: {pt_dev['p05']:.1f} {unit}<br>P95: {pt_dev['p95']:.1f} {unit}<extra></extra>"
+                    if pt_dev is not None and np.isfinite(pt_dev.get("p05", np.nan))
+                    else f"this schedule<br>{label}: {here:.1f} {unit}<extra></extra>")
         fig = go.Figure(go.Surface(x=xs, y=ys, z=z, colorscale="Blues", showscale=False,
                                    contours=dict(z=dict(show=True, usecolormap=True, project_z=True))))
-        fig.add_trace(go.Scatter3d(x=[point[x_key]], y=[point[y_key]], z=[here], mode="markers",
-                                   marker=dict(size=5, color=INK), name="this schedule"))
+        fig.add_trace(go.Scatter3d(x=[point[x_key]], y=[point[y_key]], z=[pt_z], mode="markers",
+                                   marker=dict(size=5, color=INK), name="this schedule",
+                                   hovertemplate=pt_hover))
         fig.update_layout(height=560, margin=dict(l=0, r=0, t=0, b=0),
                           scene=dict(xaxis=dict(title=sx[2], **axes), yaxis=dict(title=sy[2], **axes),
-                                     zaxis=dict(title=f"{label} [{unit}]", **axes),
+                                     zaxis=dict(title=z_title, **axes),
                                      camera=dict(eye=dict(x=1.5, y=-1.5, z=1.0))),
                           paper_bgcolor="white")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
@@ -2261,9 +2473,14 @@ def view_surface(mill, raw, engine="Champion GBDT (Recommended)"):
         for cap in (iso_caption, ood_caption):
             if cap:
                 st.caption(cap)
+    dev_note = ""
+    if pt_dev is not None and np.isfinite(pt_dev.get("p05", np.nan)):
+        dev_note = (f" Deviation mode: {dev_mode} ({len(active_devs)} perturbed input(s), "
+                    f"{dev_draws} draws/node). Active schedule: Nominal {pt_dev['nominal']:.1f} {unit}, "
+                    f"P05 {pt_dev['p05']:.1f} {unit}, P95 {pt_dev['p95']:.1f} {unit}.")
     st.markdown(f'<div class="note">Surface held on the mill\'s own feature engineering, not a proxy: '
                 f'every node is a full pass through the {mill} pipeline. The marker is the current '
-                f'schedule at {here:.1f} {unit}.</div>', unsafe_allow_html=True)
+                f'schedule at {here:.1f} {unit}.{dev_note}</div>', unsafe_allow_html=True)
 
 
 HEADER_SWEEP_SIGN = {"TS_BN": 1, "YS_BN": 1, "EL_BN": -1, "TS_AN": -1, "YS_AN": -1,
@@ -2289,8 +2506,10 @@ def monotone_guardrail(scores, x_key, mill):
 @st.cache_data(show_spinner=False)
 def _slice_scores(mill, x_key, xs, engine, raw_tuple, couple_post=False):
     """One vectorised pass: sweep X, hold everything else, score every target."""
-    frame = pd.DataFrame([dict(raw_tuple) for _ in range(len(xs))])
+    raw_dict = dict(raw_tuple)
+    frame = pd.DataFrame([raw_dict for _ in range(len(xs))])
     frame[x_key] = np.asarray(xs, dtype=float)
+    _sync_tb_thickness_frame(mill, frame, (x_key,), raw_has_ratio=("TB_Ratio" in raw_dict))
     if mill == "Plate" and couple_post and x_key == "ACC_Laminar_Header":
         frame["ACC_Temp_Post_Laminar"] = physics.post_laminar_temp(
             frame["FM_Finish_Temp"], frame[x_key], frame["Plate_T_mm"])
@@ -2298,7 +2517,7 @@ def _slice_scores(mill, x_key, xs, engine, raw_tuple, couple_post=False):
     return monotone_guardrail(scores, x_key, mill)
 
 
-def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
+def _surface_slice(mill, raw, engine, keys, labels, limits, axes, dev_controls=None):
     """1D X-Y slice: X = any numeric input, Y = one or more properties."""
     c = st.columns([1.5, 2.6, 1.0], vertical_alignment="bottom")
     x_key = c[0].selectbox("X axis (independent)", keys, index=0, key=f"xs_{mill}",
@@ -2315,11 +2534,23 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
     lo, hi = axis_range(mill, x_key, limits)
     xs = np.linspace(lo, hi, n)
     point = cons.clamp_raw(mill, raw, limits)[0]
+
+    dev_on, active_devs, dev_draws = (dev_controls if dev_controls is not None else (False, {}, 12))
+    use_devs = bool(dev_on and active_devs)
+    couple_post = (mill == "Plate") and bool(st.session_state.get(f"{mill}_post_laminar_auto", True))
+
+    slice_devs = {}
     try:
-        scores = _slice_scores(mill, x_key, tuple(xs), engine,
-                               tuple(sorted(dict(raw).items())),
-                               couple_post=bool(st.session_state.get(
-                                   f"{mill}_post_laminar_auto", True)))
+        if use_devs:
+            slice_devs = surface_deviations.score_slice_with_deviations(
+                mill, raw, x_key, xs, y_keys, active_devs,
+                engine=engine, n_draws=dev_draws, couple_post=couple_post,
+            )
+            scores = pd.DataFrame({k: slice_devs[k]["nominal"] for k in slice_devs})
+        else:
+            scores = _slice_scores(mill, x_key, tuple(xs), engine,
+                                   tuple(sorted(dict(raw).items())),
+                                   couple_post=couple_post)
     except Exception as exc:  # noqa: BLE001
         st.error(f"Sweep failed: {exc}")
         return
@@ -2358,7 +2589,15 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
             label, _ = TARGET_LABEL[mill][key]
             y = scores[key].to_numpy(dtype=float)
             color = palette[i % len(palette)]
-            if key == first_key and hw:
+            if use_devs and key in slice_devs:
+                p95 = np.asarray(slice_devs[key]["p95"], dtype=float)
+                p05 = np.asarray(slice_devs[key]["p05"], dtype=float)
+                fig.add_trace(go.Scatter(x=xs, y=p95, line=dict(width=0), hoverinfo="skip",
+                                         showlegend=False), row=r, col=1)
+                fig.add_trace(go.Scatter(x=xs, y=p05, line=dict(width=0), fill="tonexty",
+                                         fillcolor=_rgba(color, .14), hoverinfo="skip",
+                                         name=f"{label} P05–P95 (±dev)"), row=r, col=1)
+            elif key == first_key and hw:
                 fig.add_trace(go.Scatter(x=xs, y=y + hw, line=dict(width=0), hoverinfo="skip",
                                          showlegend=False), row=r, col=1)
                 fig.add_trace(go.Scatter(x=xs, y=y - hw, line=dict(width=0), fill="tonexty",
@@ -2408,16 +2647,45 @@ def _surface_slice(mill, raw, engine, keys, labels, limits, axes):
         st.caption("monotone physics guardrail applied to this header sweep (residual tree noise "
                    "removed); single-schedule predictions remain the raw model.")
 
-    show_row = {labels.get(x_key, x_key): round(op_x, 3)}
-    for key in y_keys:
-        val = op.get(key, {}).get("pred")
-        show_row[TARGET_LABEL[mill][key][0]] = (round(float(val), 2) if val is not None and np.isfinite(val) else None)
-    st.dataframe(pd.DataFrame([show_row]), hide_index=True, use_container_width=True)
+    if use_devs:
+        dev_rows = []
+        for key in y_keys:
+            pt_dev = surface_deviations.evaluate_point_with_deviations(
+                mill, point, key, active_devs,
+                engine=engine, n_draws=max(24, dev_draws), couple_post=couple_post,
+            )
+            nom_val = pt_dev.get("nominal")
+            if nom_val is None or not np.isfinite(nom_val):
+                nom_val = op.get(key, {}).get("pred")
+            p05_val = pt_dev.get("p05")
+            p95_val = pt_dev.get("p95")
+            spr_val = pt_dev.get("spread")
+            dev_rows.append({
+                "Property": TARGET_LABEL[mill][key][0],
+                "Unit": TARGET_LABEL[mill][key][1],
+                labels.get(x_key, x_key): round(op_x, 3),
+                "Nominal": round(float(nom_val), 2) if nom_val is not None and np.isfinite(nom_val) else None,
+                "P05": round(float(p05_val), 2) if p05_val is not None and np.isfinite(p05_val) else None,
+                "P95": round(float(p95_val), 2) if p95_val is not None and np.isfinite(p95_val) else None,
+                "Spread (P95−P05)": round(float(spr_val), 2) if spr_val is not None and np.isfinite(spr_val) else None,
+            })
+        st.dataframe(pd.DataFrame(dev_rows), hide_index=True, use_container_width=True)
+    else:
+        show_row = {labels.get(x_key, x_key): round(op_x, 3)}
+        for key in y_keys:
+            val = op.get(key, {}).get("pred")
+            show_row[TARGET_LABEL[mill][key][0]] = (round(float(val), 2) if val is not None and np.isfinite(val) else None)
+        st.dataframe(pd.DataFrame([show_row]), hide_index=True, use_container_width=True)
 
+    band_note = (
+        f". Shaded bands show P05–P95 under {len(active_devs)} input deviation(s) ({dev_draws} draws/step)."
+        if use_devs else
+        (f". Shaded band is the 95% split-conformal interval for {TARGET_LABEL[mill][first_key][0]}." if hw else ".")
+    )
     note = (f"Slice through the {mill} pipeline at the sidebar schedule; "
-            f"{labels.get(x_key, x_key)} swept over {lo:.0f}-{hi:.0f}"
+            f"{labels.get(x_key, x_key)} swept over {lo:g}-{hi:g}"
             + (", bounded by the house limits" if x_key in limits else "")
-            + (f". Shaded band is the 95% split-conformal interval for {TARGET_LABEL[mill][first_key][0]}." if hw else "."))
+            + band_note)
     if observed:
         note += (" Open diamonds are population means from the cleaned training table, adjusted for "
                  "chemistry, gauge and cooling (partial residual) and narrowed to the entered "
@@ -2488,6 +2756,7 @@ def capability_resample(mill, raw, target, lsl, usl, samples, bands,
         for key, band in band_items:
             centre = float(raw[key])
             frame[key] = rng.uniform(centre - band, centre + band, samples)
+    _sync_tb_thickness_frame(mill, frame, bands.keys(), raw_has_ratio=("TB_Ratio" in raw))
     scored_frame = score_frame(mill, frame, engine=engine)
     if target not in scored_frame.columns:
         return dict(blank, error=f"{label} cannot be scored with the {engine} engine "
@@ -2597,14 +2866,16 @@ def _render_capability_result(mill, res, source):
 
 
 def view_capability(mill, raw, engine="Champion GBDT (Recommended)"):
-    """Cp/Cpk over a band the user defines, resampled through the mill's feature module.
+    """Process capability views: single-target Cp/Cpk study and ranged Monte Carlo feasibility."""
+    cap_tabs = st.tabs(["Single-Target Cp/Cpk Study", "Ranged Process Feasibility (Monte Carlo)"])
+    with cap_tabs[0]:
+        _view_single_capability(mill, raw, engine)
+    with cap_tabs[1]:
+        feasibility.view_ranged_feasibility(mill, raw, engine)
 
-    Nothing is resampled while the operator is setting the limits: the "Calculate
-    capability" button is the only gate, and its outcome is kept in
-    st.session_state[f"cp_result_{mill}"] so later reruns replay the study instead of
-    spending Modal credits (or local CPU) on it again. The compute body lives in
-    capability_resample, which is what the Modal function calls too.
-    """
+
+def _view_single_capability(mill, raw, engine="Champion GBDT (Recommended)"):
+    """Cp/Cpk over a band the user defines, resampled through the mill's feature module."""
     section("process capability")
     st.markdown('<div class="note">Set the specification limits, then say how far two or three '
                 'inputs may drift. The app resamples that band, scores every point and reports '
@@ -2692,16 +2963,25 @@ def _batch_frame_notes(mill, frame):
     state without re-reading the sheet. Neither notice depends on the scores.
     """
     notes = []
+    check_frame = frame
+    tb_col = "TB_Thickness_mm" if mill == "Plate" else "TB_Thick_mm"
+    gauge_col = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+    if tb_col not in check_frame.columns and "TB_Ratio" in check_frame.columns and gauge_col in check_frame.columns:
+        check_frame = frame.copy()
+        check_frame[tb_col] = (
+            pd.to_numeric(check_frame["TB_Ratio"], errors="coerce")
+            * pd.to_numeric(check_frame[gauge_col], errors="coerce")
+        )
     domain = explainer.get_applicability_domain().get(mill, {})
     if domain:
-        outside = pd.Series(0, index=frame.index)
+        outside = pd.Series(0, index=check_frame.index)
         for param, bounds in domain.items():
-            if param not in frame.columns:
+            if param not in check_frame.columns:
                 continue
             p01, p99 = bounds.get("p01"), bounds.get("p99")
             if p01 is None or p99 is None:
                 continue
-            values = pd.to_numeric(frame[param], errors="coerce")
+            values = pd.to_numeric(check_frame[param], errors="coerce")
             outside = outside + ((values < p01) | (values > p99)).fillna(False).astype(int)
         ood_rows = int((outside > 0).sum())
         if ood_rows:
@@ -3243,6 +3523,41 @@ def view_diagnostics(mill):
                            "A hash that no longer matches the weights means the metrics and the "
                            "model no longer belong together.")
                 st.dataframe(reg_frame, hide_index=True, use_container_width=True)
+
+    # Pure-physics rolling-route ablation report (Option A vs Option B)
+    if mill == "Plate":
+        ablation_path = os.path.join(os.path.dirname(APP_DIR), "models", "rolling_type_ablation.json")
+        try:
+            with open(ablation_path, "r", encoding="utf-8") as fh:
+                ablation = json.load(fh)
+        except (OSError, ValueError):
+            ablation = {}
+        gate = ablation.get("decision_gate") or {}
+        if gate:
+            feats = ablation.get("features") or {}
+            dropped = ", ".join(feats.get("dropped_route_columns") or [])
+            with st.expander(
+                f"Pure-physics route ablation: {gate.get('decision', 'unknown')} "
+                f"({feats.get('with_route_48_count', 48)} → {feats.get('pure_physics_45_count', 45)} features)",
+                expanded=False,
+            ):
+                st.caption(
+                    f"Source: {ablation.get('source', 'ablation')} · Dropped categorical route flags: "
+                    f"`{dropped or 'is_AR, is_CR, is_TMCP'}`. "
+                    f"Primary R² gate (|ΔR²| ≤ 0.015): {gate.get('primary_r2_within_0_015')}; "
+                    f"primary 95% coverage ≥ 94.5%: {gate.get('primary_coverage_ge_94_5')}."
+                )
+                per_t = gate.get("per_target") or {}
+                if per_t:
+                    ab_rows = [{
+                        "Target": tgt,
+                        "Tier": info.get("tier"),
+                        "With Route (48)": info.get("with_route_champion"),
+                        "Pure Physics (45)": info.get("pure_physics_champion"),
+                        "ΔR²": round(float(info["delta_r2_raw"]), 5) if info.get("delta_r2_raw") is not None else None,
+                        "95% Coverage (%)": info.get("coverage_95_pct"),
+                    } for tgt, info in per_t.items()]
+                    st.dataframe(pd.DataFrame(ab_rows), hide_index=True, use_container_width=True)
 
     # 4. Interactive inspection subtabs
     st.markdown('<div class="break"></div>', unsafe_allow_html=True)

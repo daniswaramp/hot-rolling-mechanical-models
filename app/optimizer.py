@@ -530,13 +530,13 @@ def run_inverse_optimization(mill: str, target_spec: dict, thickness: float, bas
 # consumes. Plate/script/ml/features.py one-hots AR / CR / TMCP; the "N" family
 # is the normalised supply condition the spec checker reads.
 PROCESS_CHOICES = ["AR", "NF", "NR", "TMCP", "CR"]
-ROLLING_TYPE_MAP = {"AR": "AR", "TMCP": "TMCP", "CR": "TMCP", "N": "N", "NF": "N", "NR": "N"}
+ROLLING_TYPE_MAP = {"AR": "AR", "TMCP": "TMCP", "CR": "CR", "N": "N", "NF": "N", "NR": "N"}
 PROCESS_HELP = {
     "AR": "AR → Rolling_Type 'AR'",
     "NF": "NF → Rolling_Type 'N' (normalised supply condition)",
     "NR": "NR → Rolling_Type 'N' (normalised supply condition)",
     "TMCP": "TMCP → Rolling_Type 'TMCP'",
-    "CR": "CR → Rolling_Type 'TMCP' (controlled rolled shares the TMCP encoding)",
+    "CR": "CR → Rolling_Type 'CR' (controlled rolled)",
 }
 
 # Chemistry maxima the optimizer enforces directly on the candidate chemistry.
@@ -871,10 +871,33 @@ def _schedule_grid(mill, raw, thickness, chemistries, entry_range, finish_range,
     base = dict(raw)
     if mill == "Plate":
         plate_t = max(float(base.get("Plate_T_mm", thickness)), 1.0)
-        tb = float(base.get("TB_Thickness_mm", plate_t * 2.0))
-        base["TB_Ratio"] = tb / max(float(thickness), 1.0)
+        tb_ratio_raw = base.get("TB_Ratio")
+        ratio_val = None
+        if tb_ratio_raw is not None:
+            try:
+                candidate_ratio = float(tb_ratio_raw)
+                if np.isfinite(candidate_ratio):
+                    ratio_val = candidate_ratio
+            except (TypeError, ValueError):
+                ratio_val = None
+        if ratio_val is not None:
+            base["TB_Ratio"] = ratio_val
+            base["TB_Thickness_mm"] = ratio_val * float(thickness)
+        else:
+            tb = float(base.get("TB_Thickness_mm", plate_t * 2.0))
+            base["TB_Ratio"] = tb / max(float(thickness), 1.0)
         base.setdefault("FM_Last_Pass_Drafting", float(thickness) * 0.18)
         base["Rolling_Type"] = ROLLING_TYPE_MAP.get(str(base.get("Rolling_Type", "AR")), "AR")
+    else:
+        tb_ratio_raw = base.get("TB_Ratio")
+        if tb_ratio_raw is not None:
+            try:
+                ratio_val = float(tb_ratio_raw)
+                if np.isfinite(ratio_val):
+                    base["TB_Ratio"] = ratio_val
+                    base["TB_Thick_mm"] = ratio_val * float(thickness)
+            except (TypeError, ValueError):
+                pass
 
     entry_grid = _temp_grid(*entry_range, step)
     finish_grid = _temp_grid(*finish_range, step)

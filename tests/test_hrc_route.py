@@ -69,7 +69,7 @@ def test_hrc_degenerate_schedules_do_not_crash():
     """Zero draft, inverted coiling temperature, empty chemistry."""
     defaults = app.defaults("HRC")
     cases = [
-        dict(defaults, Coil_T_mm=defaults["TB_Thick_mm"]),          # zero draft
+        dict(defaults, TB_Ratio=1.0, TB_Thick_mm=defaults["Coil_T_mm"]),  # zero draft
         dict(defaults, Temp_CT_Top_C=750.0, Temp_FT_Avg_C=750.0),   # coiling above finishing
         dict(defaults, **{k: 0.0 for k in defaults if k.startswith("Chem_")}),
         dict(defaults, Coil_T_mm=1.8),                              # the old optimizer-crash gauge
@@ -243,3 +243,72 @@ def test_shipped_bundles_carry_a_feature_list():
             assert bundle.get("feature_names") or bundle.get("features") \
                 or hasattr(bundle["model"], "feature_names_in_"), \
                 f"{mill}/{target}: no feature list anywhere in the bundle"
+
+
+# --------------------------------------------------------------------------- physics route & wiring
+def test_infer_rolling_route_physics_rules():
+    """Rolling route must follow Boratto Tnr + ACC headers so contradictory combos are impossible."""
+    base = app.defaults("Plate")
+    assert app.infer_rolling_route(dict(base, FM_Finish_Temp=1100.0, ACC_Laminar_Header=8.0)) == "AR"
+    assert app.infer_rolling_route(dict(base, FM_Finish_Temp=820.0, ACC_Laminar_Header=8.0)) == "TMCP"
+    assert app.infer_rolling_route(dict(base, FM_Finish_Temp=820.0, ACC_Laminar_Header=0.0)) == "CR"
+    assert app.infer_rolling_route(
+        dict(base, FM_Finish_Temp=920.0, ACC_Laminar_Header=0.0, FM_Temp_Before_Rolling=950.0)
+    ) == "CR"
+    assert app.infer_rolling_route(
+        dict(base, FM_Finish_Temp=920.0, ACC_Laminar_Header=0.0, FM_Temp_Before_Rolling=1050.0)
+    ) == "AR"
+
+
+def test_delivery_condition_decoupled_from_rolling_type():
+    """Spec checking reads Delivery_Condition independently of Rolling_Type, plus BUILD stamp."""
+    import spec_checker as sc
+
+    assert app.BUILD == "2026-11-20 · Ranged feasibility · surface ± deviations · TB_Ratio · pure-physics route"
+    raw_tmcp_ar = dict(app.defaults("Plate"), Rolling_Type="TMCP", Delivery_Condition="AR")
+    raw_tmcp_n = dict(app.defaults("Plate"), Rolling_Type="TMCP", Delivery_Condition="N")
+    preds = app.predict_selected_engine("Plate", raw_tmcp_ar, "Champion GBDT (Recommended)")
+    ind = ml.compute_physical_indicators(raw_tmcp_ar, "Plate")
+
+    if sc.spec_available():
+        labels, lookup = sc.spec_grade_options()
+        assert labels, "Expected at least one spec in catalog"
+        spec, grade = lookup[labels[0]]
+        res_bn = sc.evaluate_all(spec, grade, raw_tmcp_ar["Plate_T_mm"], raw_tmcp_ar, preds, ind, mill="Plate")
+        res_an = sc.evaluate_all(spec, grade, raw_tmcp_n["Plate_T_mm"], raw_tmcp_n, preds, ind, mill="Plate")
+        assert res_bn["matched"] and res_an["matched"]
+        assert res_bn["mechanical"]["is_normalised"] is False
+        assert res_an["mechanical"]["is_normalised"] is True
+        keys_bn = {c["key"] for c in res_bn["mechanical"]["checks"] if c.get("key")}
+        keys_an = {c["key"] for c in res_an["mechanical"]["checks"] if c.get("key")}
+        assert "YS_BN" in keys_bn or "TS_BN" in keys_bn
+        assert "YS_AN" in keys_an or "TS_AN" in keys_an
+
+
+def test_wired_capability_surface_deviations_and_ablation_smoke():
+    """Smoke-test wired feasibility tabs, surface deviation modes, and diagnostics expander."""
+    import streamlit as st
+
+    raw_plate = app.defaults("Plate")
+    # 1. Ranged feasibility & capability tabs
+    app.view_capability("Plate", raw_plate)
+
+    # 2. Response surface across 2D contour, 3D surface, and 1D slice with deviations active
+    st.session_state["sdev_on_Plate"] = True
+    st.session_state["sdev_draws_Plate"] = 8
+    st.session_state["g_Plate"] = 15
+    st.session_state["np_Plate"] = 11
+    for view_name in ("2D contour", "3D surface", "1D slice"):
+        st.session_state["v_Plate"] = view_name
+        if view_name == "2D contour":
+            st.session_state["sdev_mode_Plate"] = "Conservative lower bound (P05)"
+        elif view_name == "3D surface":
+            st.session_state["sdev_mode_Plate"] = "Uncertainty spread (P95 − P05)"
+        app.view_surface("Plate", raw_plate)
+
+    # Clean up deviation state so later tests aren't affected
+    st.session_state["sdev_on_Plate"] = False
+
+    # 3. Diagnostics & ablation summary
+    app.view_diagnostics("Plate")
+

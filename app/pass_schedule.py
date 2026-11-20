@@ -602,15 +602,27 @@ def view_pass_schedule(mill, raw):
     # Defaults from the sidebar schedule: transfer-bar thickness and the product gauge the
     # custom drafting mode drafts down to (assumption: the sidebar's product gauge —
     # Plate_T_mm / Coil_T_mm — is the target the last pass absorbs the remainder to).
+    gauge_default = float(raw.get("Plate_T_mm", raw.get("Coil_T_mm", 10.0)))
     if mill == "Plate":
-        tb_default = float(raw.get("TB_Thickness_mm", 41.0))
+        if raw.get("TB_Thickness_mm") is not None:
+            tb_default = float(raw["TB_Thickness_mm"])
+        elif raw.get("TB_Ratio") is not None:
+            tb_default = float(raw["TB_Ratio"]) * float(raw.get("Plate_T_mm", gauge_default))
+        else:
+            tb_default = 41.0
         t1_default = float(raw.get("FM_Temp_Before_Rolling",
                                    raw.get("Temp_Transfer_Bar_C", 985.0)))
     else:
-        tb_default = float(raw.get("TB_Thick_mm", raw.get("TB_Thickness_mm", 24.8)))
+        if raw.get("TB_Thick_mm") is not None:
+            tb_default = float(raw["TB_Thick_mm"])
+        elif raw.get("TB_Thickness_mm") is not None:
+            tb_default = float(raw["TB_Thickness_mm"])
+        elif raw.get("TB_Ratio") is not None:
+            tb_default = float(raw["TB_Ratio"]) * float(raw.get("Coil_T_mm", gauge_default))
+        else:
+            tb_default = 24.8
         t1_default = float(raw.get("Temp_Transfer_Bar_C",
                                    raw.get("FM_Temp_Before_Rolling", 937.0)))
-    gauge_default = float(raw.get("Plate_T_mm", raw.get("Coil_T_mm", 10.0)))
     tb_default = min(max(tb_default, 15.0), 120.0)
 
     state_key = f"ps_result_{mill}"
@@ -672,7 +684,8 @@ def view_pass_schedule(mill, raw):
         d0 = c9.number_input("Initial austenite grain size D0 (µm)", 20.0, 300.0,
                              value=100.0, step=5.0, key=f"ps_d0_{mill}")
         st.caption(f"Sidebar chemistry (wt%): Nb {chem['Nb']:.3f} · Ti {chem['Ti']:.3f} · "
-                   f"N {chem['N']:.4f} · C {chem['C']:.3f}.")
+                   f"N {chem['N']:.4f} · C {chem['C']:.3f} · "
+                   f"TB_Ratio {tb / max(gauge, 1e-6):.2f}× ({tb:.1f} mm / {gauge:.1f} mm).")
         submitted = st.form_submit_button("Analyze schedule", type="primary",
                                           help="Runs the recrystallization & penetration "
                                                "analysis for this sequence.")

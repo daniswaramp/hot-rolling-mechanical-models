@@ -142,6 +142,8 @@ def compute_physical_indicators(raw_dict: dict, mill_type: str) -> dict:
             value = float(raw_dict.get(key, default))
         except (TypeError, ValueError):
             value = float(default)
+        if not np.isfinite(value):
+            value = float(default)
         lo, hi = (ph.PLATE_BOUNDS if mill_type == "Plate" else ph.HRC_BOUNDS).get(key, (None, None))
         value = max(value, lo) if lo is not None else value
         value = min(value, hi) if hi is not None else value
@@ -177,7 +179,24 @@ def compute_physical_indicators(raw_dict: dict, mill_type: str) -> dict:
         ct_top = num("Temp_CT_Top_C", 580.0)
         ct_bot = num("Temp_CT_Bot_C", 580.0)
         coil_t = num("Coil_T_mm", 6.0)
-        tb_t = num("TB_Thick_mm", 32.0)
+        if "TB_Thick_mm" in raw_dict and raw_dict["TB_Thick_mm"] is not None:
+            tb_t = num("TB_Thick_mm", 32.0)
+        elif "TB_Ratio" in raw_dict and raw_dict["TB_Ratio"] is not None:
+            try:
+                ratio_val = float(raw_dict["TB_Ratio"])
+            except (TypeError, ValueError):
+                ratio_val = float("nan")
+            if np.isfinite(ratio_val):
+                lo, hi = ph.HRC_BOUNDS.get("TB_Thick_mm", (15.0, 105.0))
+                tb_t = ratio_val * coil_t
+                if lo is not None:
+                    tb_t = max(tb_t, lo)
+                if hi is not None:
+                    tb_t = min(tb_t, hi)
+            else:
+                tb_t = 32.0
+        else:
+            tb_t = 32.0
         cooling_rate = ph.hrc_cooling_rate(ft, ct_top, ct_bot, coil_t)
         true_strain = ph.true_strain(tb_t, coil_t)
 
@@ -199,13 +218,34 @@ def plate_softening_deltas_frame(frame):
     Normalizing at ~920 C erases TMCP dislocation density and fast-cooling grain
     refinement, so the after-normalising targets are bounded by these deltas.
     """
-    plate_t = pd.to_numeric(frame.get("Plate_T_mm"), errors="coerce").fillna(16.0).clip(lower=1.0)
-    tb_t = pd.to_numeric(frame.get("TB_Thickness_mm"), errors="coerce").fillna(plate_t * 2.0)
-    eps_fm = np.maximum(0.0, np.log(np.maximum(tb_t, plate_t * 1.01) / plate_t))
+    plate_t = pd.to_numeric(
+        frame["Plate_T_mm"] if "Plate_T_mm" in frame else pd.Series(16.0, index=frame.index),
+        errors="coerce",
+    ).fillna(16.0).clip(lower=1.0)
+    tb_t = pd.to_numeric(
+        frame["TB_Thickness_mm"] if "TB_Thickness_mm" in frame else pd.Series(np.nan, index=frame.index),
+        errors="coerce",
+    ).fillna(plate_t * 2.0)
+    ratio_from_mm = np.maximum(tb_t, plate_t * 1.01) / plate_t
+    if "TB_Ratio" in frame:
+        tb_ratio = pd.to_numeric(frame["TB_Ratio"], errors="coerce")
+        eff_ratio = tb_ratio.where(np.isfinite(tb_ratio), ratio_from_mm)
+    else:
+        eff_ratio = ratio_from_mm
+    eps_fm = np.maximum(0.0, np.log(np.maximum(eff_ratio, 1.01)))
 
-    frt = pd.to_numeric(frame.get("FM_Finish_Temp"), errors="coerce").fillna(830.0)
-    t_post = pd.to_numeric(frame.get("ACC_Temp_Post_Laminar"), errors="coerce").fillna(600.0)
-    headers = pd.to_numeric(frame.get("ACC_Laminar_Header"), errors="coerce")
+    frt = pd.to_numeric(
+        frame["FM_Finish_Temp"] if "FM_Finish_Temp" in frame else pd.Series(830.0, index=frame.index),
+        errors="coerce",
+    ).fillna(830.0)
+    t_post = pd.to_numeric(
+        frame["ACC_Temp_Post_Laminar"] if "ACC_Temp_Post_Laminar" in frame else pd.Series(600.0, index=frame.index),
+        errors="coerce",
+    ).fillna(600.0)
+    headers = pd.to_numeric(
+        frame["ACC_Laminar_Header"] if "ACC_Laminar_Header" in frame else pd.Series(np.nan, index=frame.index),
+        errors="coerce",
+    )
     if "ACC_Headers_n" in frame:
         headers = headers.fillna(pd.to_numeric(frame["ACC_Headers_n"], errors="coerce"))
     headers = headers.fillna(0.0)

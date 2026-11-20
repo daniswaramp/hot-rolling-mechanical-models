@@ -41,6 +41,28 @@ def get_boosted_metrics():
     return {}
 
 
+def _effective_domain_inputs(mill: str, raw_inputs: dict) -> dict:
+    """Shallow copy of raw_inputs with derived TB thickness from TB_Ratio when absent."""
+    eff = dict(raw_inputs or {})
+    if mill == "Plate" and ("TB_Thickness_mm" not in eff or eff.get("TB_Thickness_mm") is None) and "TB_Ratio" in eff:
+        try:
+            ratio = float(eff["TB_Ratio"])
+            gauge = float(eff.get("Plate_T_mm", 16.0))
+            if np.isfinite(ratio) and np.isfinite(gauge):
+                eff["TB_Thickness_mm"] = ratio * gauge
+        except (TypeError, ValueError):
+            pass
+    elif mill == "HRC" and ("TB_Thick_mm" not in eff or eff.get("TB_Thick_mm") is None) and "TB_Ratio" in eff:
+        try:
+            ratio = float(eff["TB_Ratio"])
+            gauge = float(eff.get("Coil_T_mm", 6.0))
+            if np.isfinite(ratio) and np.isfinite(gauge):
+                eff["TB_Thick_mm"] = ratio * gauge
+        except (TypeError, ValueError):
+            pass
+    return eff
+
+
 def check_applicability_domain(mill: str, raw_inputs: dict) -> tuple[list[dict], list[str]]:
     """
     Checks whether the input schedule extrapolates outside historical 98% mill envelope (P01 - P99).
@@ -52,14 +74,15 @@ def check_applicability_domain(mill: str, raw_inputs: dict) -> tuple[list[dict],
     range, not outside a P01-P99 band.
     """
     domain = get_applicability_domain().get(mill, {})
+    eff = _effective_domain_inputs(mill, raw_inputs)
     warnings = []
     notices = []
 
     # 1. Parameter Quantile Checks
     for param, bounds in domain.items():
-        if param in raw_inputs:
+        if param in eff:
             try:
-                val = float(raw_inputs[param])
+                val = float(eff[param])
                 p01 = bounds.get("p01")
                 p99 = bounds.get("p99")
                 if p01 is None or p99 is None or not (np.isfinite(p01) and np.isfinite(p99)):
@@ -83,13 +106,13 @@ def check_applicability_domain(mill: str, raw_inputs: dict) -> tuple[list[dict],
 
     # 2. Metallurgy Physical Domain Notice: Plate Normalizing
     if mill == "Plate":
-        c = float(raw_inputs.get("Chem_C", 0.15))
-        mn = float(raw_inputs.get("Chem_Mn", 0.90))
-        cr = float(raw_inputs.get("Chem_Cr", 0.02))
-        mo = float(raw_inputs.get("Chem_Mo", 0.005))
-        v = float(raw_inputs.get("Chem_V", 0.005))
-        ni = float(raw_inputs.get("Chem_Ni", 0.02))
-        cu = float(raw_inputs.get("Chem_Cu", 0.02))
+        c = float(eff.get("Chem_C", 0.15))
+        mn = float(eff.get("Chem_Mn", 0.90))
+        cr = float(eff.get("Chem_Cr", 0.02))
+        mo = float(eff.get("Chem_Mo", 0.005))
+        v = float(eff.get("Chem_V", 0.005))
+        ni = float(eff.get("Chem_Ni", 0.02))
+        cu = float(eff.get("Chem_Cu", 0.02))
         ce = c + (mn / 6.0) + ((cr + mo + v) / 5.0) + ((ni + cu) / 15.0)
 
         if ce < 0.38:
@@ -132,7 +155,8 @@ def adaptive_conformal_multiplier(mill: str, raw: dict, ar3: float = None) -> tu
     with sufficient austenite finishing margin (FRT - Ar3 >= 40 K when Ar3 is given).
     """
     raw = raw or {}
-    warnings, _notices = check_applicability_domain(mill, raw)
+    eff = _effective_domain_inputs(mill, raw)
+    warnings, _notices = check_applicability_domain(mill, eff)
     n_ood = len(warnings)
 
     mult = 1.0
@@ -148,7 +172,7 @@ def adaptive_conformal_multiplier(mill: str, raw: dict, ar3: float = None) -> tu
     if ar3 is not None:
         try:
             ar3_candidate = float(ar3)
-            frt_candidate = float(raw[frt_key])
+            frt_candidate = float(eff[frt_key])
             if np.isfinite(ar3_candidate) and np.isfinite(frt_candidate):
                 ar3_val = ar3_candidate
                 frt_margin = frt_candidate - ar3_val
@@ -164,13 +188,13 @@ def adaptive_conformal_multiplier(mill: str, raw: dict, ar3: float = None) -> tu
         all_in_core = True
         checked = 0
         for param, bounds in domain.items():
-            if param not in raw:
+            if param not in eff:
                 continue
             lo, hi = _core_bounds(bounds)
             if lo is None or hi is None:
                 continue
             try:
-                val = float(raw[param])
+                val = float(eff[param])
             except (TypeError, ValueError):
                 all_in_core = False
                 break

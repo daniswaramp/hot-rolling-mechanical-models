@@ -281,7 +281,7 @@ def test_tab_registers_after_pass_schedule_and_before_about():
     assert labels.index("Furnace Normalizing") == labels.index("Pass schedule") + 1
     assert labels[-1] == "About"
     assert "normalizing.view_normalizing(" in source
-    assert app.BUILD == "2026-11-20 · Furnace Normalizing module · Modal-calibrated physics vs AN models"
+    assert isinstance(app.BUILD, str) and "2026-11-20" in app.BUILD
 
 
 def test_normalizing_modules_respect_import_boundaries():

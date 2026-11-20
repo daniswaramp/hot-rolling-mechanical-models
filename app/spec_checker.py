@@ -844,7 +844,7 @@ def evaluate_all(spec=None, grade=None, thickness=None, raw_inputs=None, predict
 
     gauge_eval = evaluate_thickness(matched_row, thickness, mill)
     chem_eval = evaluate_chemistry(matched_row, raw_inputs, physical_indicators, available_keys)
-    rolling_type = str(raw_inputs.get("Rolling_Type", "AR"))
+    rolling_type = str((raw_inputs or {}).get("Delivery_Condition") or (raw_inputs or {}).get("Rolling_Type", "AR"))
     mech_eval = evaluate_mechanical(matched_row, predictions, mill, rolling_type)
 
     notes = str(matched_row.get("NOTES", "")).strip()
