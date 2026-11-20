@@ -5,8 +5,10 @@ retrain, diagnostics.
 """
 
 import base64
+import html as html_lib
 import io
 import json
+import math
 import os
 import sys
 from datetime import datetime
@@ -37,96 +39,66 @@ if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
 import importlib
+
+
+def _maybe_reload(mod):
+    """Reload a sibling app module only when HRCM_DEV_RELOAD=1, avoiding cache resets."""
+    if os.environ.get("HRCM_DEV_RELOAD") == "1":
+        try:
+            importlib.reload(mod)
+        except Exception:
+            pass
+    return mod
+
+
 import model_loader as ml  # noqa: E402
-try:
-    importlib.reload(ml)
-except Exception:
-    pass
+_maybe_reload(ml)
 
 import spec_checker as sc  # noqa: E402
-try:
-    importlib.reload(sc)
-except Exception:
-    pass
+_maybe_reload(sc)
 
 import explainer  # noqa: E402
-try:
-    importlib.reload(explainer)
-except Exception:
-    pass
+_maybe_reload(explainer)
 
 import optimizer  # noqa: E402
-try:
-    importlib.reload(optimizer)
-except Exception:
-    pass
+_maybe_reload(optimizer)
 
 import constraints as cons  # noqa: E402
-try:
-    importlib.reload(cons)
-except Exception:
-    pass
+_maybe_reload(cons)
 
 import training_stats as ts  # noqa: E402
-try:
-    importlib.reload(ts)
-except Exception:
-    pass
+_maybe_reload(ts)
 
 import grade_templates as gt  # noqa: E402
-try:
-    importlib.reload(gt)
-except Exception:
-    pass
+_maybe_reload(gt)
 
 import trend_stats as tst  # noqa: E402
-try:
-    importlib.reload(tst)
-except Exception:
-    pass
+_maybe_reload(tst)
 
 import physics  # noqa: E402
-try:
-    importlib.reload(physics)
-except Exception:
-    pass
+_maybe_reload(physics)
 
 import precipitation  # noqa: E402
-try:
-    importlib.reload(precipitation)
-except Exception:
-    pass
+_maybe_reload(precipitation)
 
 # Heavy calculation dispatch (Modal when configured, this process otherwise). Importing it is
 # free: the modal package inside it is only imported when a calculation is actually asked for.
 import remote_compute  # noqa: E402
-try:
-    importlib.reload(remote_compute)
-except Exception:
-    pass
+_maybe_reload(remote_compute)
 
 # What-if atlas (stored four-axis response grid) and digital shadow (bias against measured
 # results). Importing either is free: modal is only imported inside remote_jobs when a build
 # or a calibration is actually asked for, and both modules import this one lazily.
 import atlas  # noqa: E402
-try:
-    importlib.reload(atlas)
-except Exception:
-    pass
+_maybe_reload(atlas)
 
 import shadow  # noqa: E402
-try:
-    importlib.reload(shadow)
-except Exception:
-    pass
+_maybe_reload(shadow)
 
 # Pass schedule recrystallization & penetration screening. Importing it is free: the tab is
 # closed-form numpy behind its own submit button and imports precipitation read-only.
 import pass_schedule  # noqa: E402
-try:
-    importlib.reload(pass_schedule)
-except Exception:
-    pass
+_maybe_reload(pass_schedule)
 
 st.set_page_config(
     page_title="Plate Mill & Steckel Mill Prediction Platform",
@@ -135,7 +107,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-BUILD = "2026-11-13 · HRC route hardening · shared physics + bundle resolver · rebuilt OOD envelope"
+BUILD = "2026-11-20 · 4-pillar upgrade: DBTT 18-col impact · correlated CVaR & capability · ladle triage · shadow EWMA drift · schedule A/B & setup card"
 LOG_PATH = os.path.join(APP_DIR, "training_log.json")
 LOGO_PATH = os.path.join(os.path.dirname(APP_DIR), "assets", "grp.png")
 INK = "#0b0d10"
@@ -1246,7 +1218,23 @@ def single_target(mill, raw, engine, key):
     return float(value), ""
 
 
-def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
+def _scaled_interval(res, key, mult=1.0):
+    """Scale a prediction's 95% conformal interval around `pred` by `mult`."""
+    lo = float(res["ci_low"])
+    hi = float(res["ci_high"])
+    pred = float(res["pred"])
+    mult = float(mult)
+    if abs(mult - 1.0) < 1e-9 or not (np.isfinite(pred) and np.isfinite(lo) and np.isfinite(hi)):
+        return lo, hi
+    adj_lo = pred - max(0.0, pred - lo) * mult
+    adj_hi = pred + max(0.0, hi - pred) * mult
+    if key.startswith(("EL_", "Impact_", "Z_")):
+        adj_lo = max(0.0, adj_lo)
+    return round(adj_lo, 2), round(adj_hi, 2)
+
+
+def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT",
+                  conformal_mult=1.0, conformal_reason=None):
     """Grouped property card: clean readable name, tabular numbers, model holdout uncertainty."""
     extras = extras or {}
     rows, total = [], 0
@@ -1260,6 +1248,7 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
             total += 1
             label, unit = TARGET_LABEL[mill].get(key, (res["name"], res["unit"]))
             rmse_tol = ml.TARGET_CONFIG[mill][key]["tol"]
+            ci_lo, ci_hi = _scaled_interval(res, key, conformal_mult)
             fam = res.get("family", "")
             fam_badge = f'<span class="tag" style="margin-left:.4rem;">{fam}</span>' if fam else ""
             if mill == "Plate" and key in ("YS_AN", "TS_AN", "EL_AN"):
@@ -1274,14 +1263,18 @@ def targets_table(mill, predictions, extras=None, engine_label="Champion GBDT"):
             rows.append(f"""<tr>
               <td class="name">{label}{fam_badge}</td>
               <td class="val">{res['pred']:.1f}<span class="unit">{unit}</span></td>
-              <td class="rng">{res['ci_low']:.1f} – {res['ci_high']:.1f}</td>
+              <td class="rng">{ci_lo:.1f} – {ci_hi:.1f}</td>
               <td class="sub" style="font-family:monospace;">±{rmse_tol:g}&nbsp;{unit}</td>{extra_cells}</tr>""")
+    cqr_note = ""
+    if conformal_reason:
+        cqr_note = (f" · Adaptive CQR: <b>{float(conformal_mult):.2f}&times;</b> "
+                    f"({html_lib.escape(str(conformal_reason))})")
     html = (f"<div class=\"card\"><table class=\"ut\"><thead><tr><th>property</th><th>{engine_label.lower()}</th>"
             "<th>95% Split-Conformal Interval</th><th>Certification Tolerance</th>"
             + "".join(f"<th>{n}</th>" for n in extras)
             + "</tr></thead><tbody>" + "".join(rows)
             + f"</tbody></table><div class=\"foot\">{total} certified properties scored through "
-              f"{mill} model layer ({engine_label}).</div></div>")
+              f"{mill} model layer ({engine_label}){cqr_note}.</div></div>")
     st.markdown("".join(line.strip() for line in html.splitlines()), unsafe_allow_html=True)
 
 
@@ -1446,6 +1439,306 @@ def schedule_inputs(mill):
     return st.session_state["schedule"]
 
 
+def _fmt_spec_value(val, step):
+    """Format a schedule value cleanly using its spec step resolution."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return html_lib.escape(str(val))
+    if not np.isfinite(v):
+        return "—"
+    if step < 0.001:
+        return f"{v:.4f}"
+    if step < 0.01:
+        return f"{v:.3f}"
+    if step < 1.0:
+        return f"{v:.2f}"
+    return f"{v:.0f}"
+
+
+def build_mill_setup_card_html(mill, raw, preds, ind, engine="Champion GBDT (Recommended)"):
+    """Build a standalone, print-ready HTML Mill Setup Card for the active schedule."""
+    raw = raw or {}
+    preds = preds or {}
+    ind = ind or physical(raw, mill)
+
+    ar3_val = ind.get("ar3") if isinstance(ind, dict) else None
+    cqr_mult, cqr_reason = explainer.adaptive_conformal_multiplier(mill, raw, ar3=ar3_val)
+    warnings, notices = explainer.check_applicability_domain(mill, raw)
+
+    frt_key = "FM_Finish_Temp" if mill == "Plate" else "Temp_FT_Avg_C"
+    finish = float(raw.get(frt_key, 0.0) or 0.0)
+    ar3_f = float(ar3_val) if ar3_val is not None and np.isfinite(ar3_val) else 0.0
+    frt_margin = finish - ar3_f
+
+    route_title = "Heavy Plate Mill" if mill == "Plate" else "Steckel Coil Mill (HRC)"
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    status_cls = "warn" if warnings else "ok"
+    status_txt = f"EXTRAPOLATION ({len(warnings)} OOD)" if warnings else "IN-DOMAIN SCHEDULE"
+
+    # Rolling & cooling setpoints
+    setpoint_rows = []
+    for group, key, label, unit, _lo, _hi, _default, step in SPECS[mill]:
+        if group == "Chemistry":
+            continue
+        shown_unit = "°C" if unit == "C" else unit
+        val_str = _fmt_spec_value(raw[key], step) if key in raw else "—"
+        setpoint_rows.append(
+            f"<tr><td>{html_lib.escape(group)}</td>"
+            f"<td><b>{html_lib.escape(label)}</b></td>"
+            f"<td class=\"num\">{val_str} <span class=\"u\">{html_lib.escape(shown_unit)}</span></td></tr>"
+        )
+    if mill == "Plate" and "Rolling_Type" in raw:
+        setpoint_rows.append(
+            f"<tr><td>Route</td><td><b>Delivery condition</b></td>"
+            f"<td class=\"num\">{html_lib.escape(str(raw.get('Rolling_Type', 'AR')))}</td></tr>"
+        )
+
+    # Heat chemistry
+    chem_cells = []
+    for group, key, label, unit, _lo, _hi, _default, step in SPECS[mill]:
+        if group != "Chemistry":
+            continue
+        val_str = _fmt_spec_value(raw[key], step) if key in raw else "—"
+        chem_cells.append(
+            f"<div class=\"chem-item\"><span>{html_lib.escape(label)}</span>"
+            f"<b>{val_str}%</b></div>"
+        )
+
+    # Derived physics metrics
+    physics_items = [
+        ("Finishing margin (FRT − Ar3)", f"{frt_margin:+.1f} K", f"Ar3 {ar3_f:.1f} °C"),
+        ("Andrews Ar1", f"{float(ind.get('ar1', 0.0)):.1f} °C", "equilibrium lower"),
+        ("Pickering σ<sub>ss</sub>", f"{float(ind.get('sigma_ss', 0.0)):.1f} MPa", "solid solution"),
+        ("CE<sub>IIW</sub>", f"{float(ind.get('ce_iiw', 0.0)):.3f}", "weldability index"),
+        ("P<sub>cm</sub>", f"{float(ind.get('pcm', 0.0)):.3f}", "cold-cracking index"),
+        ("True strain (ε)", f"{float(ind.get('true_strain', 0.0)):.2f}", "log thickness ratio"),
+        ("Cooling rate proxy", f"{float(ind.get('cooling_rate', 0.0)):.2f}", "route proxy"),
+    ]
+    physics_html = "".join(
+        f"<div class=\"phys-item\"><span>{lbl}</span><b>{val}</b><em>{sub}</em></div>"
+        for lbl, val, sub in physics_items
+    )
+
+    # Certified property predictions
+    prop_rows = []
+    for group, keys in TARGET_GROUPS[mill]:
+        group_rows = []
+        for key in keys:
+            res = preds.get(key)
+            if not res or not np.isfinite(res.get("pred", np.nan)):
+                continue
+            label, unit = TARGET_LABEL[mill].get(key, (res.get("name", key), res.get("unit", "")))
+            tol = ml.TARGET_CONFIG.get(mill, {}).get(key, {}).get("tol", 0.0)
+            ci_lo, ci_hi = _scaled_interval(res, key, cqr_mult)
+            fam = html_lib.escape(str(res.get("family", "") or ""))
+            fam_tag = f"<span class=\"tag\">{fam}</span>" if fam else ""
+            note = res.get("note", "")
+            note_html = f"<div class=\"subnote\">{html_lib.escape(str(note))}</div>" if note else ""
+            group_rows.append(
+                f"<tr><td>{html_lib.escape(label)} {fam_tag}{note_html}</td>"
+                f"<td class=\"num\"><b>{float(res['pred']):.1f}</b> <span class=\"u\">{html_lib.escape(unit)}</span></td>"
+                f"<td class=\"num\">{ci_lo:.1f} – {ci_hi:.1f} <span class=\"u\">{html_lib.escape(unit)}</span></td>"
+                f"<td class=\"num\">±{tol:g} {html_lib.escape(unit)}</td></tr>"
+            )
+        if group_rows:
+            prop_rows.append(f"<tr class=\"grp\"><td colspan=\"4\">{html_lib.escape(group)}</td></tr>")
+            prop_rows.extend(group_rows)
+
+    warn_block = ""
+    if warnings:
+        items = "".join(
+            f"<li><code>{html_lib.escape(str(w['param']))}</code> = {float(w['val']):.3g} "
+            f"({html_lib.escape(str(w['direction']))}, bound {float(w['bound']):.3g})</li>"
+            for w in warnings
+        )
+        warn_block = f"<div class=\"alert warn\"><b>Extrapolation warnings (P01–P99):</b><ul>{items}</ul></div>"
+
+    notice_block = ""
+    if notices:
+        items = "".join(f"<li>{html_lib.escape(str(n).replace('**', ''))}</li>" for n in notices)
+        notice_block = f"<div class=\"alert info\"><b>Domain notices:</b><ul>{items}</ul></div>"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mill Setup Card — {html_lib.escape(route_title)}</title>
+<style>
+  @page {{ size: A4; margin: 12mm; }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #0b0d10; background: #fff; margin: 0; padding: 24px; line-height: 1.45; }}
+  .wrap {{ max-width: 920px; margin: 0 auto; }}
+  .hdr {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #0b0d10; padding-bottom: 12px; margin-bottom: 16px; }}
+  .kicker {{ font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: {ACCENT}; font-weight: 700; }}
+  h1 {{ margin: 4px 0; font-size: 22px; letter-spacing: -.02em; }}
+  .meta {{ font-size: 12px; color: #4b5563; }}
+  .pill {{ display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 4px 10px; border-radius: 4px; }}
+  .pill.ok {{ background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }}
+  .pill.warn {{ background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }}
+  .print-btn {{ margin-top: 8px; font-size: 12px; padding: 5px 12px; border: 1px solid #d1d5db; border-radius: 4px; background: #f9fafb; cursor: pointer; }}
+  .sec {{ font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #4b5563; font-weight: 700; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px; margin: 18px 0 10px; }}
+  .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 12.5px; }}
+  th {{ font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: #6b7280; text-align: left; padding: 6px; border-bottom: 1px solid #e5e7eb; background: #fafbfc; }}
+  th.num, td.num {{ text-align: right; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }}
+  td {{ padding: 5px 6px; border-bottom: 1px solid #f1f2f4; vertical-align: middle; }}
+  tr.grp td {{ font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: {ACCENT}; font-weight: 700; padding-top: 10px; background: #fff; border-bottom: 1px solid #e5e7eb; }}
+  .u {{ color: #6b7280; font-size: 11px; font-weight: 400; }}
+  .tag {{ display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; padding: 1px 5px; border: 1px solid #e5e7eb; border-radius: 3px; color: #4b5563; margin-left: 4px; }}
+  .subnote {{ font-size: 11px; color: #6b7280; }}
+  .chem-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }}
+  .chem-item, .phys-item {{ border: 1px solid #e5e7eb; border-radius: 4px; padding: 6px 8px; background: #fafbfc; }}
+  .chem-item span, .phys-item span {{ display: block; font-size: 10.5px; color: #6b7280; text-transform: uppercase; letter-spacing: .05em; }}
+  .chem-item b, .phys-item b {{ font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; color: #0b0d10; }}
+  .phys-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }}
+  .phys-item em {{ display: block; font-style: normal; font-size: 10.5px; color: #6b7280; }}
+  .cqr-note {{ margin-top: 10px; padding: 8px 12px; border-left: 3px solid {ACCENT}; background: #f8fafc; font-size: 12.5px; }}
+  .alert {{ margin-top: 10px; padding: 8px 12px; border-radius: 4px; font-size: 12px; }}
+  .alert.warn {{ background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }}
+  .alert.info {{ background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }}
+  .alert ul {{ margin: 4px 0 0 16px; padding: 0; }}
+  .foot {{ margin-top: 16px; padding-top: 8px; border-top: 1px solid #e5e7eb; font-size: 11px; color: #6b7280; }}
+  @media print {{
+    body {{ padding: 0; }}
+    .no-print {{ display: none !important; }}
+    .card-block {{ break-inside: avoid; }}
+  }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hdr">
+    <div>
+      <div class="kicker">Mill Setup &amp; Certification Card</div>
+      <h1>{html_lib.escape(route_title)} ({html_lib.escape(mill)})</h1>
+      <div class="meta">Scoring engine: <b>{html_lib.escape(str(engine))}</b> &middot; Generated {html_lib.escape(stamp)}</div>
+    </div>
+    <div style="text-align:right;">
+      <span class="pill {status_cls}">{html_lib.escape(status_txt)}</span><br>
+      <button class="print-btn no-print" onclick="window.print()">Print / Save PDF</button>
+    </div>
+  </div>
+
+  <div class="grid-2 card-block">
+    <div>
+      <div class="sec">Rolling &amp; Cooling Setpoints</div>
+      <table>
+        <thead><tr><th>Stage</th><th>Parameter</th><th class="num">Setpoint</th></tr></thead>
+        <tbody>{''.join(setpoint_rows)}</tbody>
+      </table>
+    </div>
+    <div>
+      <div class="sec">Heat Chemistry (wt%)</div>
+      <div class="chem-grid">{''.join(chem_cells)}</div>
+    </div>
+  </div>
+
+  <div class="card-block">
+    <div class="sec">Derived Physics Metrics</div>
+    <div class="phys-grid">{physics_html}</div>
+  </div>
+
+  <div class="card-block">
+    <div class="sec">Certified Property Predictions &amp; Adaptive 95% Conformal Intervals</div>
+    <table>
+      <thead><tr><th>Property</th><th class="num">Predicted</th><th class="num">95% Conformal Interval</th><th class="num">Cert. Tolerance</th></tr></thead>
+      <tbody>{''.join(prop_rows)}</tbody>
+    </table>
+    <div class="cqr-note">
+      <b>Adaptive Conformal Multiplier (CQR): {cqr_mult:.2f}&times;</b> &mdash; {html_lib.escape(cqr_reason)}.
+      Nominal split-conformal half-widths are scaled by this factor to reflect local domain density and Ar<sub>3</sub> proximity.
+    </div>
+    {warn_block}
+    {notice_block}
+  </div>
+
+  <div class="foot">Build: {html_lib.escape(BUILD)}</div>
+</div>
+</body>
+</html>"""
+
+
+def _schedule_compare_rows(mill, raw, preds, ind, baseline):
+    """Build comparison rows (Schedule B current vs Schedule A pinned baseline)."""
+    b_raw = baseline.get("raw") or {}
+    b_preds = baseline.get("preds") or {}
+    b_ind = baseline.get("ind") or {}
+
+    frt_key = "FM_Finish_Temp" if mill == "Plate" else "Temp_FT_Avg_C"
+    cur_margin = float(raw.get(frt_key, 0.0)) - float(ind.get("ar3", 0.0))
+    base_margin = float(b_raw.get(frt_key, 0.0)) - float(b_ind.get("ar3", 0.0))
+
+    specs = [
+        ("YS_BN", "Yield strength (YS_BN)", "MPa", ".1f",
+         preds.get("YS_BN", {}).get("pred", np.nan), b_preds.get("YS_BN", {}).get("pred", np.nan)),
+        ("TS_BN", "Tensile strength (TS_BN)", "MPa", ".1f",
+         preds.get("TS_BN", {}).get("pred", np.nan), b_preds.get("TS_BN", {}).get("pred", np.nan)),
+        ("EL_BN", "Elongation (EL_BN)", "%", ".1f",
+         preds.get("EL_BN", {}).get("pred", np.nan), b_preds.get("EL_BN", {}).get("pred", np.nan)),
+        ("CE_IIW", "Carbon equivalent (CE_IIW)", "", ".3f",
+         ind.get("ce_iiw", np.nan), b_ind.get("ce_iiw", np.nan)),
+        ("FRT_Ar3", "Finishing margin (FRT − Ar3)", "K", ".1f",
+         cur_margin, base_margin),
+    ]
+    rows = []
+    for key, label, unit, fmt, cur_val, base_val in specs:
+        cur_f = float(cur_val) if cur_val is not None else np.nan
+        base_f = float(base_val) if base_val is not None else np.nan
+        delta = cur_f - base_f if (np.isfinite(cur_f) and np.isfinite(base_f)) else np.nan
+        rows.append({
+            "key": key, "label": label, "unit": unit, "fmt": fmt,
+            "baseline": base_f, "current": cur_f, "delta": delta,
+        })
+    return rows
+
+
+def _render_schedule_compare_card(mill, raw, preds, ind, baseline):
+    """Render the Schedule Compare (Current vs. Pinned Baseline) comparison card."""
+    rows = _schedule_compare_rows(mill, raw, preds, ind, baseline)
+    tr_html = []
+    for r in rows:
+        fmt = r["fmt"]
+        unit = f'<span class="unit">{r["unit"]}</span>' if r["unit"] else ""
+        base_s = f"{r['baseline']:{fmt}}{unit}" if np.isfinite(r["baseline"]) else "—"
+        cur_s = f"{r['current']:{fmt}}{unit}" if np.isfinite(r["current"]) else "—"
+        if np.isfinite(r["delta"]):
+            sign = "+" if r["delta"] > 0 else ""
+            d_color = ACCENT if abs(r["delta"]) > 1e-6 else MUTED
+            delta_s = f'<span style="color:{d_color}; font-weight:600;">{sign}{r["delta"]:{fmt}}{unit}</span>'
+        else:
+            delta_s = "—"
+        tr_html.append(
+            f'<tr><td class="name">{r["label"]}</td>'
+            f'<td class="rng">{base_s}</td>'
+            f'<td class="val">{cur_s}</td>'
+            f'<td class="val">{delta_s}</td></tr>'
+        )
+    b_raw = baseline.get("raw") or {}
+    diffs = []
+    for _grp, key, lbl, _u, _lo, _hi, _d, step in SPECS[mill]:
+        if key in raw and key in b_raw:
+            try:
+                if abs(float(raw[key]) - float(b_raw[key])) > max(1e-9, step * 0.05):
+                    diffs.append(f"{lbl}: {_fmt_spec_value(b_raw[key], step)} → {_fmt_spec_value(raw[key], step)}")
+            except (TypeError, ValueError):
+                continue
+    diff_note = " · Changed inputs: " + ", ".join(diffs[:5]) + ("…" if len(diffs) > 5 else "") if diffs else " · Identical inputs to Schedule A."
+    pinned_at = html_lib.escape(str(baseline.get("pinned_at", "")))
+    pinned_eng = html_lib.escape(str(baseline.get("engine", "")))
+
+    section("Schedule Compare (Current vs. Pinned Baseline)")
+    card_html = (
+        '<div class="card"><table class="ut">'
+        '<thead><tr><th>Metric</th><th>Schedule A (Baseline)</th>'
+        '<th>Schedule B (Current)</th><th>Delta (Current − Baseline)</th></tr></thead>'
+        f'<tbody>{"".join(tr_html)}</tbody></table>'
+        f'<div class="foot">Pinned at {pinned_at} ({pinned_eng}){html_lib.escape(diff_note)}</div></div>'
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
+
+
 # ----------------------------------------------------------------------------- sections
 def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
     # Applicability Domain Monitoring
@@ -1458,6 +1751,9 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
 
     section("predicted properties")
     preds = predict_selected_engine(mill, raw, engine)
+    ind = physical(raw, mill)
+    cqr_mult, cqr_reason = explainer.adaptive_conformal_multiplier(mill, raw, ar3=ind["ar3"])
+
     options = []
     if linear_families(mill):
         options += ["OLS", "Ridge"]
@@ -1483,7 +1779,8 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
         else:
             key = {"XGBoost": "xgb", "LightGBM": "lgbm", "CatBoost": "cat"}[family]
             extras[family] = predict_boosted(mill, raw, key)
-    targets_table(mill, preds, extras, engine_label=engine)
+    targets_table(mill, preds, extras, engine_label=engine,
+                  conformal_mult=cqr_mult, conformal_reason=cqr_reason)
     if extras:
         parts = []
         for f in extras:
@@ -1502,7 +1799,40 @@ def view_simulator(mill, raw, engine="Champion GBDT (Recommended)"):
             for key, why in broken.items():
                 st.code(f"{key}: {why[:400]}", language="text")
 
-    ind = physical(raw, mill)
+    # Schedule A vs. B Pinning & Printable Mill Setup Card toolbar
+    st.markdown('<div class="breath"></div>', unsafe_allow_html=True)
+    pin_key = f"pinned_baseline_{mill}"
+    has_pin = pin_key in st.session_state
+    tb_cols = st.columns([1.45, 1.05, 1.75, 1.75] if has_pin else [1.45, 1.75, 2.80])
+    if tb_cols[0].button("Pin as Baseline (Schedule A)", key=f"pin_base_{mill}", use_container_width=True):
+        st.session_state[pin_key] = {
+            "raw": dict(raw),
+            "preds": {k: dict(v) for k, v in preds.items()},
+            "ind": dict(ind),
+            "engine": engine,
+            "pinned_at": datetime.now().strftime("%H:%M:%S"),
+        }
+    if has_pin:
+        if tb_cols[1].button("Clear baseline", key=f"clear_base_{mill}", use_container_width=True):
+            st.session_state.pop(pin_key, None)
+        dl_col = tb_cols[2]
+    else:
+        dl_col = tb_cols[1]
+    setup_html = build_mill_setup_card_html(mill, raw, preds, ind, engine)
+    dl_col.download_button(
+        "Download Mill Setup Card (.html)",
+        data=setup_html.encode("utf-8"),
+        file_name=f"{mill.lower()}_mill_setup_card.html",
+        mime="text/html",
+        key=f"dl_setup_card_{mill}",
+        use_container_width=True,
+    )
+
+    pinned = st.session_state.get(pin_key)
+    if pinned:
+        st.markdown('<div class="breath"></div>', unsafe_allow_html=True)
+        _render_schedule_compare_card(mill, raw, preds, ind, pinned)
+
     finish = raw.get("FM_Finish_Temp", raw.get("Temp_FT_Avg_C", 0.0))
     margin = finish - ind["ar3"]
     st.markdown('<div class="break"></div>', unsafe_allow_html=True)
@@ -2126,9 +2456,34 @@ def capability_resample(mill, raw, target, lsl, usl, samples, bands,
 
     rng = np.random.default_rng(42)
     frame = pd.DataFrame([dict(raw) for _ in range(samples)])
-    for key, band in bands.items():
-        centre = float(raw[key])
-        frame[key] = rng.uniform(centre - band, centre + band, samples)
+    band_items = list(bands.items())
+    if len(band_items) >= 2:
+        # Gaussian copula so co-varying mill temperatures (rho=0.55) and process/chemistry
+        # variables (rho=0.30) drift together while preserving exact uniform [-band, +band] marginals.
+        thermal_keys = {
+            "FM_Temp_Before_Rolling", "FM_Finish_Temp", "ACC_Temp_Post_Laminar",
+            "Temp_Transfer_Bar_C", "Temp_FT_Avg_C", "Temp_CT_Top_C", "Temp_CT_Bot_C",
+        } | {row[1] for row in SPECS.get(mill, ()) if row[3] == "C"}
+        keys = [k for k, _ in band_items]
+        d = len(keys)
+        corr = np.eye(d, dtype=float)
+        for i in range(d):
+            for j in range(i + 1, d):
+                rho = 0.55 if (keys[i] in thermal_keys and keys[j] in thermal_keys) else 0.30
+                corr[i, j] = rho
+                corr[j, i] = rho
+        chol = np.linalg.cholesky(corr)
+        z = rng.standard_normal((samples, d)) @ chol.T
+        erf_vec = np.frompyfunc(math.erf, 1, 1)
+        u = 0.5 * (1.0 + erf_vec(z / math.sqrt(2.0)).astype(float))
+        u = np.clip(u, 0.0, 1.0)
+        for idx, (key, band) in enumerate(band_items):
+            centre = float(raw[key])
+            frame[key] = centre + (2.0 * u[:, idx] - 1.0) * band
+    else:
+        for key, band in band_items:
+            centre = float(raw[key])
+            frame[key] = rng.uniform(centre - band, centre + band, samples)
     scored_frame = score_frame(mill, frame, engine=engine)
     if target not in scored_frame.columns:
         return dict(blank, error=f"{label} cannot be scored with the {engine} engine "

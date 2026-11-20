@@ -72,6 +72,9 @@ image = (
 )
 
 
+_WARMED = False
+
+
 def _enter_repo():
     """Make the shipped app importable and the repository the working directory.
 
@@ -85,6 +88,22 @@ def _enter_repo():
             sys.path.insert(0, path)
     if os.path.isdir(REMOTE_REPO):
         os.chdir(REMOTE_REPO)
+    else:
+        for path in (REPO_ROOT, os.path.join(REPO_ROOT, "app")):
+            if os.path.isdir(path) and path not in sys.path:
+                sys.path.insert(0, path)
+
+
+def _warm_models():
+    """Pre-load boosted metadata for both routes once per container process (idempotent)."""
+    global _WARMED
+    if _WARMED:
+        return
+    import streamlit_app  # noqa: PLC0415 - resolved after _enter_repo puts app/ on sys.path
+
+    streamlit_app.boosted_index("Plate")
+    streamlit_app.boosted_index("HRC")
+    _WARMED = True
 
 
 # cpu / memory / timeout as documented in the repo plan; the idle window before a container
@@ -96,6 +115,7 @@ def recipe_search(mill, raw, thickness, requirements, chemistries, entry_range,
                   k=1.0):
     """The inverse-optimizer recipe search, running the local selection math verbatim."""
     _enter_repo()
+    _warm_models()
     import optimizer  # noqa: PLC0415 - imported after sys.path is set up
 
     return optimizer.run_recipe_search(
@@ -109,6 +129,7 @@ def pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range
                     k=1.0, step=10.0, max_points=40):
     """The non-dominated recipe frontier, running the local frontier math verbatim."""
     _enter_repo()
+    _warm_models()
     import optimizer  # noqa: PLC0415 - imported after sys.path is set up
 
     return optimizer.pareto_frontier(
@@ -123,6 +144,7 @@ def robust_recipe(mill, raw, thickness, requirements, chemistries, entry_range,
                   k=1.0, step=10.0, alpha=0.10, n_samples=200, seed=42, n_candidates=40):
     """The robust (Monte-Carlo CVaR) recipe, running the local study math verbatim."""
     _enter_repo()
+    _warm_models()
     import optimizer  # noqa: PLC0415 - imported after sys.path is set up
 
     return optimizer.robust_recipe(
@@ -144,6 +166,7 @@ def score_batch(mill, payload, engine="Champion GBDT (Recommended)"):
     import pandas as pd
 
     _enter_repo()
+    _warm_models()
     from streamlit_app import score_frame  # noqa: PLC0415
 
     frame = pd.read_parquet(io.BytesIO(payload))
@@ -154,6 +177,7 @@ def score_batch(mill, payload, engine="Champion GBDT (Recommended)"):
 def capability(payload):
     """The Monte-Carlo capability study, through the same pure helper the local path uses."""
     _enter_repo()
+    _warm_models()
     from streamlit_app import capability_resample  # noqa: PLC0415
 
     return capability_resample(

@@ -605,3 +605,209 @@ def test_view_optimizer_renders_template_count_caption_when_enabled(monkeypatch)
     opt.view_optimizer("Plate", raw, "Champion GBDT (Recommended)", spec_rows=None)
     assert any("templates pass" in s for s in seen), seen
     assert any(re.search(r"templates pass: \d+ of \d+$", s) for s in seen), seen
+
+
+# ----------------------------------------------------------- chemistry pre-filter
+def test_prefilter_chemistries_drops_ceiling_violators():
+    """prefilter_chemistries_for_reqs filters deterministic ce_iiw, pcm, Chem_S, Chem_P ceilings."""
+    ok = dict(_chem(c=0.10, mn=1.00, si=0.20), Chem_S=0.005, Chem_P=0.012)      # CE=0.267, Pcm=0.157
+    hi_ce = dict(_chem(c=0.22, mn=1.50, si=0.20), Chem_S=0.005, Chem_P=0.012)   # CE=0.470
+    hi_pcm = dict(_chem(c=0.16, mn=1.20, si=0.30, v=0.08), Chem_S=0.005, Chem_P=0.012)  # CE=0.376, Pcm=0.238
+    hi_s = dict(_chem(c=0.10, mn=1.00, si=0.20), Chem_S=0.030, Chem_P=0.012)
+    hi_p = dict(_chem(c=0.10, mn=1.00, si=0.20), Chem_S=0.005, Chem_P=0.035)
+    chems = [("OK", ok), ("HI_CE", hi_ce), ("HI_PCM", hi_pcm), ("HI_S", hi_s), ("HI_P", hi_p)]
+
+    reqs = [
+        _req("YS_BN", "min", 345.0, 20.0, kind="mech"),
+        {"key": "ce_iiw", "kind": "chem", "direction": "max", "required": 0.42, "half": 0.0, "label": "CE IIW"},
+        {"key": "pcm", "kind": "chem", "direction": "max", "required": 0.22, "half": 0.0, "label": "Pcm"},
+        {"key": "Chem_S", "kind": "chem", "direction": "max", "required": 0.015, "half": 0.0, "label": "Sulfur (S)"},
+        {"key": "Chem_P", "kind": "chem", "direction": "max", "required": 0.025, "half": 0.0, "label": "Phosphorus (P)"},
+    ]
+    kept = opt.prefilter_chemistries_for_reqs(chems, reqs)
+    assert [name for name, _ in kept] == ["OK"]
+
+    # Mechanical-only requirements keep all chemistries unchanged.
+    assert opt.prefilter_chemistries_for_reqs(chems, [_req("YS_BN", "min", 345.0, 20.0)]) == chems
+
+    # Single chemistry is never filtered out even if it violates a ceiling.
+    single = [("HI_CE", hi_ce)]
+    assert opt.prefilter_chemistries_for_reqs(single, reqs) == single
+
+
+def test_prefilter_chemistries_keeps_original_when_all_violate_and_reports_reason(monkeypatch):
+    """If every chemistry violates a deterministic ceiling, keep all so _rejected_band_notes names it."""
+    chems = [
+        ("A", dict(_chem(c=0.20, mn=1.50), Chem_S=0.005, Chem_P=0.015)),  # CE = 0.45
+        ("B", dict(_chem(c=0.22, mn=1.50), Chem_S=0.005, Chem_P=0.015)),  # CE = 0.47
+    ]
+    reqs = [
+        _req("YS_BN", "min", 250.0, 20.0, kind="mech"),
+        {"key": "ce_iiw", "kind": "chem", "direction": "max", "required": 0.35, "half": 0.0,
+         "label": "Carbon Equivalent (CE IIW)"},
+    ]
+    kept = opt.prefilter_chemistries_for_reqs(chems, reqs)
+    assert kept == chems
+
+    # End-to-end with mocked score_targets: rejection notes still report the CE ceiling violation.
+    monkeypatch.setattr(opt, "score_targets", lambda mill, X, targets: {
+        t: np.full(len(X), 420.0, dtype=float) for t in targets
+    })
+    res = opt.run_recipe_search(
+        "Plate", {"Rolling_Type": "AR"}, 16.0, reqs, chems,
+        (940.0, 960.0), (820.0, 840.0), cooling="air", k=1.0, step=20.0)
+    assert res["chosen"] is None
+    assert res["n_evaluated"] == 2 * 2 * 2
+    assert any("Carbon Equivalent" in note and "exceeds" in note for note in res["rejected"]), res["rejected"]
+
+
+# ----------------------------------------------------------- correlated thermal copula
+def test_perturbation_draws_correlated_thermal_copula_preserves_bounds_and_seed():
+    """_perturbation_draws couples entry and finish (rho=0.65) with exact uniform [-20, 20] bounds."""
+    pool = pd.DataFrame([{
+        "FM_Temp_Before_Rolling": 960.0,
+        "FM_Finish_Temp": 840.0,
+        "ACC_Headers_n": 4.0,
+        "ACC_Laminar_Header": 4.0,
+        "Plate_T_mm": 16.0,
+        "_chemistry": "",
+        "Chem_C": 0.16,
+        "Chem_Mn": 1.20,
+    }])
+
+    frame1, ids1, desc1 = opt._perturbation_draws(
+        "Plate", pool, 16.0, n_samples=2000, seed=42, cooling="laminar", headers_range=(4, 8))
+    frame2, ids2, desc2 = opt._perturbation_draws(
+        "Plate", pool, 16.0, n_samples=2000, seed=42, cooling="laminar", headers_range=(4, 8))
+    frame3, _ids3, _desc3 = opt._perturbation_draws(
+        "Plate", pool, 16.0, n_samples=2000, seed=99, cooling="laminar", headers_range=(4, 8))
+
+    assert len(frame1) == 2000 and len(ids1) == 2000
+    pd.testing.assert_frame_equal(frame1, frame2)
+    assert np.array_equal(ids1, ids2)
+    assert desc1 == desc2
+    assert not np.allclose(frame1["FM_Temp_Before_Rolling"], frame3["FM_Temp_Before_Rolling"])
+
+    d_entry = frame1["FM_Temp_Before_Rolling"].to_numpy(dtype=float) - 960.0
+    d_finish = frame1["FM_Finish_Temp"].to_numpy(dtype=float) - 840.0
+    assert np.all(d_entry >= -opt.ENTRY_AIM_C - 1e-9)
+    assert np.all(d_entry <= opt.ENTRY_AIM_C + 1e-9)
+    assert np.all(d_finish >= -opt.FINISH_AIM_C - 1e-9)
+    assert np.all(d_finish <= opt.FINISH_AIM_C + 1e-9)
+    assert abs(float(np.mean(d_entry))) < 1.5
+    assert abs(float(np.mean(d_finish))) < 1.5
+    assert float(np.min(d_entry)) < -18.0 and float(np.max(d_entry)) > 18.0
+
+    # Gaussian copula with rho=0.65 yields Pearson correlation ~(6/pi)*arcsin(0.65/2) ≈ 0.632 on uniform marginals.
+    corr = float(np.corrcoef(d_entry, d_finish)[0, 1])
+    assert 0.50 < corr < 0.78, f"unexpected thermal carry-over correlation: {corr:.4f}"
+
+    assert "entry ±20 °C" in desc1
+    assert "correlated thermal copula (ρ=0.65)" in desc1
+
+
+# ----------------------------------------------------------- ladle-in-hand order triage
+def test_triage_specs_for_heat_plate_and_hrc_smoke_and_sorting(boosted_models):
+    """Real-model ladle triage ranks certifiable matching specs descending by worst margin."""
+    import spec_checker as sc
+
+    if not sc.spec_available():
+        pytest.skip("specification workbook missing")
+
+    plate_raw = {
+        "Plate_T_mm": 16.0, "Plate_W_mm": 1889.0, "Slab_T_mm": 218.0, "TB_Thickness_mm": 41.0,
+        "Chem_C": 0.177, "Chem_Mn": 0.613, "Chem_Si": 0.151, "Chem_P": 0.0121, "Chem_S": 0.005,
+        "Chem_Al": 0.03, "Chem_Nb": 0.002, "Chem_V": 0.0039, "Chem_Ti": 0.002, "Chem_Cu": 0.0175,
+        "Chem_Ni": 0.02, "Chem_Cr": 0.043, "Chem_Mo": 0.01, "Chem_N": 0.0042,
+    }
+    res_plate = opt.triage_specs_for_heat("Plate", plate_raw, thickness=16.0, k=1.0, max_specs=10, step=40.0)
+    assert res_plate, "expected certifiable Plate specs for default ladle chemistry"
+    assert len(res_plate) <= 10
+    expected_keys = {"spec", "grade", "supply_condition", "best_entry", "best_finish",
+                     "best_cooling", "min_margin_interval", "ce_iiw", "verdict"}
+    for row in res_plate:
+        assert set(row) >= expected_keys
+        assert row["min_margin_interval"] >= 1.0 - 1e-9
+        assert row["verdict"] == "CERTIFIABLE"
+    margins = [r["min_margin_interval"] for r in res_plate]
+    assert margins == sorted(margins, reverse=True)
+
+    hrc_raw = {
+        "Coil_T_mm": 6.0, "Coil_W_mm": 1200.0, "TB_Thick_mm": 24.8,
+        "Chem_C": 0.176, "Chem_Mn": 0.581, "Chem_Si": 0.127, "Chem_P": 0.015, "Chem_S": 0.005,
+        "Chem_Al": 0.036, "Chem_Nb": 0.001, "Chem_V": 0.004, "Chem_Ti": 0.002, "Chem_Cu": 0.02,
+        "Chem_Ni": 0.02, "Chem_Cr": 0.03, "Chem_Mo": 0.005, "Chem_N": 0.004, "Chem_B": 0.0,
+    }
+    res_hrc = opt.triage_specs_for_heat("HRC", hrc_raw, thickness=6.0, k=1.0, max_specs=10, step=40.0)
+    assert res_hrc, "expected certifiable HRC specs for default ladle chemistry"
+    assert all(r["best_cooling"].startswith("CT ") for r in res_hrc)
+    hrc_margins = [r["min_margin_interval"] for r in res_hrc]
+    assert hrc_margins == sorted(hrc_margins, reverse=True)
+
+
+def test_triage_specs_for_heat_filters_thickness_chemistry_and_k(monkeypatch):
+    """triage_specs_for_heat enforces thickness bounds, locked chemistry limits, k, and max_specs."""
+    import spec_checker as sc
+
+    mock_specs = pd.DataFrame([
+        {"SPEC": "SPEC_EASY", "GRADE": "A", "SUPPLY CONDITION": "AR",
+         "THICK MIN (mm)": 0.0, "THICK MAX (mm)": 25.0,
+         "YS min (TR) [N/mm2]": 250.0, "TS min (TR) [N/mm2]": 400.0,
+         "C Max [%]": 0.25, "S Max [%]": 0.03, "CE Max [%]": 0.45},
+        {"SPEC": "SPEC_MED", "GRADE": "B", "SUPPLY CONDITION": "TMCP",
+         "THICK MIN (mm)": 0.0, "THICK MAX (mm)": 25.0,
+         "YS min (TR) [N/mm2]": 330.0, "TS min (TR) [N/mm2]": 430.0,
+         "C Max [%]": 0.25, "S Max [%]": 0.03, "CE Max [%]": 0.45},
+        {"SPEC": "SPEC_LOW_C", "GRADE": "C", "SUPPLY CONDITION": "AR",
+         "THICK MIN (mm)": 0.0, "THICK MAX (mm)": 25.0,
+         "YS min (TR) [N/mm2]": 220.0, "TS min (TR) [N/mm2]": 350.0,
+         "C Max [%]": 0.10, "S Max [%]": 0.03, "CE Max [%]": 0.45},
+        {"SPEC": "SPEC_THICK_ONLY", "GRADE": "D", "SUPPLY CONDITION": "AR",
+         "THICK MIN (mm)": 30.0, "THICK MAX (mm)": 60.0,
+         "YS min (TR) [N/mm2]": 220.0, "TS min (TR) [N/mm2]": 350.0,
+         "C Max [%]": 0.25, "S Max [%]": 0.03, "CE Max [%]": 0.45},
+    ])
+    monkeypatch.setattr(sc, "load_specifications", lambda: mock_specs)
+    monkeypatch.setattr(opt, "interval_half_widths",
+                        lambda mill, keys: {key: 20.0 for key in keys})
+    monkeypatch.setattr(opt, "score_targets", lambda mill, X, targets: {
+        key: np.full(len(X), 360.0 if key.startswith("YS") else (460.0 if key.startswith("TS") else 25.0))
+        for key in targets
+    })
+
+    raw = dict(_chem(c=0.16, mn=1.20), Chem_S=0.005, Chem_P=0.015, Plate_T_mm=16.0)
+    res_k1 = opt.triage_specs_for_heat("Plate", raw, thickness=16.0, k=1.0, max_specs=20, step=40.0)
+    assert [r["spec"] for r in res_k1] == ["SPEC_EASY", "SPEC_MED"]
+    assert res_k1[0]["min_margin_interval"] == pytest.approx(3.0)
+    assert res_k1[1]["min_margin_interval"] == pytest.approx(1.5)
+
+    res_k2 = opt.triage_specs_for_heat("Plate", raw, thickness=16.0, k=2.0, max_specs=20, step=40.0)
+    assert [r["spec"] for r in res_k2] == ["SPEC_EASY"]
+
+    res_cap = opt.triage_specs_for_heat("Plate", raw, thickness=16.0, k=1.0, max_specs=1, step=40.0)
+    assert len(res_cap) == 1 and res_cap[0]["spec"] == "SPEC_EASY"
+
+
+def test_view_optimizer_triage_expander_renders_without_checkbox(monkeypatch):
+    """The ladle triage expander uses no st.checkbox and does not scan on passive render."""
+    import streamlit as st
+
+    raw = {"Plate_T_mm": 16.0, "Chem_C": 0.15, "Chem_Mn": 1.0, "Chem_Si": 0.20}
+    for key in [k for k in list(st.session_state.keys()) if str(k).startswith("opt_")]:
+        del st.session_state[key]
+
+    checkbox_calls = []
+    real_checkbox = st.checkbox
+    def track_checkbox(*a, **k):
+        checkbox_calls.append(k.get("key") or (a[0] if a else ""))
+        return real_checkbox(*a, **k)
+
+    triage_calls = []
+    monkeypatch.setattr(st, "checkbox", track_checkbox)
+    monkeypatch.setattr(opt, "triage_specs_for_heat", lambda *a, **k: triage_calls.append((a, k)) or [])
+    opt.view_optimizer("Plate", raw, "Champion GBDT (Recommended)", spec_rows=None)
+
+    assert len(checkbox_calls) <= 1  # only the auto-search chemistry gate inside the form
+    assert not any("triage" in str(c).lower() for c in checkbox_calls)
+    assert triage_calls == []
+

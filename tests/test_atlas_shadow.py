@@ -215,6 +215,177 @@ def test_calibration_groups_by_grade_with_per_grade_medians():
     assert set(with_blank["by_grade"]) == {"A", "B"}
 
 
+def test_residual_summary_ewma_and_cusum_drift_metrics():
+    import json
+
+    # Constant sequence: EWMA equals the constant value, bias triggers drift alert.
+    const = remote_jobs.residual_summary(np.array([5.0, 5.0, 5.0]))
+    assert const["ewma"] == pytest.approx(5.0)
+    assert const["drift_alert"] is True
+    assert const["drift_status"] == "DRIFT_ALERT"
+
+    # Single zero observation: stable with zero EWMA and zero CUSUM.
+    zero = remote_jobs.residual_summary(np.array([0.0]))
+    assert zero["ewma"] == pytest.approx(0.0)
+    assert zero["cusum_max"] == pytest.approx(0.0)
+    assert zero["drift_alert"] is False
+    assert zero["drift_status"] == "STABLE"
+
+    # Known sequence [1, 2, 3, 4, 10] (lambda = 0.25) with non-finite filtering.
+    clean = np.array([1.0, 2.0, 3.0, 4.0, 10.0])
+    expected_ewma = float(pd.Series(clean).ewm(alpha=0.25).mean().iloc[-1])
+    seq = remote_jobs.residual_summary(np.array([1.0, np.nan, 2.0, np.inf, 3.0, 4.0, 10.0]))
+    assert seq["ewma"] == pytest.approx(expected_ewma)
+    assert seq["cusum_max"] > 4.0
+    assert seq["drift_alert"] is True
+    assert seq["drift_status"] == "DRIFT_ALERT"
+    json.dumps(seq)  # must remain JSON-serializable for modal_jobs.update_shadow
+
+    # Order sensitivity: recent jump weighs more heavily in EWMA.
+    late_jump = remote_jobs.residual_summary(np.array([0.0, 0.0, 0.0, 10.0]))
+    early_jump = remote_jobs.residual_summary(np.array([10.0, 0.0, 0.0, 0.0]))
+    assert late_jump["ewma"] > early_jump["ewma"]
+
+    # Centered symmetric vector stays STABLE.
+    balanced = remote_jobs.residual_summary(np.array([-2.0, -1.0, 0.0, 1.0, 2.0]))
+    assert balanced["bias"] == pytest.approx(0.0)
+    assert balanced["cusum_max"] == pytest.approx(1.4)
+    assert balanced["drift_alert"] is False
+    assert balanced["drift_status"] == "STABLE"
+
+    # Step shift where abs(bias) == 0.5 * (p90 - p10) (bias rule alone is False) -> CUSUM catches it.
+    step_shift = remote_jobs.residual_summary(np.array([0.0] * 10 + [1.2] * 10))
+    assert abs(step_shift["bias"]) == pytest.approx(0.5 * (step_shift["p90"] - step_shift["p10"]))
+    assert step_shift["cusum_max"] == pytest.approx(7.0)
+    assert step_shift["drift_alert"] is True
+    assert step_shift["drift_status"] == "DRIFT_ALERT"
+
+    # Downward step shift triggers via negative tabular CUSUM excursion.
+    down_shift = remote_jobs.residual_summary(np.array([0.0] * 8 + [-2.0] * 8))
+    assert down_shift["cusum_max"] > 4.0
+    assert down_shift["drift_alert"] is True
+    assert down_shift["drift_status"] == "DRIFT_ALERT"
+
+
+def test_shadow_table_displays_ewma_drift_and_grade_preview_scope(monkeypatch):
+    import streamlit as st
+
+    calibration = {
+        "TS_BN": remote_jobs.residual_summary(np.array([1.0, 2.0, 3.0, 4.0, 10.0])),
+        "YS_BN": remote_jobs.residual_summary(np.array([-2.0, -1.0, 0.0, 1.0, 2.0])),
+    }
+    table = shadow._calibration_table("HRC", calibration)
+    assert "EWMA" in table.columns
+    assert "Drift status" in table.columns
+    by_key = table.set_index("Key")
+    assert by_key.loc["TS_BN", "EWMA"] == pytest.approx(round(calibration["TS_BN"]["ewma"], 2))
+    assert by_key.loc["TS_BN", "Drift status"] == "DRIFT_ALERT"
+    assert by_key.loc["YS_BN", "EWMA"] == pytest.approx(round(calibration["YS_BN"]["ewma"], 2))
+    assert by_key.loc["YS_BN", "EWMA"] > 0.0
+    assert by_key.loc["YS_BN", "Drift status"] == "STABLE"
+
+    # Legacy stored calibration without ewma/drift_status still renders cleanly.
+    legacy_table = shadow._calibration_table(
+        "HRC", {"TS_BN": {"bias": 1.5, "p10": -1.0, "p90": 4.0, "n": 3}}
+    )
+    assert legacy_table.iloc[0]["EWMA"] is None
+    assert legacy_table.iloc[0]["Drift status"] == "—"
+
+    by_grade = {
+        "B": {"TS_BN": remote_jobs.residual_summary(np.array([12.0, 12.0, 12.0]))},
+        "A": {"TS_BN": remote_jobs.residual_summary(np.array([-4.0, -4.0, -4.0]))},
+    }
+    grade_table = shadow._grade_table("HRC", by_grade)
+    assert "EWMA" in grade_table.columns
+    assert "Drift status" in grade_table.columns
+
+    options = shadow._preview_scope_options(by_grade)
+    assert options == ["Global route bias", "A", "B"]
+
+    global_cal, global_lbl = shadow._resolve_preview_calibration(
+        calibration, by_grade, "Global route bias"
+    )
+    assert global_cal is calibration and global_lbl == "global route"
+
+    grade_cal, grade_lbl = shadow._resolve_preview_calibration(calibration, by_grade, "B")
+    assert grade_cal is by_grade["B"] and grade_lbl == "grade B"
+
+    scored = pd.DataFrame([{"TS_BN": 500.0, "YS_BN": 350.0, "EL_BN": 22.0}])
+    rows = shadow._build_preview_rows(app.TARGET_LABEL["HRC"], scored, grade_cal)
+    ts_row = next(r for r in rows if r["Property"] == app.TARGET_LABEL["HRC"]["TS_BN"][0])
+    assert ts_row["Bias"] == pytest.approx(12.0)
+    assert ts_row["Corrected (display only)"] == pytest.approx(512.0)
+
+    # Render view_shadow with preview enabled and a specific grade chosen.
+    monkeypatch.setattr(app, "score_frame", lambda mill, frame, engine=None: scored)
+    monkeypatch.setattr(st, "checkbox", lambda *a, **kw: True)
+    monkeypatch.setattr(st, "selectbox", lambda label, opts, **kw: "B")
+    _clear_state()
+    st.session_state["shadow_HRC"] = {
+        "result": {
+            "mill": "HRC",
+            "engine": remote_jobs.DEFAULT_ENGINE,
+            "timestamp": "2026-11-20T00:00:00+00:00",
+            "n_rows": 6,
+            "calibration": calibration,
+            "by_grade": by_grade,
+        },
+        "source": "local",
+        "engine": remote_jobs.DEFAULT_ENGINE,
+    }
+    try:
+        shadow.view_shadow("HRC", defaults("HRC"))
+    finally:
+        _clear_state()
+
+
+def test_modal_warm_models_is_idempotent_and_called_after_enter_repo(monkeypatch):
+    pytest.importorskip("modal")
+    import modal_app
+    import modal_jobs
+
+    for filename, mod in (("modal_app.py", modal_app), ("modal_jobs.py", modal_jobs)):
+        path = os.path.join(REPO_ROOT, filename)
+        with open(path, "r", encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        assert hasattr(mod, "_WARMED")
+        assert hasattr(mod, "_warm_models")
+
+        checked_fns = 0
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            stmt_names = [
+                stmt.value.func.id
+                if isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Name)
+                else None
+                for stmt in node.body
+            ]
+            if "_enter_repo" in stmt_names:
+                checked_fns += 1
+                idx = stmt_names.index("_enter_repo")
+                assert idx + 1 < len(stmt_names) and stmt_names[idx + 1] == "_warm_models", (
+                    f"{filename}:{node.name} must call _warm_models() right after _enter_repo()"
+                )
+        assert checked_fns >= 4
+
+        calls = []
+        monkeypatch.setattr(app, "boosted_index", lambda mill: calls.append(mill) or {})
+        monkeypatch.setattr(mod, "_WARMED", False)
+
+        mod._enter_repo()
+        mod._warm_models()
+        mod._warm_models()
+        assert calls == ["Plate", "HRC"]
+        assert mod._WARMED is True
+
+        calls.clear()
+        mod._warm_models()
+        assert calls == []
+
+
 # --------------------------------------------------------------------- 3. remote fallback
 def test_remote_ready_is_false_without_credentials(no_credentials):
     assert remote_jobs.remote_ready(refresh=True) is False

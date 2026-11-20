@@ -104,6 +104,92 @@ def check_applicability_domain(mill: str, raw_inputs: dict) -> tuple[list[dict],
     return warnings, notices
 
 
+def _core_bounds(bounds: dict) -> tuple:
+    """Return the core (lo, hi) envelope for a domain entry.
+
+    Prefers explicit P10-P90 if present; otherwise uses P05-P95 (which models/applicability_domain.json
+    ships, avoiding false tail flags on zero-inflated microalloys); falls back to a 10%-inset P01-P99.
+    """
+    p10, p90 = bounds.get("p10"), bounds.get("p90")
+    if p10 is not None and p90 is not None and np.isfinite(p10) and np.isfinite(p90):
+        return float(p10), float(p90)
+    p05, p95 = bounds.get("p05"), bounds.get("p95")
+    if p05 is not None and p95 is not None and np.isfinite(p05) and np.isfinite(p95):
+        return float(p05), float(p95)
+    p01, p99 = bounds.get("p01"), bounds.get("p99")
+    if p01 is not None and p99 is not None and np.isfinite(p01) and np.isfinite(p99):
+        span = float(p99) - float(p01)
+        return float(p01) + 0.10 * span, float(p99) - 0.10 * span
+    return None, None
+
+
+def adaptive_conformal_multiplier(mill: str, raw: dict, ar3: float = None) -> tuple:
+    """Compute a locally adaptive conformal interval multiplier in [0.85, 1.35].
+
+    Widens intervals for P01-P99 OOD extrapolation (+0.10 per OOD input) and for
+    intercritical finishing near or below Ar3 (+0.12 when FRT - Ar3 < 25 K), and
+    tightens to 0.90 when all monitored inputs sit comfortably in the core envelope
+    with sufficient austenite finishing margin (FRT - Ar3 >= 40 K when Ar3 is given).
+    """
+    raw = raw or {}
+    warnings, _notices = check_applicability_domain(mill, raw)
+    n_ood = len(warnings)
+
+    mult = 1.0
+    reasons = []
+
+    if n_ood > 0:
+        mult += 0.10 * n_ood
+        reasons.append(f"widened for OOD extrapolation ({n_ood} input{'s' if n_ood != 1 else ''} outside P01-P99)")
+
+    frt_key = "FM_Finish_Temp" if mill == "Plate" else "Temp_FT_Avg_C"
+    frt_margin = None
+    ar3_val = None
+    if ar3 is not None:
+        try:
+            ar3_candidate = float(ar3)
+            frt_candidate = float(raw[frt_key])
+            if np.isfinite(ar3_candidate) and np.isfinite(frt_candidate):
+                ar3_val = ar3_candidate
+                frt_margin = frt_candidate - ar3_val
+        except (KeyError, TypeError, ValueError):
+            frt_margin = None
+
+    if frt_margin is not None and frt_margin < 25.0:
+        mult += 0.12
+        reasons.append(f"widened for intercritical scatter near Ar3 (FRT - Ar3 = {frt_margin:+.1f} K)")
+
+    if not reasons:
+        domain = get_applicability_domain().get(mill, {})
+        all_in_core = True
+        checked = 0
+        for param, bounds in domain.items():
+            if param not in raw:
+                continue
+            lo, hi = _core_bounds(bounds)
+            if lo is None or hi is None:
+                continue
+            try:
+                val = float(raw[param])
+            except (TypeError, ValueError):
+                all_in_core = False
+                break
+            if not np.isfinite(val) or not (lo <= val <= hi):
+                all_in_core = False
+                break
+            checked += 1
+
+        ar3_ok = (ar3 is None) or (frt_margin is not None and frt_margin >= 40.0)
+        if checked > 0 and all_in_core and ar3_ok:
+            mult = 0.90
+            reasons.append("tightened for core in-domain schedule")
+
+    mult = round(float(min(1.35, max(0.85, mult))), 4)
+    if not reasons:
+        return mult, "standard in-domain conformal envelope"
+    return mult, "; ".join(reasons)
+
+
 def compute_tree_shap_attribution(mill: str, target_key: str, X_row: pd.DataFrame, family: str = None) -> dict:
     """
     Computes exact TreeSHAP additive feature attributions:

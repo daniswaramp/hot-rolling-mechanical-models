@@ -6,6 +6,7 @@ at minimum alloy cost and Carbon Equivalent (CE_IIW), with split-conformal 95% s
 
 import os
 import json
+import math
 import sys
 import time
 import numpy as np
@@ -994,6 +995,70 @@ def _score_schedule_frame(mill, cand_df, mech_keys):
     return cand_df, None
 
 
+def prefilter_chemistries_for_reqs(chemistries, requirements):
+    """Fast vectorised pre-filter of candidate chemistries against deterministic ceilings.
+
+    Checks ``ce_iiw``, ``pcm``, ``Chem_S`` and ``Chem_P`` ceilings in ``requirements``
+    before expanding the full temperature × cooling grid in ``_scored_candidates``.
+    When ``len(chemistries) > 1``, drops chemistries that violate deterministic chemistry
+    ceilings unless filtering would leave zero chemistries — keeping the original list in
+    that case so ``_rejected_band_notes`` still reports the exact chemistry ceiling failure.
+    """
+    chems = list(chemistries or [])
+    if len(chems) <= 1 or not requirements:
+        return chems
+
+    ceilings = [
+        req for req in requirements
+        if req.get("kind") == "chem"
+        and (req.get("direction") or "max") == "max"
+        and req.get("key") in CHEM_REQ_KEYS
+        and req.get("required") is not None
+    ]
+    if not ceilings:
+        return chems
+
+    def _elem_vec(key):
+        vals = []
+        for _name, chem in chems:
+            raw_v = (chem or {}).get(key, 0.0)
+            try:
+                fval = 0.0 if raw_v is None else float(raw_v)
+            except (TypeError, ValueError):
+                fval = 0.0
+            vals.append(fval if np.isfinite(fval) else 0.0)
+        return np.asarray(vals, dtype=float)
+
+    needed_keys = {req["key"] for req in ceilings}
+    computed = {}
+    if "ce_iiw" in needed_keys:
+        computed["ce_iiw"] = np.asarray(cons.ce_iiw(
+            _elem_vec("Chem_C"), _elem_vec("Chem_Mn"), _elem_vec("Chem_Cr"),
+            _elem_vec("Chem_Mo"), _elem_vec("Chem_V"), _elem_vec("Chem_Ni"),
+            _elem_vec("Chem_Cu")), dtype=float)
+    if "pcm" in needed_keys:
+        computed["pcm"] = np.asarray(cons.pcm(
+            _elem_vec("Chem_C"), _elem_vec("Chem_Si"), _elem_vec("Chem_Mn"),
+            _elem_vec("Chem_Cu"), _elem_vec("Chem_Cr"), _elem_vec("Chem_Ni"),
+            _elem_vec("Chem_Mo"), _elem_vec("Chem_V"), _elem_vec("Chem_B")), dtype=float)
+    for key in needed_keys:
+        if key not in computed:
+            computed[key] = _elem_vec(key)
+
+    mask = np.ones(len(chems), dtype=bool)
+    for req in ceilings:
+        try:
+            limit = float(req["required"])
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(limit):
+            continue
+        mask &= computed[req["key"]] <= limit + CHEM_CONSTRAINT_EPS
+
+    kept = [item for item, ok in zip(chems, mask) if ok]
+    return kept if kept else chems
+
+
 def _scored_candidates(mill, raw, thickness, requirements, chemistries, entry_range,
                        finish_range, cooling="air", headers_range=(4, 8), ct_range=None,
                        step=10.0):
@@ -1007,6 +1072,7 @@ def _scored_candidates(mill, raw, thickness, requirements, chemistries, entry_ra
     mech_keys = sorted({r["key"] for r in requirements if r.get("kind") == "mech"})
     if not mech_keys:
         return None, [], "no verifiable mechanical requirements for this specification tier"
+    chemistries = prefilter_chemistries_for_reqs(chemistries, requirements)
     cand_df, error = _schedule_grid(mill, raw, thickness, chemistries, entry_range,
                                     finish_range, cooling=cooling,
                                     headers_range=headers_range, ct_range=ct_range, step=step)
@@ -1469,12 +1535,21 @@ def pareto_frontier(mill, raw, thickness, requirements, chemistries, entry_range
 # already quotes; the chemistry band is a fraction of the grade's own element band width.
 ENTRY_AIM_C = 20.0
 FINISH_AIM_C = 20.0
+THERMAL_COPULA_RHO = 0.65
 CHEM_BAND_FRACTION = 0.10
 CHEM_RELATIVE_FRACTION = 0.05
 
 # Gauge row of the app's input spec table (lo, hi, step), used only for the Monte-Carlo gauge
 # band on the paths that run without streamlit_app loaded (tests, the Modal container).
 GAUGE_SPEC = {"Plate": (6.0, 120.0, 0.5), "HRC": (1.8, 16.0, 0.1)}
+
+
+def _erf_vec(x):
+    """Exact vectorised Gauss error function via stdlib math.erf (zero heavy imports)."""
+    arr = np.asarray(x, dtype=float)
+    if arr.size == 0:
+        return np.empty_like(arr, dtype=float)
+    return np.fromiter(map(math.erf, arr.ravel()), dtype=float, count=arr.size).reshape(arr.shape)
 
 
 def _gauge_spec(mill):
@@ -1545,7 +1620,8 @@ def _perturbation_draws(mill, pool, thickness, n_samples, seed, cooling, headers
     Every draw is a complete mill input row, so the whole ensemble is scored in a single
     vectorised pass instead of one model call per sample:
 
-      * entry and finish temperature : ±20 °C, uniform around the candidate setpoint
+      * entry and finish temperature : ±20 °C marginal uniform around the candidate setpoint,
+                                       coupled via a Gaussian copula (ρ = 0.65 thermal carry-over)
       * laminar headers             : ±1, clamped to the swept header range (air stays 0)
       * chemistry                   : ±10 % of each element's grade band width where the
                                       chemistry is a grade template, ±5 % relative where it
@@ -1568,15 +1644,27 @@ def _perturbation_draws(mill, pool, thickness, n_samples, seed, cooling, headers
     entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
     entry = pd.to_numeric(frame[entry_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     finish = pd.to_numeric(frame[finish_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-    entry = entry + rng.uniform(-ENTRY_AIM_C, ENTRY_AIM_C, n)
-    finish = finish + rng.uniform(-FINISH_AIM_C, FINISH_AIM_C, n)
+
+    rho = float(THERMAL_COPULA_RHO)
+    chol = np.linalg.cholesky(np.array([[1.0, rho], [rho, 1.0]], dtype=float))
+    z = rng.standard_normal((n, 2))
+    w = z @ chol.T
+    # Gaussian copula: map correlated standard normals through 2*Phi(w) - 1 = erf(w / sqrt(2))
+    # so both marginals stay Uniform(-1, 1) while preserving ρ = 0.65 thermal carry-over.
+    u_signed = np.clip(_erf_vec(w / math.sqrt(2.0)), -1.0, 1.0)
+    entry = entry + u_signed[:, 0] * ENTRY_AIM_C
+    finish = finish + u_signed[:, 1] * FINISH_AIM_C
     frame[entry_col] = entry
     frame[finish_col] = finish
 
     gauge_lo, gauge_hi, gauge_step = _gauge_spec(mill)
     gauge = np.clip(float(thickness) + rng.uniform(-gauge_step, gauge_step, n),
                     gauge_lo, gauge_hi)
-    noise = [f"entry ±{ENTRY_AIM_C:.0f} °C", f"finish ±{FINISH_AIM_C:.0f} °C"]
+    noise = [
+        f"entry ±{ENTRY_AIM_C:.0f} °C",
+        f"finish ±{FINISH_AIM_C:.0f} °C",
+        f"correlated thermal copula (ρ={rho:.2f})",
+    ]
 
     if mill == "Plate":
         allowed = ([0] if str(cooling) == "air"
@@ -2201,6 +2289,405 @@ def _slab_band_text(name):
     return " · ".join(parts)
 
 
+def _safe_float(val, default=0.0):
+    """Best-effort finite float conversion with fallback."""
+    try:
+        v = float(val)
+        return v if np.isfinite(v) else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def triage_specs_for_heat(mill, raw, thickness=None, k=1.0, max_specs=20, step=20.0):
+    """Ladle-in-hand order triage: find every spec + grade tier certifiable with ``raw``.
+
+    Locks the ladle chemistry in ``raw``, builds and scores the process grid
+    (entry × finish × cooling) once across all mechanical targets, and evaluates every
+    specification + grade tier in ``sc.load_specifications()`` matching ``thickness``
+    against both the locked ladle chemistry and the conformal margin rule ``k``.
+
+    Returns a list of dicts sorted by ``min_margin_interval`` descending, capped at
+    ``max_specs``. Pure (no Streamlit UI calls).
+    """
+    if mill not in ("Plate", "HRC"):
+        return []
+    spec_df = sc.load_specifications()
+    if spec_df is None or spec_df.empty:
+        return []
+
+    raw_dict = dict(raw or {})
+    t_key = "Plate_T_mm" if mill == "Plate" else "Coil_T_mm"
+    thickness_val = (_safe_float(raw_dict.get(t_key), 16.0 if mill == "Plate" else 6.0)
+                     if thickness is None else float(thickness))
+
+    matching = spec_df[
+        (spec_df["THICK MIN (mm)"] <= thickness_val)
+        & (spec_df["THICK MAX (mm)"] >= thickness_val)
+    ]
+    if matching.empty:
+        return []
+    matching = matching.drop_duplicates(subset=["SPEC", "GRADE"], keep="first")
+
+    chem = {
+        f"Chem_{el}": _safe_float(raw_dict.get(f"Chem_{el}", 0.0), 0.0)
+        for el in ("C", "Si", "Mn", "P", "S", "Nb", "Cu", "Cr", "Ni", "Mo", "V", "Al", "Ti", "N", "B")
+    }
+    ce_iiw_val = float(chemistry_ce_iiw(chem))
+    pcm_val = float(chemistry_pcm(chem))
+    chem_inputs = dict(chem)
+    chem_inputs["ce_iiw"] = ce_iiw_val
+    chem_inputs["pcm"] = pcm_val
+    supplied_chem = {key for key in raw_dict if str(key).startswith("Chem_")}
+    available_keys = (supplied_chem | {"ce_iiw", "pcm"}) if supplied_chem else None
+
+    base_raw = dict(raw_dict)
+    base_raw.update(chem)
+    base_raw[t_key] = thickness_val
+    step_val = max(1.0, float(step))
+    trained = cons.training_bounds(mill)
+
+    if mill == "Plate":
+        mech_targets = (
+            "YS_BN", "TS_BN", "EL_BN",
+            "YS_AN", "TS_AN", "EL_AN",
+            "Impact_0C", "Impact_m20C", "Impact_m40C",
+        )
+        entry_range = (900.0, 1020.0)
+        ft_lo, ft_hi = trained.get("FM_Finish_Temp", (740.0, 920.0))
+        finish_range = (
+            max(720.0, round(float(ft_lo) / 10.0) * 10.0),
+            min(940.0, round(float(ft_hi) / 10.0) * 10.0),
+        )
+        if finish_range[1] <= finish_range[0]:
+            finish_range = (740.0, 920.0)
+        air_df, _ = _schedule_grid(
+            "Plate", base_raw, thickness_val, [("ladle heat", chem)],
+            entry_range, finish_range, cooling="air", step=step_val)
+        lam_df, _ = _schedule_grid(
+            "Plate", base_raw, thickness_val, [("ladle heat", chem)],
+            entry_range, finish_range, cooling="laminar", headers_range=(2, 8), step=step_val)
+        parts = []
+        if air_df is not None:
+            parts.append(air_df)
+        if lam_df is not None:
+            parts.append(lam_df[lam_df["ACC_Headers_n"].isin([2.0, 4.0, 6.0, 8.0])])
+        if not parts:
+            return []
+        grid_df = pd.concat(parts, ignore_index=True)
+    else:
+        mech_targets = ("YS_BN", "TS_BN", "EL_BN")
+        entry_range = (880.0, 1020.0)
+        ft_lo, ft_hi = trained.get("Temp_FT_Avg_C", (780.0, 890.0))
+        finish_range = (
+            max(760.0, round(float(ft_lo) / 10.0) * 10.0),
+            min(920.0, round(float(ft_hi) / 10.0) * 10.0),
+        )
+        if finish_range[1] <= finish_range[0]:
+            finish_range = (780.0, 880.0)
+        ct_range = (520.0, 660.0)
+        grid_df, _ = _schedule_grid(
+            "HRC", base_raw, thickness_val, [("ladle heat", chem)],
+            entry_range, finish_range, ct_range=ct_range, step=step_val)
+        if grid_df is None:
+            return []
+
+    scored_df, _err = _score_schedule_frame(mill, grid_df, mech_targets)
+    if scored_df is None:
+        core_targets = ("YS_BN", "TS_BN", "EL_BN")
+        scored_df, _err = _score_schedule_frame(mill, grid_df.copy(), core_targets)
+        if scored_df is None:
+            return []
+        active_targets = core_targets
+    else:
+        active_targets = mech_targets
+
+    halves = interval_half_widths(mill, active_targets)
+    entry_col, finish_col = ENTRY_COL[mill], FINISH_COL[mill]
+    entry_arr = scored_df[entry_col].to_numpy(dtype=float)
+    finish_arr = scored_df[finish_col].to_numpy(dtype=float)
+    hdr_arr = (scored_df["ACC_Headers_n"].to_numpy(dtype=float)
+               if mill == "Plate" and "ACC_Headers_n" in scored_df.columns
+               else np.zeros(len(scored_df), dtype=float))
+    ct_arr = (scored_df["Temp_CT_Top_C"].to_numpy(dtype=float)
+              if mill == "HRC" and "Temp_CT_Top_C" in scored_df.columns
+              else np.zeros(len(scored_df), dtype=float))
+    ood_arr = (scored_df["ood"].to_numpy(dtype=bool)
+               if "ood" in scored_df.columns
+               else np.zeros(len(scored_df), dtype=bool))
+    pred_arrays = {
+        tgt: scored_df[f"pred_{tgt}"].to_numpy(dtype=float)
+        for tgt in active_targets
+        if f"pred_{tgt}" in scored_df.columns
+    }
+
+    k_val = float(k)
+    results = []
+    for _, row in matching.iterrows():
+        chem_eval = sc.evaluate_chemistry(
+            row, chem_inputs, {"ce_iiw": ce_iiw_val, "pcm": pcm_val},
+            available_keys=available_keys)
+        if chem_eval["fail_count"] > 0:
+            continue
+
+        mech_eval = sc.evaluate_mechanical(row, {}, mill, "AR")
+        ratios = []
+        for chk in mech_eval["checks"]:
+            key = chk.get("key")
+            if not key or key not in pred_arrays:
+                continue
+            half = max(float(halves.get(key, 15.0)), 1e-6)
+            preds_k = pred_arrays[key]
+            if chk.get("limit_min") is not None:
+                ratios.append((preds_k - float(chk["limit_min"])) / half)
+            if chk.get("limit_max") is not None:
+                ratios.append((float(chk["limit_max"]) - preds_k) / half)
+        if not ratios:
+            continue
+
+        worst_ratio = np.min(np.vstack(ratios), axis=0)
+        feasible = worst_ratio >= k_val - 1e-9
+        if not np.any(feasible):
+            continue
+
+        in_domain = feasible & (~ood_arr)
+        pick_mask = in_domain if np.any(in_domain) else feasible
+        cand_indices = np.flatnonzero(pick_mask)
+        best_idx = int(max(
+            cand_indices,
+            key=lambda i: (
+                round(float(worst_ratio[i]), 6),
+                float(finish_arr[i]),
+                float(entry_arr[i]),
+                -float(hdr_arr[i]) if mill == "Plate" else float(ct_arr[i]),
+            ),
+        ))
+        best_cooling = (
+            ("air" if hdr_arr[best_idx] <= 0 else f"{hdr_arr[best_idx]:.0f} headers")
+            if mill == "Plate"
+            else f"CT {ct_arr[best_idx]:.0f} °C"
+        )
+        results.append({
+            "spec": str(row.get("SPEC", "")),
+            "grade": str(row.get("GRADE", "-")),
+            "supply_condition": str(row.get("SUPPLY CONDITION", "-")).strip() or "-",
+            "best_entry": round(float(entry_arr[best_idx]), 1),
+            "best_finish": round(float(finish_arr[best_idx]), 1),
+            "best_cooling": best_cooling,
+            "min_margin_interval": round(float(worst_ratio[best_idx]), 3),
+            "ce_iiw": round(ce_iiw_val, 4),
+            "verdict": "CERTIFIABLE",
+        })
+
+    results.sort(key=lambda r: (-r["min_margin_interval"], r["spec"], r["grade"]))
+    if max_specs is not None and int(max_specs) > 0:
+        results = results[:int(max_specs)]
+    return results
+
+
+def _render_ladle_triage(mill: str, raw: dict, thickness: float, k: float):
+    """Outside-form expander scanning all workbook specs for the locked sidebar ladle."""
+    triage_key = f"opt_triage_result_{mill}"
+    with st.expander("Ladle-in-hand triage: find specifications certifiable with current sidebar chemistry",
+                     expanded=False):
+        st.caption(
+            f"Locks the current sidebar ladle chemistry (CE_IIW {chemistry_ce_iiw(raw):.3f}) at "
+            f"{float(thickness):.1f} mm and scans the specification workbook across entry × finish × "
+            f"cooling to list every standard tier certifiable at k = {float(k):.1f}×."
+        )
+        if st.button("Scan specifications for current heat", key=f"opt_triage_go_{mill}",
+                     use_container_width=True):
+            with st.spinner("Scoring process grid once and triaging matching specifications..."):
+                t0 = time.time()
+                rows = triage_specs_for_heat(mill, raw, thickness=float(thickness), k=float(k))
+                elapsed_ms = (time.time() - t0) * 1000.0
+            st.session_state[triage_key] = {
+                "rows": rows,
+                "thickness": float(thickness),
+                "k": float(k),
+                "ce_iiw": float(chemistry_ce_iiw(raw)),
+                "elapsed_ms": elapsed_ms,
+            }
+
+        stored_triage = st.session_state.get(triage_key)
+        if stored_triage is not None:
+            rows = stored_triage.get("rows") or []
+            s_t = float(stored_triage.get("thickness", thickness))
+            s_k = float(stored_triage.get("k", k))
+            s_ce = float(stored_triage.get("ce_iiw", 0.0))
+            s_ms = float(stored_triage.get("elapsed_ms", 0.0))
+            if not rows:
+                st.info(
+                    f"No matching specification tier at {s_t:.1f} mm is certifiable for this ladle "
+                    f"chemistry (CE_IIW {s_ce:.3f}) at k = {s_k:.1f}× ({s_ms:.0f} ms)."
+                )
+            else:
+                st.caption(
+                    f"Found {len(rows)} top certifiable specification tiers at {s_t:.1f} mm "
+                    f"(CE_IIW {s_ce:.3f}, k = {s_k:.1f}×, {s_ms:.0f} ms)."
+                )
+                display_df = pd.DataFrame([
+                    {
+                        "Specification": r["spec"],
+                        "Grade": r["grade"],
+                        "Supply": r["supply_condition"],
+                        "Entry (°C)": r["best_entry"],
+                        "Finish (°C)": r["best_finish"],
+                        "Cooling": r["best_cooling"],
+                        "Worst margin (×interval)": r["min_margin_interval"],
+                        "CE_IIW": r["ce_iiw"],
+                        "Verdict": r["verdict"],
+                    }
+                    for r in rows
+                ])
+                st.dataframe(display_df, hide_index=True, use_container_width=True)
+                st.download_button(
+                    "Download triage results (CSV)",
+                    data=pd.DataFrame(rows).to_csv(index=False).encode("utf-8"),
+                    file_name=f"ladle_triage_{mill}_{s_t:.0f}mm.csv",
+                    mime="text/csv",
+                    key=f"opt_triage_csv_{mill}",
+                    use_container_width=True,
+                )
+
+
+def _submit_and_render_optimizer(mill, raw, labels, chosen_spec, chosen_grade, thickness,
+                                 rolling_type, slab_choice, auto_templates, chem_constraints,
+                                 calc_mode, alpha, entry_range, finish_range, ct_range,
+                                 cooling, headers_range, k, result_key):
+    """Execute one submitted optimizer form calculation, cache it, and render the result."""
+    derived_chemistry = False
+    if slab_choice == AUTO_CHEMISTRY:
+        chemistries = auto_templates
+        if not chemistries:
+            chemistries = [("simulator chemistry",
+                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
+        if chem_constraints:
+            filtered, derived, err = apply_chemistry_constraints(chemistries, **chem_constraints)
+            if err:
+                st.error(err)
+                return
+            chemistries = list(filtered)
+            if derived is not None:
+                # Appended LAST: an in-range template always beats the synthetic one.
+                chemistries.append(derived)
+                derived_chemistry = True
+                st.caption(f"No grade template satisfies the chemistry limits: the search runs "
+                           f"on \"{DERIVED_CHEMISTRY_NAME}\" — a synthetic derivation "
+                           f"(microalloys clamped, Mn walked onto the CE/Pcm windows), not a "
+                           f"rolled grade.")
+    else:
+        chem = gt.chemistry(slab_choice) or {}
+        if chem:
+            chemistries = [(slab_choice, chem)]
+        else:
+            chemistries = [("simulator chemistry",
+                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
+
+    if labels:
+        requirements, info = spec_requirements(chosen_spec, chosen_grade, thickness, mill,
+                                               rolling_type, chemistries[0][1])
+        if info.get("status") == "out_of_gauge":
+            st.warning(info.get("message", "Thickness outside the standard range."))
+        if not requirements:
+            st.error("This specification tier carries no readable YS/TS/EL/CE limits: "
+                     "pick another specification + grade.")
+            return
+    else:
+        requirements = preset_requirements(mill, chosen_spec)
+
+    search_raw = dict(raw)
+    search_raw["Rolling_Type"] = rolling_type
+
+    # The submit above is the only gate for all three modes: each calculation runs on Modal
+    # when it is configured and falls back to this process when it is not, and
+    # remote_compute reports which one answered.
+    where = " on Modal" if remote_compute.remote_ready() else ""
+    mode_meta = {"spec": chosen_spec, "grade": chosen_grade, "thickness": float(thickness),
+                 "rolling_type": rolling_type}
+    if chem_constraints:
+        mode_meta["chemistry_constraints"] = chemistry_constraints_text(**chem_constraints)
+    if derived_chemistry:
+        mode_meta["derived_chemistry"] = True
+
+    if calc_mode == PARETO_MODE:
+        with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid and building "
+                        f"the Pareto frontier against the specification at the conformal "
+                        f"bound{where}..."):
+            t0 = time.time()
+            res, source = remote_compute.pareto_search(
+                mill, search_raw, thickness, requirements, chemistries,
+                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+                ct_range=ct_range, k=k)
+            elapsed = time.time() - t0
+        elapsed_text = f"{elapsed * 1000:.0f} ms"
+        # The frontier rows are small dicts, so the whole frontier fits in session state:
+        # the replay needs no candidate frame and no second model call.
+        stored_res = {
+            "error": res.get("error"),
+            "frontier": list(res.get("frontier") or []),
+            "n_feasible": int(res.get("n_feasible") or 0),
+            "n_evaluated": int(res.get("n_evaluated") or 0),
+            "n_frontier": int(res.get("n_frontier") or 0),
+            "n_truncated": bool(res.get("n_truncated")),
+            "meta": res.get("meta") or {},
+            "_meta": mode_meta,
+        }
+    elif calc_mode == ROBUST_MODE:
+        with st.spinner(f"Scoring the deterministic grid{where}, then stress-testing the "
+                        f"shortlist over the Monte-Carlo noise band..."):
+            t0 = time.time()
+            res, source = remote_compute.robust_recipe(
+                mill, search_raw, thickness, requirements, chemistries,
+                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+                ct_range=ct_range, k=k, alpha=float(alpha))
+            elapsed = time.time() - t0
+        elapsed_text = f"{elapsed * 1000:.0f} ms"
+        stored_res = {
+            "error": res.get("error"),
+            "message": res.get("message"),
+            "chosen": res.get("chosen"),
+            "runners": list(res.get("runners") or []),
+            "deterministic": res.get("deterministic"),
+            "det_is_chosen": bool(res.get("det_is_chosen")),
+            "noise_description": res.get("noise_description", ""),
+            "n_evaluated": int(res.get("n_evaluated") or 0),
+            "n_candidates": int(res.get("n_candidates") or 0),
+            "n_draws": int(res.get("n_draws") or 0),
+            "alpha": float(res.get("alpha", alpha)),
+            "n_samples": int(res.get("n_samples") or 0),
+            "seed": res.get("seed"),
+            "_meta": mode_meta,
+        }
+    else:
+        with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid against the "
+                        f"specification at the conformal bound{where}..."):
+            t0 = time.time()
+            res, source = remote_compute.recipe_search(
+                mill, search_raw, thickness, requirements, chemistries,
+                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
+                ct_range=ct_range, k=k)
+            elapsed = time.time() - t0
+        elapsed_text = f"{elapsed * 1000:.0f} ms"
+
+        # Keep only what the card renders: the scored candidate frame and the chemistries are
+        # dropped, so a stored outcome stays small.
+        stored_res = {
+            "error": res.get("error"),
+            "chosen": res.get("chosen"),
+            "ladder": list(res.get("ladder") or []),
+            "rejected": list(res.get("rejected") or []),
+            "n_evaluated": int(res.get("n_evaluated") or 0),
+            "_meta": mode_meta,
+        }
+
+    st.session_state[result_key] = {"mode": CALC_MODE_KEYS[calc_mode], "res": stored_res,
+                                    "requirements": requirements, "k": float(k),
+                                    "elapsed": elapsed_text, "source": source}
+
+    # the submit path and the replay path render through the same helper
+    _render_stored_result(mill, st.session_state[result_key])
+
+
 def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommended)",
                    spec_rows=None):
     """
@@ -2409,140 +2896,15 @@ def view_optimizer(mill: str, raw: dict, engine: str = "Champion GBDT (Recommend
         stored = st.session_state.get(result_key)
         if not stored:
             st.caption("Set the constraints, then press Calculate.")
-            return
-        st.caption("Shown from your last calculation. Press Calculate to run again with "
-                   "the current inputs.")
-        _render_stored_result(mill, stored)
-        return
-
-    derived_chemistry = False
-    if slab_choice == AUTO_CHEMISTRY:
-        chemistries = auto_templates
-        if not chemistries:
-            chemistries = [("simulator chemistry",
-                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
-        if chem_constraints:
-            filtered, derived, err = apply_chemistry_constraints(chemistries, **chem_constraints)
-            if err:
-                st.error(err)
-                return
-            chemistries = list(filtered)
-            if derived is not None:
-                # Appended LAST: an in-range template always beats the synthetic one.
-                chemistries.append(derived)
-                derived_chemistry = True
-                st.caption(f"No grade template satisfies the chemistry limits: the search runs "
-                           f"on \"{DERIVED_CHEMISTRY_NAME}\" — a synthetic derivation "
-                           f"(microalloys clamped, Mn walked onto the CE/Pcm windows), not a "
-                           f"rolled grade.")
-    else:
-        chem = gt.chemistry(slab_choice) or {}
-        if chem:
-            chemistries = [(slab_choice, chem)]
         else:
-            chemistries = [("simulator chemistry",
-                            {c: float(raw.get(c, 0.0)) for c in raw if str(c).startswith("Chem_")})]
-
-    if labels:
-        requirements, info = spec_requirements(chosen_spec, chosen_grade, thickness, mill,
-                                               rolling_type, chemistries[0][1])
-        if info.get("status") == "out_of_gauge":
-            st.warning(info.get("message", "Thickness outside the standard range."))
-        if not requirements:
-            st.error("This specification tier carries no readable YS/TS/EL/CE limits: "
-                     "pick another specification + grade.")
-            return
+            st.caption("Shown from your last calculation. Press Calculate to run again with "
+                       "the current inputs.")
+            _render_stored_result(mill, stored)
     else:
-        requirements = preset_requirements(mill, chosen_spec)
+        _submit_and_render_optimizer(
+            mill, raw, labels, chosen_spec, chosen_grade, thickness, rolling_type,
+            slab_choice, auto_templates, chem_constraints, calc_mode, alpha,
+            entry_range, finish_range, ct_range, cooling, headers_range, k, result_key,
+        )
 
-    search_raw = dict(raw)
-    search_raw["Rolling_Type"] = rolling_type
-
-    # The submit above is the only gate for all three modes: each calculation runs on Modal
-    # when it is configured and falls back to this process when it is not, and
-    # remote_compute reports which one answered.
-    where = " on Modal" if remote_compute.remote_ready() else ""
-    mode_meta = {"spec": chosen_spec, "grade": chosen_grade, "thickness": float(thickness),
-                 "rolling_type": rolling_type}
-    if chem_constraints:
-        mode_meta["chemistry_constraints"] = chemistry_constraints_text(**chem_constraints)
-    if derived_chemistry:
-        mode_meta["derived_chemistry"] = True
-
-    if calc_mode == PARETO_MODE:
-        with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid and building "
-                        f"the Pareto frontier against the specification at the conformal "
-                        f"bound{where}..."):
-            t0 = time.time()
-            res, source = remote_compute.pareto_search(
-                mill, search_raw, thickness, requirements, chemistries,
-                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
-                ct_range=ct_range, k=k)
-            elapsed = time.time() - t0
-        elapsed_text = f"{elapsed * 1000:.0f} ms"
-        # The frontier rows are small dicts, so the whole frontier fits in session state:
-        # the replay needs no candidate frame and no second model call.
-        stored_res = {
-            "error": res.get("error"),
-            "frontier": list(res.get("frontier") or []),
-            "n_feasible": int(res.get("n_feasible") or 0),
-            "n_evaluated": int(res.get("n_evaluated") or 0),
-            "n_frontier": int(res.get("n_frontier") or 0),
-            "n_truncated": bool(res.get("n_truncated")),
-            "meta": res.get("meta") or {},
-            "_meta": mode_meta,
-        }
-    elif calc_mode == ROBUST_MODE:
-        with st.spinner(f"Scoring the deterministic grid{where}, then stress-testing the "
-                        f"shortlist over the Monte-Carlo noise band..."):
-            t0 = time.time()
-            res, source = remote_compute.robust_recipe(
-                mill, search_raw, thickness, requirements, chemistries,
-                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
-                ct_range=ct_range, k=k, alpha=float(alpha))
-            elapsed = time.time() - t0
-        elapsed_text = f"{elapsed * 1000:.0f} ms"
-        stored_res = {
-            "error": res.get("error"),
-            "message": res.get("message"),
-            "chosen": res.get("chosen"),
-            "runners": list(res.get("runners") or []),
-            "deterministic": res.get("deterministic"),
-            "det_is_chosen": bool(res.get("det_is_chosen")),
-            "noise_description": res.get("noise_description", ""),
-            "n_evaluated": int(res.get("n_evaluated") or 0),
-            "n_candidates": int(res.get("n_candidates") or 0),
-            "n_draws": int(res.get("n_draws") or 0),
-            "alpha": float(res.get("alpha", alpha)),
-            "n_samples": int(res.get("n_samples") or 0),
-            "seed": res.get("seed"),
-            "_meta": mode_meta,
-        }
-    else:
-        with st.spinner(f"Scoring the entry × finish × cooling × chemistry grid against the "
-                        f"specification at the conformal bound{where}..."):
-            t0 = time.time()
-            res, source = remote_compute.recipe_search(
-                mill, search_raw, thickness, requirements, chemistries,
-                entry_range, finish_range, cooling=cooling, headers_range=headers_range,
-                ct_range=ct_range, k=k)
-            elapsed = time.time() - t0
-        elapsed_text = f"{elapsed * 1000:.0f} ms"
-
-        # Keep only what the card renders: the scored candidate frame and the chemistries are
-        # dropped, so a stored outcome stays small.
-        stored_res = {
-            "error": res.get("error"),
-            "chosen": res.get("chosen"),
-            "ladder": list(res.get("ladder") or []),
-            "rejected": list(res.get("rejected") or []),
-            "n_evaluated": int(res.get("n_evaluated") or 0),
-            "_meta": mode_meta,
-        }
-
-    st.session_state[result_key] = {"mode": CALC_MODE_KEYS[calc_mode], "res": stored_res,
-                                    "requirements": requirements, "k": float(k),
-                                    "elapsed": elapsed_text, "source": source}
-
-    # the submit path and the replay path render through the same helper
-    _render_stored_result(mill, st.session_state[result_key])
+    _render_ladle_triage(mill, raw, thickness, k)

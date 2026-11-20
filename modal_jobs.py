@@ -103,6 +103,9 @@ RESOURCES = dict(image=image, cpu=2.0, memory=2048, timeout=900, scaledown_windo
                  volumes=VOLUMES)
 
 
+_WARMED = False
+
+
 def _enter_repo():
     """Make the shipped app importable and the repository the working directory.
 
@@ -116,6 +119,22 @@ def _enter_repo():
             sys.path.insert(0, path)
     if os.path.isdir(REMOTE_REPO):
         os.chdir(REMOTE_REPO)
+    else:
+        for path in (REPO_ROOT, os.path.join(REPO_ROOT, "app")):
+            if os.path.isdir(path) and path not in sys.path:
+                sys.path.insert(0, path)
+
+
+def _warm_models():
+    """Pre-load boosted metadata for both routes once per container process (idempotent)."""
+    global _WARMED
+    if _WARMED:
+        return
+    import streamlit_app  # noqa: PLC0415 - resolved after _enter_repo puts app/ on sys.path
+
+    streamlit_app.boosted_index("Plate")
+    streamlit_app.boosted_index("HRC")
+    _WARMED = True
 
 
 def _atlas_path(mill):
@@ -135,6 +154,7 @@ def build_atlas(mill, raw, axes, grid_sizes, engine="Champion GBDT (Recommended)
     atlas. Bytes go back to the caller *and* to /data/atlas/{mill}.parquet.
     """
     _enter_repo()
+    _warm_models()
     import remote_jobs  # noqa: PLC0415 - imported after sys.path is set up
 
     payload = remote_jobs.atlas_bytes_at(mill, raw, axes, grid_sizes, engine=engine)
@@ -149,6 +169,7 @@ def build_atlas(mill, raw, axes, grid_sizes, engine="Champion GBDT (Recommended)
 def load_atlas(mill):
     """The last atlas committed for this route, as parquet bytes, or None."""
     _enter_repo()
+    _warm_models()
     ATLAS_VOLUME.reload()  # see writes committed by another container since this one started
     path = _atlas_path(mill)
     if not os.path.exists(path):
@@ -166,6 +187,7 @@ def update_shadow(mill, csv_bytes, engine="Champion GBDT (Recommended)"):
     /data/shadow/{mill}.json, so "Load last calibration" works from a fresh session.
     """
     _enter_repo()
+    _warm_models()
     import remote_jobs  # noqa: PLC0415 - imported after sys.path is set up
 
     result = remote_jobs.shadow_calibration(mill, csv_bytes, engine=engine)
@@ -180,6 +202,7 @@ def update_shadow(mill, csv_bytes, engine="Champion GBDT (Recommended)"):
 def load_shadow(mill):
     """The last calibration committed for this route, as the dict the tab renders, or None."""
     _enter_repo()
+    _warm_models()
     SHADOW_VOLUME.reload()  # see writes committed by another container since this one started
     path = _shadow_path(mill)
     if not os.path.exists(path):

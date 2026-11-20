@@ -236,7 +236,7 @@ def atlas_bytes_at(mill, raw, axes, grid_sizes, engine=DEFAULT_ENGINE):
 
 # -------------------------------------------------------------------------- shadow compute
 def residual_summary(residuals):
-    """Median bias plus the p10/p90 spread of one residual vector, or None when it is empty.
+    """Median bias, p10/p90 spread, and EWMA/CUSUM drift stats, or None when empty.
 
     The residual is measured minus predicted, so a positive bias means the model under-reads
     the property and ``predicted + bias`` is the centre of the measured population.
@@ -245,9 +245,43 @@ def residual_summary(residuals):
     values = values[np.isfinite(values)]
     if values.size == 0:
         return None
+    bias = float(np.median(values))
     p10, p90 = np.percentile(values, [10, 90])
-    return {"bias": float(np.median(values)), "p10": float(p10), "p90": float(p90),
-            "n": int(values.size)}
+    p10_f = float(p10)
+    p90_f = float(p90)
+
+    lam = 0.25
+    weights = (1.0 - lam) ** np.arange(values.size - 1, -1, -1, dtype=float)
+    ewma = float(np.dot(weights, values) / np.sum(weights))
+
+    # Two-sided tabular CUSUM (k = 0.5 sigma) normalized by robust spread.
+    spread = max((p90_f - p10_f) / 2.56, 1.0)
+    k_slack = 0.5
+    c_pos = 0.0
+    c_neg = 0.0
+    cusum_max = 0.0
+    for val in values:
+        z = float(val) / spread
+        c_pos = max(0.0, c_pos + z - k_slack)
+        c_neg = max(0.0, c_neg - z - k_slack)
+        if c_pos > cusum_max:
+            cusum_max = c_pos
+        if c_neg > cusum_max:
+            cusum_max = c_neg
+
+    drift_alert = bool(abs(bias) > 0.5 * max(p90_f - p10_f, 1e-6) or cusum_max > 4.0)
+    drift_status = "DRIFT_ALERT" if drift_alert else "STABLE"
+
+    return {
+        "bias": bias,
+        "p10": p10_f,
+        "p90": p90_f,
+        "n": int(values.size),
+        "ewma": float(ewma),
+        "cusum_max": float(cusum_max),
+        "drift_alert": drift_alert,
+        "drift_status": drift_status,
+    }
 
 
 def calibrate_residuals(residuals, grades=None):

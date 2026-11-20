@@ -46,6 +46,7 @@ TEMPLATE_ID = "H-000001"
 TEMPLATE_GRADE = "SAMPLE-GRADE"
 
 SOURCE_CAPTIONS = {"modal": "calibrated on Modal", "local": "calibrated locally"}
+GLOBAL_BIAS_OPTION = "Global route bias"
 
 
 def _app():
@@ -90,17 +91,33 @@ def _source_caption(source, result):
     return text
 
 
+def _summary_row(label, unit, summary, extra=None):
+    """Format one residual summary dict into a display row with EWMA and drift status."""
+    ewma_val = summary.get("ewma")
+    drift_status = summary.get("drift_status")
+    if drift_status is None and "drift_alert" in summary:
+        drift_status = "DRIFT_ALERT" if summary["drift_alert"] else "STABLE"
+    row = dict(extra) if extra else {}
+    row.update({
+        "Property": label,
+        "Unit": unit,
+        "Bias (median residual)": round(float(summary["bias"]), 2),
+        "EWMA": round(float(ewma_val), 2) if ewma_val is not None else None,
+        "p10": round(float(summary["p10"]), 2),
+        "p90": round(float(summary["p90"]), 2),
+        "n": int(summary["n"]),
+        "Drift status": str(drift_status) if drift_status is not None else "—",
+    })
+    return row
+
+
 def _calibration_table(mill, calibration):
-    """One tidy row per property: the median residual and the spread around it."""
+    """One tidy row per property: median residual, EWMA, spread, and drift status."""
     labels = _app().TARGET_LABEL[mill]
     rows = []
     for target, summary in (calibration or {}).items():
         label, unit = labels.get(target, (str(target), ""))
-        rows.append({"Property": label, "Key": str(target), "Unit": unit,
-                     "Bias (median residual)": round(float(summary["bias"]), 2),
-                     "p10": round(float(summary["p10"]), 2),
-                     "p90": round(float(summary["p90"]), 2),
-                     "n": int(summary["n"])})
+        rows.append(_summary_row(label, unit, summary, extra={"Key": str(target)}))
     if not rows:
         return pd.DataFrame()
     table = pd.DataFrame(rows)
@@ -114,12 +131,46 @@ def _grade_table(mill, by_grade):
     for grade, block in (by_grade or {}).items():
         for target, summary in block.items():
             label, unit = labels.get(target, (str(target), ""))
-            rows.append({"Grade": str(grade), "Property": label, "Unit": unit,
-                         "Bias (median residual)": round(float(summary["bias"]), 2),
-                         "p10": round(float(summary["p10"]), 2),
-                         "p90": round(float(summary["p90"]), 2),
-                         "n": int(summary["n"])})
+            rows.append(_summary_row(label, unit, summary, extra={"Grade": str(grade)}))
     return pd.DataFrame(rows)
+
+
+def _preview_scope_options(by_grade):
+    """Preview bias scope choices: global route bias first, then sorted grades."""
+    options = [GLOBAL_BIAS_OPTION]
+    if by_grade:
+        options.extend(sorted(str(grade) for grade in by_grade.keys()))
+    return options
+
+
+def _resolve_preview_calibration(calibration, by_grade, scope):
+    """Return the calibration mapping and human-readable label for a preview scope."""
+    if by_grade and scope and scope != GLOBAL_BIAS_OPTION:
+        grade_map = {str(k): v for k, v in by_grade.items()}
+        if scope in grade_map:
+            return grade_map[scope], f"grade {scope}"
+    return calibration, "global route"
+
+
+def _build_preview_rows(labels, scored, active_calibration):
+    """Build display-only corrected prediction rows from a scored single-row DataFrame."""
+    rows = []
+    for target, (label, unit) in labels.items():
+        if target not in scored.columns:
+            continue
+        predicted = float(pd.to_numeric(scored[target], errors="coerce").iloc[0])
+        summary = (active_calibration or {}).get(target)
+        bias = float(summary["bias"]) if summary else 0.0
+        rows.append({
+            "Property": label,
+            "Unit": unit,
+            "Model": round(predicted, 2) if np.isfinite(predicted) else None,
+            "Bias": round(bias, 2) if summary else None,
+            "Corrected (display only)": (round(predicted + bias, 2)
+                                         if np.isfinite(predicted) else None),
+            "n": int(summary["n"]) if summary else 0,
+        })
+    return rows
 
 
 def view_shadow(mill, raw, engine=DEFAULT_ENGINE):
@@ -252,31 +303,39 @@ def _render_calibration(mill, raw, stored, engine):
                    "display aid for this session only.")
         return
 
+    selected_scope = GLOBAL_BIAS_OPTION
+    if by_grade:
+        scope_options = _preview_scope_options(by_grade)
+        scope_key = f"shadow_preview_scope_{mill}"
+        try:
+            if scope_key in st.session_state and st.session_state[scope_key] not in scope_options:
+                del st.session_state[scope_key]
+        except Exception:  # noqa: BLE001
+            pass
+        selected_scope = st.selectbox(
+            "Bias source for preview",
+            scope_options,
+            index=0,
+            key=scope_key,
+            help="Apply the global route median residual or a specific grade's median residual.",
+        )
+
+    active_calibration, scope_label = _resolve_preview_calibration(
+        calibration, by_grade, selected_scope)
+
     app = _app()
     try:
         scored = app.score_frame(mill, pd.DataFrame([dict(raw)]), engine=engine)
     except Exception as exc:  # noqa: BLE001 - a preview must not kill the tab
         st.error(f"Could not score the current schedule: {type(exc).__name__}: {exc}")
         return
-    labels = app.TARGET_LABEL[mill]
-    rows = []
-    for target, (label, unit) in labels.items():
-        if target not in scored.columns:
-            continue
-        predicted = float(pd.to_numeric(scored[target], errors="coerce").iloc[0])
-        summary = calibration.get(target)
-        bias = float(summary["bias"]) if summary else 0.0
-        rows.append({"Property": label, "Unit": unit,
-                     "Model": round(predicted, 2) if np.isfinite(predicted) else None,
-                     "Bias": round(bias, 2) if summary else None,
-                     "Corrected (display only)": (round(predicted + bias, 2)
-                                                  if np.isfinite(predicted) else None),
-                     "n": int(summary["n"]) if summary else 0})
+    rows = _build_preview_rows(app.TARGET_LABEL[mill], scored, active_calibration)
     if not rows:
         st.caption("This engine scored none of the route's properties, so there is nothing to "
                    "correct.")
         return
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    st.caption("Display-only correction: the model column is what the app reports everywhere "
-               "else; the last column adds the median residual measured on your uploaded sheet "
-               "to this one schedule. No model file and no other tab is touched.")
+    st.caption(f"Display-only correction ({scope_label}): the model column is what the app "
+               "reports everywhere else; the last column adds the median residual measured on "
+               "your uploaded sheet to this one schedule. No model file and no other tab is "
+               "touched.")

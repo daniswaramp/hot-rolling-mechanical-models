@@ -35,6 +35,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import physics       # noqa: E402 - read-only: Pickering sigma_ss
 import precipitation  # noqa: E402 - read-only: SOLUBILITY dict + solution_temperature
 
 INK, HAIR, GRID, MUTED = "#0b0d10", "#e5e7eb", "#f1f2f4", "#6b7280"
@@ -194,18 +195,75 @@ def classify_regime(x_drx, x_srx):
     return "NRX"
 
 
+def estimate_ferrite_microstructure(final_d_gamma_um, retained_strain,
+                                    cooling_rate_k_s=5.0, sigma_ss_mpa=80.0):
+    """Sellars-Beynon transformed ferrite grain size (um) and Hall-Petch yield screening (MPa).
+
+    Links the final austenite grain size and accumulated retained strain (pancaking) at
+    the end of the rolling schedule to transformed ferrite grain size d_alpha and a
+    Hall-Petch microstructural yield screening estimate.
+    """
+    cr = max(float(cooling_rate_k_s), 0.2)
+    d_gamma = max(float(final_d_gamma_um), 5.0)
+    eps_ret = max(float(retained_strain), 0.0)
+    d_alpha = float(np.clip(
+        (1.8 + 3.2 * (cr ** -0.35)) * (d_gamma ** 0.33) * np.exp(-0.35 * eps_ret),
+        2.5, 45.0,
+    ))
+    ys_micro_mpa = float(96.5 + float(sigma_ss_mpa) + 17.4 * ((d_alpha / 1000.0) ** -0.5))
+    return {
+        "d_alpha_um": d_alpha,
+        "ys_micro_mpa": ys_micro_mpa,
+    }
+
+
+def _schedule_micro_params(mill, raw):
+    """Derive screening cooling rate (K/s) and Pickering sigma_ss (MPa) from sidebar inputs."""
+    def _num(key, default):
+        try:
+            v = float(raw.get(key, default))
+        except (TypeError, ValueError):
+            return float(default)
+        return v if np.isfinite(v) else float(default)
+
+    if any(k in raw for k in ("Chem_Mn", "Chem_Si", "Chem_Ni", "Chem_Cr", "Chem_Cu", "Chem_Mo")):
+        sigma_ss_mpa = float(physics.sigma_ss(
+            _num("Chem_Mn", 0.90), _num("Chem_Si", 0.20), _num("Chem_Ni", 0.02),
+            _num("Chem_Cr", 0.02), _num("Chem_Cu", 0.02), _num("Chem_Ti", 0.002),
+            _num("Chem_Mo", 0.005), _num("Chem_N", 0.004),
+        ))
+    else:
+        sigma_ss_mpa = 80.0
+
+    if mill == "Plate" and any(k in raw for k in ("ACC_Laminar_Header", "ACC_Headers_n", "Plate_T_mm")):
+        headers = max(0.0, _num("ACC_Laminar_Header", _num("ACC_Headers_n", 0.0)))
+        plate_t = max(_num("Plate_T_mm", 16.0), 4.0)
+        cooling_rate_k_s = float(np.clip((1.0 + 1.5 * headers) * (16.0 / plate_t), 0.2, 60.0))
+    elif mill != "Plate" and any(k in raw for k in ("Coil_T_mm", "Temp_FT_Avg_C", "Temp_CT_Top_C")):
+        coil_t = max(_num("Coil_T_mm", 6.0), 1.5)
+        ft = _num("Temp_FT_Avg_C", 835.0)
+        ct = 0.5 * (_num("Temp_CT_Top_C", 595.0) + _num("Temp_CT_Bot_C", 558.0))
+        cooling_rate_k_s = float(np.clip(max(ft - ct, 20.0) / max(coil_t * 2.5, 4.0), 0.2, 60.0))
+    else:
+        cooling_rate_k_s = 5.0
+
+    return cooling_rate_k_s, sigma_ss_mpa
+
+
 def compute_schedule(tb_mm, drafts, t1_c, dt_c, t_int_s, pass_duration_s,
-                     roll_radius_mm, d0_um, chem):
+                     roll_radius_mm, d0_um, chem,
+                     cooling_rate_k_s=5.0, sigma_ss_mpa=80.0):
     """Run the Sellars chain over a validated draft sequence; pure, no Streamlit.
 
-    Returns {"passes": [row dicts], "summary": {...}}. Pass i deforms at
-    T_i = T1 - (i-1) * dT; the interpass after pass i sits at the same T_i.
+    Returns {"passes": [row dicts], "summary": {...}, "d_alpha_um": ..., "ys_micro_mpa": ...}.
+    Pass i deforms at T_i = T1 - (i-1) * dT; the interpass after pass i sits at the same T_i.
     """
     t_sol_k = nb_solution_temperature_k(chem)
     nb, ti = chem["Nb"], chem["Ti"]
     rows = []
     h_prev = float(tb_mm)
     d0 = float(d0_um)
+    retained_strain = 0.0
     for i, draft in enumerate(drafts, start=1):
         h_i = h_prev - float(draft)
         eps = float(np.log(h_prev / h_i))
@@ -225,6 +283,11 @@ def compute_schedule(tb_mm, drafts, t1_c, dt_c, t_int_s, pass_duration_s,
         x_srx = float(1.0 - np.exp(-np.log(2.0) * (float(t_int_s) / t50) ** _c("k_avr")))
         regime = classify_regime(x_drx, x_srx)
         d_rx = recrystallized_grain_size(eps, d0)
+        d0_out = d_rx if x_srx >= _c("srx_complete") else d0
+        if x_srx >= _c("srx_complete"):
+            retained_strain = 0.0
+        else:
+            retained_strain = (retained_strain + eps) * max(0.0, 1.0 - x_drx) * max(0.0, 1.0 - x_srx)
         p = penetration_fraction(roll_radius_mm, float(draft), h_prev, h_i)
         centre_eps = eps * (_c("centre_floor") + _c("centre_gain") * p)
         rows.append({
@@ -234,13 +297,19 @@ def compute_schedule(tb_mm, drafts, t1_c, dt_c, t_int_s, pass_duration_s,
             "retardation": float(solute_retardation(nb, ti) *
                                  (_c("ppt_pinning_factor") if below else 1.0)),
             "pinned": bool(below), "x_srx": x_srx, "regime": regime,
-            "d_rx": d_rx, "d0_in": d0, "d0_out": d_rx if x_srx >= _c("srx_complete") else d0,
+            "d_rx": d_rx, "d0_in": d0, "d0_out": d0_out,
+            "retained_strain": retained_strain,
             "P": p, "centre_eps": centre_eps,
         })
         h_prev = h_i
-        d0 = rows[-1]["d0_out"]
+        d0 = d0_out
     final = rows[-1]["h_out"] if rows else float(tb_mm)
     first_unpen = next((r["pass"] for r in rows if r["P"] < _c("penetration_threshold")), None)
+    micro = estimate_ferrite_microstructure(
+        d0, retained_strain,
+        cooling_rate_k_s=cooling_rate_k_s,
+        sigma_ss_mpa=sigma_ss_mpa,
+    )
     summary = {
         "tb_mm": float(tb_mm), "final_gauge": final,
         "total_reduction_pct": 100.0 * (float(tb_mm) - final) / float(tb_mm) if tb_mm else 0.0,
@@ -249,12 +318,20 @@ def compute_schedule(tb_mm, drafts, t1_c, dt_c, t_int_s, pass_duration_s,
         "first_unpenetrated": first_unpen,
         "t_sol_c": (t_sol_k - 273.15) if t_sol_k is not None else None,
         "n_passes": len(rows),
+        "final_d_gamma_um": float(d0),
+        "retained_strain": float(retained_strain),
+        "d_alpha_um": micro["d_alpha_um"],
+        "ys_micro_mpa": micro["ys_micro_mpa"],
     }
     return {"passes": rows, "summary": summary,
+            "d_alpha_um": micro["d_alpha_um"],
+            "ys_micro_mpa": micro["ys_micro_mpa"],
             "params": {"t1_c": float(t1_c), "dt_c": float(dt_c), "t_int_s": float(t_int_s),
                        "pass_duration_s": float(pass_duration_s),
                        "roll_radius_mm": float(roll_radius_mm), "d0_um": float(d0_um),
-                       "chem": dict(chem)}}
+                       "chem": dict(chem),
+                       "cooling_rate_k_s": float(cooling_rate_k_s),
+                       "sigma_ss_mpa": float(sigma_ss_mpa)}}
 
 
 def draft_sequence(tb_mm, n_passes, mode, equal_draft, custom_drafts, gauge_mm):
@@ -346,6 +423,7 @@ def _passes_frame(rows):
         "Precipitation pinned": "yes" if r["pinned"] else "no",
         "X_srx": round(r["x_srx"], 4), "Regime": r["regime"],
         "d_rx (um)": round(r["d_rx"], 1), "D0 in (um)": round(r["d0_in"], 1),
+        "Retained strain": round(r.get("retained_strain", 0.0), 4),
         "Penetration P": round(r["P"], 3), "Centre strain": round(r["centre_eps"], 4),
     } for r in rows])
 
@@ -424,6 +502,18 @@ def _render_result(mill, stored):
     verdict_pill = ('<span class="pill ok">all passes penetrate</span>'
                     if s["first_unpenetrated"] is None
                     else '<span class="pill bad">partial penetration</span>')
+    d_alpha = s.get("d_alpha_um", stored.get("d_alpha_um"))
+    ys_micro = s.get("ys_micro_mpa", stored.get("ys_micro_mpa"))
+    if d_alpha is None or ys_micro is None:
+        final_d_gamma = rows[-1]["d0_out"] if rows else stored["params"].get("d0_um", 100.0)
+        ret_eps = rows[-1].get("retained_strain", 0.0) if rows else 0.0
+        micro = estimate_ferrite_microstructure(final_d_gamma, ret_eps)
+        d_alpha = micro["d_alpha_um"]
+        ys_micro = micro["ys_micro_mpa"]
+    d_gamma_final = s.get(
+        "final_d_gamma_um",
+        rows[-1]["d0_out"] if rows else stored["params"].get("d0_um", 100.0),
+    )
     st.markdown('<div class="facts">'
                 f'<div><span>total reduction</span><b>{s["total_reduction_pct"]:.1f}</b>'
                 f'<em>%</em></div>'
@@ -432,6 +522,10 @@ def _render_result(mill, stored):
                 f'<b>{s["n_full_pen"]}</b><em>of {s["n_passes"]} passes</em></div>'
                 f'<div><span>NRX passes (unrecrystallized)</span><b>{s["n_nrx"]}</b>'
                 f'<em>dangerous</em></div>'
+                f'<div><span>ferrite grain d<sub>α</sub></span><b>{d_alpha:.1f}</b>'
+                f'<em>µm (D<sub>γ</sub> {d_gamma_final:.0f} µm)</em></div>'
+                f'<div><span>Hall-Petch YS<sub>micro</sub></span><b>{ys_micro:.0f}</b>'
+                f'<em>MPa (screening)</em></div>'
                 f'<div><span>verdict</span>{verdict_pill}</div>'
                 '</div>', unsafe_allow_html=True)
     if s["first_unpenetrated"] is not None:
@@ -486,9 +580,11 @@ def _render_result(mill, stored):
                        data=frame.to_csv(index=False).encode("utf-8"),
                        file_name=f"pass_schedule_{mill}.csv", mime="text/csv",
                        key=f"ps_csv_{mill}")
+    params = stored["params"]
     st.caption("Chemistry of this analysis (sidebar schedule): "
                f"Nb {chem['Nb']:.3f} · Ti {chem['Ti']:.3f} · N {chem['N']:.4f} · "
-               f"C {chem['C']:.3f} wt%.")
+               f"C {chem['C']:.3f} wt% · cooling {params.get('cooling_rate_k_s', 5.0):.1f} K/s · "
+               f"σ_ss {params.get('sigma_ss_mpa', 80.0):.0f} MPa.")
 
 
 # ----------------------------------------------------------------------------- view
@@ -589,8 +685,10 @@ def view_pass_schedule(mill, raw):
         if err:
             st.error(err)
         else:
+            cooling_rate_k_s, sigma_ss_mpa = _schedule_micro_params(mill, raw)
             st.session_state[state_key] = compute_schedule(
-                tb, drafts, t1, dt, t_int, dur, roll_r, d0, chem)
+                tb, drafts, t1, dt, t_int, dur, roll_r, d0, chem,
+                cooling_rate_k_s=cooling_rate_k_s, sigma_ss_mpa=sigma_ss_mpa)
 
     stored = st.session_state.get(state_key)
     if not stored:

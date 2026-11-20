@@ -41,6 +41,179 @@ CE_ELEMENTS = [
     ("pcm", None, "PCM Max [%]", "Cracking Parameter (Pcm)"),
 ]
 
+CHARPY_ANCHORS = ((-40.0, "Impact_m40C"), (-20.0, "Impact_m20C"), (0.0, "Impact_0C"))
+CHARPY_DIRECT_MAP = {0: "Impact_0C", -20: "Impact_m20C", -40: "Impact_m40C"}
+CHARPY_LOWER_SHELF_J = 5.0
+CHARPY_UPPER_SHELF_FACTOR = 1.15
+CHARPY_EXTRAP_CI_FACTOR = 1.15
+
+
+def _pava_nondecreasing(values):
+    """Pool Adjacent Violators projection enforcing non-decreasing order."""
+    blocks = [[float(v), 1] for v in values]
+    i = 0
+    while i < len(blocks) - 1:
+        if blocks[i][0] / blocks[i][1] > blocks[i + 1][0] / blocks[i + 1][1]:
+            blocks[i][0] += blocks[i + 1][0]
+            blocks[i][1] += blocks[i + 1][1]
+            blocks.pop(i + 1)
+            if i > 0:
+                i -= 1
+        else:
+            i += 1
+    out = []
+    for total, count in blocks:
+        out.extend([total / count] * count)
+    return out
+
+
+def _anchor_half_width(obj, pred_val):
+    """Extract scalar CI half-width from an anchor prediction dict."""
+    ci_lo = obj.get("ci_low")
+    ci_hi = obj.get("ci_high")
+    lo_ok = ci_lo is not None and np.isfinite(ci_lo)
+    hi_ok = ci_hi is not None and np.isfinite(ci_hi)
+    if lo_ok and hi_ok:
+        return max(0.0, 0.5 * (float(ci_hi) - float(ci_lo)))
+    if lo_ok:
+        return max(0.0, float(pred_val) - float(ci_lo))
+    if hi_ok:
+        return max(0.0, float(ci_hi) - float(pred_val))
+    return 0.0
+
+
+def _pchip_monotone_slopes(ts, us):
+    """Fritsch-Carlson monotone piecewise cubic Hermite slopes for non-decreasing data."""
+    m = len(ts)
+    if m == 2:
+        slope = max(0.0, (us[1] - us[0]) / (ts[1] - ts[0]))
+        return [slope, slope]
+
+    hs = [ts[i + 1] - ts[i] for i in range(m - 1)]
+    deltas = [max(0.0, (us[i + 1] - us[i]) / hs[i]) for i in range(m - 1)]
+    d = [0.0] * m
+    for i in range(1, m - 1):
+        if deltas[i - 1] > 0.0 and deltas[i] > 0.0:
+            w1 = 2.0 * hs[i] + hs[i - 1]
+            w2 = hs[i] + 2.0 * hs[i - 1]
+            d[i] = (w1 + w2) / (w1 / deltas[i - 1] + w2 / deltas[i])
+
+    def _edge_slope(h0, h1, m0, m1):
+        if m0 <= 0.0:
+            return 0.0
+        val = ((2.0 * h0 + h1) * m0 - h0 * m1) / (h0 + h1)
+        # Keep strictly positive tail slope when segment rises so extrapolation approaches shelf smoothly
+        return float(np.clip(val, 0.25 * m0, 3.0 * m0))
+
+    d[0] = _edge_slope(hs[0], hs[1], deltas[0], deltas[1])
+    d[-1] = _edge_slope(hs[-1], hs[-2], deltas[-1], deltas[-2])
+
+    for i in range(m - 1):
+        if deltas[i] > 0.0:
+            alpha = d[i] / deltas[i]
+            beta = d[i + 1] / deltas[i]
+            norm2 = alpha * alpha + beta * beta
+            if norm2 > 9.0:
+                tau = 3.0 / np.sqrt(norm2)
+                d[i] = tau * alpha * deltas[i]
+                d[i + 1] = tau * beta * deltas[i]
+    return d
+
+
+def interpolate_charpy_dbtt(predictions, temperature, direction="TR"):
+    """Predict Charpy V-notch impact energy at any stated test temperature via a DBTT curve.
+
+    - Direct model anchor temperatures (0, -20, -40 C) return the direct prediction dict
+      (`Impact_0C`, `Impact_m20C`, `Impact_m40C`) when present and finite.
+    - Other temperatures require at least 2 finite anchor predictions; physical monotonicity
+      (E(-40) <= E(-20) <= E(0)) is enforced via PAVA and evaluated on a smooth monotone
+      tanh-logit PCHIP transition curve bounded by [5.0 J, 1.15 * E(0)].
+    - Returns None when `predictions` is empty or lacks sufficient finite anchors so
+      `evaluate_mechanical` preserves `key: None` / `NOT_VERIFIABLE` for empty probes.
+    """
+    _ = direction  # accepted for API symmetry across TR/LG checks
+    if not predictions:
+        return None
+    try:
+        t = float(temperature)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(t):
+        return None
+
+    temp_round = int(round(t))
+    if abs(t - temp_round) < 1e-9 and temp_round in CHARPY_DIRECT_MAP:
+        direct_key = CHARPY_DIRECT_MAP[temp_round]
+        obj = predictions.get(direct_key)
+        if obj and np.isfinite(obj.get("pred", np.nan)):
+            return obj
+        return None
+
+    anchors = []
+    for t_anchor, key in CHARPY_ANCHORS:
+        obj = predictions.get(key)
+        if not obj:
+            continue
+        raw_pred = obj.get("pred", np.nan)
+        if not np.isfinite(raw_pred):
+            continue
+        p_val = float(raw_pred)
+        hw = _anchor_half_width(obj, p_val)
+        anchors.append((t_anchor, p_val, hw))
+
+    if len(anchors) < 2:
+        return None
+
+    anchor_ts = [a[0] for a in anchors]
+    anchor_hws = [a[2] for a in anchors]
+    mono = [max(CHARPY_LOWER_SHELF_J, v) for v in _pava_nondecreasing([a[1] for a in anchors])]
+
+    e0_ref = dict(zip(anchor_ts, mono)).get(0.0, mono[-1])
+    upper_shelf = max(CHARPY_LOWER_SHELF_J, CHARPY_UPPER_SHELF_FACTOR * e0_ref)
+
+    if mono[-1] - mono[0] <= 1e-9:
+        pred = float(np.clip(mono[0], CHARPY_LOWER_SHELF_J, upper_shelf))
+    else:
+        # Map monotonized energies through inverse tanh using a 0 J asymptote so
+        # values right on the 5.0 J shelf stay well away from the atanh(-1) pole.
+        scale = max(upper_shelf, CHARPY_LOWER_SHELF_J + 1e-6)
+        us = [
+            float(np.arctanh(np.clip(2.0 * (e / scale) - 1.0, -0.999999, 0.999999)))
+            for e in mono
+        ]
+        slopes = _pchip_monotone_slopes(anchor_ts, us)
+        if t <= anchor_ts[0]:
+            ut = us[0] + slopes[0] * (t - anchor_ts[0])
+        elif t >= anchor_ts[-1]:
+            ut = us[-1] + slopes[-1] * (t - anchor_ts[-1])
+        else:
+            idx = next(i for i in range(len(anchor_ts) - 1) if anchor_ts[i] <= t <= anchor_ts[i + 1])
+            hi = anchor_ts[idx + 1] - anchor_ts[idx]
+            s = (t - anchor_ts[idx]) / hi
+            s2 = s * s
+            s3 = s2 * s
+            ut = (
+                (2.0 * s3 - 3.0 * s2 + 1.0) * us[idx]
+                + (s3 - 2.0 * s2 + s) * hi * slopes[idx]
+                + (-2.0 * s3 + 3.0 * s2) * us[idx + 1]
+                + (s3 - s2) * hi * slopes[idx + 1]
+            )
+        raw_curve = scale * 0.5 * (1.0 + float(np.tanh(ut)))
+        pred = float(np.clip(raw_curve, CHARPY_LOWER_SHELF_J, upper_shelf))
+
+    hw = float(np.interp(t, anchor_ts, anchor_hws))
+    in_domain = -40.0 <= t <= 0.0
+    if not in_domain:
+        hw *= CHARPY_EXTRAP_CI_FACTOR
+
+    return {
+        "pred": pred,
+        "ci_low": float(pred - hw),
+        "ci_high": float(pred + hw),
+        "key": "DBTT_interp",
+        "note": "DBTT curve interpolation" if in_domain else "DBTT curve extrapolation",
+    }
+
 
 def parse_limit(val):
     """Extract numeric limit and any footnote note from strings like '250A', '1.35K', '-'."""
@@ -323,6 +496,7 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
     - MARGINAL_RISK: predicted mean satisfies limit, but 95% CI dips below/above limit
     - NON_COMPLIANT: predicted mean violates limit
     """
+    predictions = predictions or {}
     checks = []
     pass_count = 0
     risk_count = 0
@@ -536,11 +710,12 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
             "note": f"Footnote [{el_note}]" if el_note else "",
         })
 
-    # 4. Impact toughness (Plate route only). The workbook states limits at eleven
-    # temperatures; the models cover 0, -20 and -40 C. Everything else is reported
-    # as NOT_VERIFIABLE rather than silently passing.
+    # 4. Impact toughness (Plate route only). The workbook states limits across 18 TR/LG
+    # columns at temperatures spanning +20 C to -50 C; the direct models cover 0, -20 and
+    # -40 C, and other temperatures are evaluated via DBTT transition curve interpolation /
+    # extrapolation whenever at least 2 finite anchor predictions exist. When predictions is
+    # empty ({}), non-anchor temperatures stay NOT_VERIFIABLE with key=None.
     if mill == "Plate":
-        impact_models = {0: "Impact_0C", -20: "Impact_m20C", -40: "Impact_m40C"}
         pattern = re.compile(r"^Impact ([+-]?\d+) \((TR|LG)\) \[J\]$")
         stated = {}
         for col in row.index:
@@ -557,73 +732,82 @@ def evaluate_mechanical(row, predictions, mill, rolling_type="AR"):
 
         for temperature in sorted(stated, reverse=True):
             imp_min, imp_note, direction = stated[temperature]
-            imp_key = impact_models.get(temperature)
+            imp_key = CHARPY_DIRECT_MAP.get(temperature)
             imp_label = f"Charpy {temperature:+d} °C" if temperature else "Charpy 0 °C"
             if imp_key is None:
-                unverifiable_count += 1
-                checks.append({
-                    "property": imp_label,
-                    "key": None,
-                    "unit": "J",
-                    "req_label": f"≥ {imp_min:.0f} J",
-                    "limit_min": imp_min,
-                    "limit_max": None,
-                    "pred": None,
-                    "ci_low": None,
-                    "ci_high": None,
-                    "margin": None,
-                    "verdict": "NOT_VERIFIABLE",
-                    "note": "no impact model at this temperature",
-                })
-                continue
-
-            imp_pred_obj = predictions.get(imp_key, {})
-            if not (imp_pred_obj and np.isfinite(imp_pred_obj.get("pred", np.nan))):
-                unverifiable_count += 1
-                checks.append({
-                    "property": imp_label,
-                    "key": imp_key,
-                    "unit": "J",
-                    "req_label": f"≥ {imp_min:.0f} J",
-                    "limit_min": imp_min,
-                    "limit_max": None,
-                    "pred": None,
-                    "ci_low": None,
-                    "ci_high": None,
-                    "margin": None,
-                    "verdict": "NOT_VERIFIABLE",
-                    "note": "prediction unavailable for this target",
-                })
+                imp_pred_obj = interpolate_charpy_dbtt(predictions, temperature, direction=direction)
+                if not (imp_pred_obj and np.isfinite(imp_pred_obj.get("pred", np.nan))):
+                    unverifiable_count += 1
+                    checks.append({
+                        "property": imp_label,
+                        "key": None,
+                        "unit": "J",
+                        "req_label": f"≥ {imp_min:.0f} J",
+                        "limit_min": imp_min,
+                        "limit_max": None,
+                        "pred": None,
+                        "ci_low": None,
+                        "ci_high": None,
+                        "margin": None,
+                        "verdict": "NOT_VERIFIABLE",
+                        "note": "no impact model at this temperature",
+                    })
+                    continue
+                eff_key = imp_pred_obj.get("key", "DBTT_interp")
+                note_parts = [p for p in (imp_pred_obj.get("note", ""),
+                                          f"Footnote [{imp_note}]" if imp_note else "") if p]
+                note_str = " · ".join(note_parts)
             else:
-                pred = imp_pred_obj["pred"]
-                ci_low = imp_pred_obj.get("ci_low", pred)
-                ci_high = imp_pred_obj.get("ci_high", pred)
-                margin = pred - imp_min
+                imp_pred_obj = predictions.get(imp_key, {})
+                if not (imp_pred_obj and np.isfinite(imp_pred_obj.get("pred", np.nan))):
+                    unverifiable_count += 1
+                    checks.append({
+                        "property": imp_label,
+                        "key": imp_key,
+                        "unit": "J",
+                        "req_label": f"≥ {imp_min:.0f} J",
+                        "limit_min": imp_min,
+                        "limit_max": None,
+                        "pred": None,
+                        "ci_low": None,
+                        "ci_high": None,
+                        "margin": None,
+                        "verdict": "NOT_VERIFIABLE",
+                        "note": "prediction unavailable for this target",
+                    })
+                    continue
+                eff_key = imp_key
+                note_str = f"Footnote [{imp_note}]" if imp_note else ""
 
-                if pred < imp_min:
-                    verdict = "NON_COMPLIANT"
-                    fail_count += 1
-                elif ci_low < imp_min:
-                    verdict = "MARGINAL_RISK"
-                    risk_count += 1
-                else:
-                    verdict = "COMPLIANT"
-                    pass_count += 1
+            pred = imp_pred_obj["pred"]
+            ci_low = imp_pred_obj.get("ci_low", pred)
+            ci_high = imp_pred_obj.get("ci_high", pred)
+            margin = pred - imp_min
 
-                checks.append({
-                    "property": f"{imp_label} ({direction})",
-                    "key": imp_key,
-                    "unit": "J",
-                    "req_label": f"≥ {imp_min:.0f} J",
-                    "limit_min": imp_min,
-                    "limit_max": None,
-                    "pred": pred,
-                    "ci_low": ci_low,
-                    "ci_high": ci_high,
-                    "margin": margin,
-                    "verdict": verdict,
-                    "note": f"Footnote [{imp_note}]" if imp_note else "",
-                })
+            if pred < imp_min:
+                verdict = "NON_COMPLIANT"
+                fail_count += 1
+            elif ci_low < imp_min:
+                verdict = "MARGINAL_RISK"
+                risk_count += 1
+            else:
+                verdict = "COMPLIANT"
+                pass_count += 1
+
+            checks.append({
+                "property": f"{imp_label} ({direction})",
+                "key": eff_key,
+                "unit": "J",
+                "req_label": f"≥ {imp_min:.0f} J",
+                "limit_min": imp_min,
+                "limit_max": None,
+                "pred": pred,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "margin": margin,
+                "verdict": verdict,
+                "note": note_str,
+            })
 
     if fail_count > 0:
         overall_status = "NON_COMPLIANT"
